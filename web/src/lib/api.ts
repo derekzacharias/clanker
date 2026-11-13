@@ -548,6 +548,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch (err) {
     throw new ApiError(0, "network_error", "Cannot reach the Clanker Guard API. Is `clanker vuln serve` running?");
   }
+  if (res.status === 401) {
+    window.dispatchEvent(new CustomEvent("guard:unauthorized"));
+  }
   if (!res.ok) {
     let code = "http_error";
     let message = `${res.status} ${res.statusText}`;

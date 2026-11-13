@@ -167,7 +167,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 
-		if strings.HasPrefix(r.URL.Path, "/api/") && s.opts.Token != "" {
+		// Liveness is unauthenticated on purpose: the UI probes it to detect
+		// "token required" before it has a token. It exposes no data.
+		needsAuth := strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/health"
+		if needsAuth && s.opts.Token != "" {
 			if r.Header.Get("X-Guard-Token") != s.opts.Token {
 				writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid X-Guard-Token")
 				return

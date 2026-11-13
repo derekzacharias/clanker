@@ -19,6 +19,8 @@ import { applyTheme, resolveInitialTheme, type Theme } from "../lib/theme";
 import { cn } from "../lib/cn";
 import { Button } from "./ui/Button";
 import { AskGuard } from "./AskGuard";
+import { AuthGate } from "./AuthGate";
+import { ApiError, api, getToken } from "../lib/api";
 
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -35,6 +37,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [mobileNav, setMobileNav] = useState(false);
   const [askOpen, setAskOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [authNeeded, setAuthNeeded] = useState(false);
+  const [authVersion, setAuthVersion] = useState(0);
 
   useEffect(() => {
     applyTheme(theme);
@@ -43,6 +47,32 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     setMobileNav(false);
   }, [pathname]);
+
+  // Detect "token required" up front and react to any 401 from a data call.
+  useEffect(() => {
+    let cancelled = false;
+    const onUnauthorized = () => setAuthNeeded(true);
+    window.addEventListener("guard:unauthorized", onUnauthorized);
+    // Probe an authenticated endpoint: a 401 means the server wants a token.
+    api
+      .meta()
+      .then(() => {
+        if (!cancelled) setAuthNeeded(false);
+      })
+      .catch((err: unknown) => {
+        // ApiError 401 already dispatched the event; other failures are shown by
+        // the pages themselves.
+        if (!cancelled && !(err instanceof ApiError && err.status === 401)) return;
+      });
+    return () => {
+      cancelled = true;
+      window.removeEventListener("guard:unauthorized", onUnauthorized);
+    };
+  }, [authVersion]);
+
+  useEffect(() => {
+    if (getToken() && authNeeded) setAuthNeeded(false);
+  }, [authNeeded]);
 
   function submitSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -182,11 +212,21 @@ export function AppShell({ children }: { children: ReactNode }) {
         </header>
 
         <main id="main" className="mx-auto w-full max-w-[100rem] px-3 py-5 sm:px-5">
-          {children}
+          {/* keyed so pages refetch after unlocking */}
+          <div key={authVersion}>{children}</div>
         </main>
       </div>
 
       <AskGuard open={askOpen} onOpenChange={setAskOpen} />
+
+      {authNeeded ? (
+        <AuthGate
+          onAuthenticated={() => {
+            setAuthNeeded(false);
+            setAuthVersion((v) => v + 1);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
