@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bgdnvk/clanker/internal/vuln/api"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
@@ -48,6 +49,7 @@ what was and was not covered.`,
 		newVulnAskCmd(),
 		newVulnScopeCmd(),
 		newVulnAgentCmd(),
+		newVulnServeCmd(),
 	)
 	return vuln
 }
@@ -424,4 +426,61 @@ The agent installs no service and no scheduled task by default. Uninstall:
 Note: this build does not publish release artifacts yet; build them with
 scripts/build-agent-release.sh and host them under your own release base URL.
 `
+}
+
+func newVulnServeCmd() *cobra.Command {
+	var (
+		common      vulnCommonFlags
+		listen      string
+		webDir      string
+		releaseBase string
+	)
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Serve the Clanker Guard web interface and JSON API",
+		Long: `Serve the Clanker Guard web UI and API.
+
+Binds to loopback by default. Binding to any other address requires a token
+(CLANKER_GUARD_TOKEN), which the UI sends as the X-Guard-Token header, because
+the API can start scans.
+
+The web assets are served from --web-dir (default web/dist). Build them once:
+
+  cd web && npm install && npm run build`,
+		RunE: func(c *cobra.Command, _ []string) error {
+			if releaseBase == "" {
+				releaseBase = os.Getenv("CLANKER_GUARD_RELEASE_BASE")
+			}
+			srv, err := api.New(api.Options{
+				CachePath:   common.path(),
+				WebDir:      webDir,
+				ToolVersion: Version,
+				Token:       os.Getenv("CLANKER_GUARD_TOKEN"),
+				ReleaseBase: releaseBase,
+			})
+			if err != nil {
+				return err
+			}
+			defer srv.Close()
+			fmt.Fprintf(os.Stderr, "clanker vuln serve → http://%s\n", listen)
+			fmt.Fprintf(os.Stderr, "  cache:   %s\n", common.path())
+			fmt.Fprintf(os.Stderr, "  web dir: %s\n", valueOrDash(webDir))
+			if os.Getenv("CLANKER_GUARD_TOKEN") != "" {
+				fmt.Fprintln(os.Stderr, "  auth:    X-Guard-Token required (CLANKER_GUARD_TOKEN is set)")
+			}
+			return srv.Listen(listen)
+		},
+	}
+	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8787", "address to listen on (non-loopback requires CLANKER_GUARD_TOKEN)")
+	cmd.Flags().StringVar(&webDir, "web-dir", "web/dist", "directory containing the built web UI")
+	cmd.Flags().StringVar(&releaseBase, "release-base", "", "published agent artifact base URL (or CLANKER_GUARD_RELEASE_BASE)")
+	common.register(cmd)
+	return cmd
+}
+
+func valueOrDash(s string) string {
+	if s == "" {
+		return "(none: API only)"
+	}
+	return s
 }

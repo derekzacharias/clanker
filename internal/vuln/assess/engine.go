@@ -36,6 +36,9 @@ type Engine struct {
 	Now func() time.Time
 	// Weights tunes the risk model.
 	Weights RiskWeights
+	// Progress reports pipeline stages to a caller (CLI/HTTP). It is optional and
+	// must be cheap: it is called from the scan goroutine.
+	Progress func(stage, detail string)
 
 	feedErrors []string
 	stats      Stats
@@ -60,6 +63,12 @@ type Stats struct {
 type Result struct {
 	Findings []model.Finding
 	Stats    Stats
+}
+
+func (e *Engine) progress(stage, detail string) {
+	if e.Progress != nil {
+		e.Progress(stage, detail)
+	}
 }
 
 func (e *Engine) now() time.Time {
@@ -103,6 +112,7 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 		candidates = append(candidates, p)
 	}
 	e.stats.PackagesConsidered = len(candidates)
+	e.progress("inventory", fmt.Sprintf("%d packages to correlate", len(candidates)))
 
 	// 1) candidate discovery + detail retrieval
 	advisoriesByPackage := map[string][]intel.Advisory{}
@@ -131,6 +141,8 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 			}
 		}
 	}
+
+	e.progress("intelligence", fmt.Sprintf("%d advisories fetched, %d from cache", e.stats.AdvisoriesFetched, e.stats.AdvisoriesCached))
 
 	// 3) match
 	var findings []model.Finding
@@ -169,6 +181,8 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 		}
 	}
 
+	e.progress("matching", fmt.Sprintf("%d matched records", len(findings)))
+
 	// 4) collapse advisories that describe the same vulnerability
 	findings = dedupeFindings(findings)
 
@@ -177,6 +191,7 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 		e.enrich(ctx, &findings[i])
 		e.score(&findings[i])
 	}
+	e.progress("enrichment", fmt.Sprintf("%d findings scored", len(findings)))
 	sort.SliceStable(findings, func(i, j int) bool {
 		if findings[i].RiskScore != findings[j].RiskScore {
 			return findings[i].RiskScore > findings[j].RiskScore

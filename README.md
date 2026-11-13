@@ -20,6 +20,19 @@ Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)
 
 Homebrew tap: [clankercloud/homebrew-tap](https://github.com/clankercloud/homebrew-tap)
 
+### Web interface
+
+```bash
+./bin/clanker vuln serve --listen 127.0.0.1:8787 --web-dir web/dist
+```
+
+A React/TypeScript UI over the same local data: security overview, asset
+inventory, vulnerability triage with evidence and confidence, guided scanning
+with real progress, reports with JSON/Markdown/SARIF/HTML export, endpoint agent
+installers, and a deterministic "Ask Guard" panel. See
+[docs/UI.md](docs/UI.md) for the design system, accessibility notes and the API
+contract. Build the assets once with `cd web && npm ci && npm run build`.
+
 ## Vulnerability assessment (Clanker Guard)
 
 `clanker vuln` is a separate, evidence-based vulnerability assessment subsystem:

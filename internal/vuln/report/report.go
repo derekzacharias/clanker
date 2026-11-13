@@ -189,6 +189,11 @@ func computeDelta(prev *model.RunRecord, findings []model.Finding) *model.Delta 
 	return d
 }
 
+// FindingID returns the stable identity of a finding. It is used for history,
+// delta comparison and as the URL identifier in the HTTP API, so it must not
+// depend on report-local numbering.
+func FindingID(f model.Finding) string { return fingerprint(f) }
+
 // fingerprint is the stable identity used for history/delta comparison. It must
 // not include report-local data such as finding ids or timestamps.
 func fingerprint(f model.Finding) string {

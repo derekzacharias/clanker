@@ -64,6 +64,24 @@ CREATE TABLE IF NOT EXISTS sync_state (
   records     INTEGER NOT NULL DEFAULT 0,
   detail      TEXT
 );
+CREATE TABLE IF NOT EXISTS scan_jobs (
+  id           TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  host         TEXT,
+  started_at   TEXT NOT NULL,
+  finished_at  TEXT,
+  stage        TEXT,
+  stage_detail TEXT,
+  percent      INTEGER NOT NULL DEFAULT 0,
+  error        TEXT,
+  report_id    TEXT,
+  request      TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
   id          TEXT PRIMARY KEY,
   host        TEXT NOT NULL,

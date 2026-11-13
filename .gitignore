@@ -79,3 +79,5 @@ TODO.md
 PLANNING.md
 dist/
 clanker-guard-report.*
+web/node_modules/
+web/dist/

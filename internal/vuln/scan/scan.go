@@ -41,6 +41,12 @@ type Options struct {
 	AssetCriticality float64
 	// Collectors overrides the inventory collector set (tests, embedded use).
 	Collectors []inventory.Collector
+	// Progress receives pipeline stage updates (used by the HTTP API). It must
+	// not block: callers keep it cheap.
+	Progress func(Stage)
+	// SkipRender keeps the report out of the filesystem (the HTTP API serves the
+	// report from the history database instead).
+	SkipRender bool
 }
 
 // Result summarises what a run produced.
@@ -105,6 +111,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if len(collectors) == 0 {
 		collectors = inventory.DefaultCollectors()
 	}
+	opts.report(Stage{Name: "discovery", Percent: 5, Detail: "collecting installed software"})
 	runner := &inventory.Runner{Collectors: collectors}
 	inv, err := runner.Run(ctx, collectorOpts)
 	if err != nil {
@@ -116,10 +123,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if opts.Vendor == "" {
 		opts.Vendor = inv.Asset.DistroID
 	}
+	opts.report(Stage{Name: "discovery", Percent: 20, Detail: fmt.Sprintf("%d packages collected", len(inv.Packages))})
 
 	// --- assessment ----------------------------------------------------------
 	engine := &assess.Engine{
-		Host:               inv.Asset.Hostname,
+		Host: inv.Asset.Hostname,
+		Progress: func(stage, detail string) {
+			opts.report(Stage{Name: stage, Percent: stagePercent(stage), Detail: detail})
+		},
 		Store:              store,
 		Online:             !opts.Offline,
 		Vendor:             vendorName(opts.Vendor, inv.Asset.DistroID),
@@ -141,6 +152,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			incomplete = true
 		}
 	}
+
+	opts.report(Stage{Name: "report", Percent: 92, Detail: "assembling report"})
 
 	// --- metadata ------------------------------------------------------------
 	feedStates, _ := FeedStates(ctx, store)
@@ -191,16 +204,52 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	// --- render --------------------------------------------------------------
-	outPath, err := writeReport(opts, rep)
-	if err != nil {
-		return Result{Report: rep, Incomplete: incomplete}, err
+	outPath := ""
+	if !opts.SkipRender {
+		var err error
+		outPath, err = writeReport(opts, rep)
+		if err != nil {
+			return Result{Report: rep, Incomplete: incomplete}, err
+		}
 	}
+	opts.report(Stage{Name: "done", Percent: 100, Detail: fmt.Sprintf("%d findings", len(rep.Findings))})
 	return Result{
 		Report:     rep,
 		OutputPath: outPath,
 		ExitCode:   report.ExitCode(rep, incomplete),
 		Incomplete: incomplete,
 	}, nil
+}
+
+// Stage is one progress update for a running assessment.
+type Stage struct {
+	Name    string `json:"stage"`
+	Percent int    `json:"percent"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+func (o *Options) report(st Stage) {
+	if o.Progress != nil {
+		o.Progress(st)
+	}
+}
+
+// stagePercent maps a pipeline stage to a coarse progress percentage. These are
+// deliberately coarse: a scan's duration is dominated by network calls, so a
+// precise percentage would be a fabricated number in the UI.
+func stagePercent(stage string) int {
+	switch stage {
+	case "inventory":
+		return 35
+	case "intelligence":
+		return 60
+	case "matching":
+		return 75
+	case "enrichment":
+		return 85
+	default:
+		return 50
+	}
 }
 
 func writeReport(opts Options, rep model.Report) (string, error) {
