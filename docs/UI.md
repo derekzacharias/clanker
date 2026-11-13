@@ -196,6 +196,15 @@ hardware.
 
 ---
 
+## 7b. Continuous improvement screens
+
+Finding details include an analyst review panel (five actions, structured
+false-positive reasons, verification result, history). Settings gains one
+secondary page, **Continuous improvement**, showing quality metrics with sample
+caveats, proposal cards with test results and approve/reject/deploy/rollback
+actions, the full fixture comparison, and the audit trail. The Overview shows a
+single line when proposals are waiting. Details: [IMPROVEMENT.md](IMPROVEMENT.md).
+
 ## 8. Deliberate gaps
 
 1. **No fake data in the app.** There is no seeded demo mode; screenshots and

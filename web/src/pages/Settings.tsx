@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, getToken, setToken, type FeedResponse } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { useQueryParam } from "../lib/router";
+import Improvement from "./Improvement";
 import { formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -26,6 +27,7 @@ export default function Settings() {
             ["general", "General"],
             ["intelligence", "Intelligence"],
             ["agents", "Endpoint agents"],
+            ["improvement", "Continuous improvement"],
             ["access", "Access"],
           ].map(([value, label]) => (
             <Tabs.Trigger
@@ -46,6 +48,9 @@ export default function Settings() {
         </Tabs.Content>
         <Tabs.Content value="agents">
           <AgentsTab />
+        </Tabs.Content>
+        <Tabs.Content value="improvement">
+          <Improvement />
         </Tabs.Content>
         <Tabs.Content value="access">
           <AccessTab />

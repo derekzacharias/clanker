@@ -36,6 +36,8 @@ type BuildOptions struct {
 	Coverage    model.Coverage
 	Previous    *model.RunRecord
 	ReportID    string
+	// DetectionPolicy notes which non-default detection rules were in force.
+	DetectionPolicy []string
 }
 
 // Build assembles the report, computing the summary and run delta.
@@ -64,19 +66,20 @@ func Build(opts BuildOptions) model.Report {
 		SchemaVersion: SchemaVersion,
 		ReportID:      opts.ReportID,
 		Metadata: model.ScanMetadata{
-			ToolVersion:   opts.ToolVersion,
-			StartedAt:     opts.Started,
-			FinishedAt:    finishedPtr,
-			Mode:          opts.Mode,
-			Host:          opts.Inventory.Asset.Hostname,
-			Offline:       opts.Offline,
-			FeedFreshness: opts.FeedStates,
-			Permissions:   permissionsNote(),
-			Errors:        opts.Errors,
-			SkippedChecks: opts.Inventory.Skipped,
-			Coverage:      coverage,
-			Scope:         opts.Scope,
-			Policy:        opts.Policy,
+			ToolVersion:     opts.ToolVersion,
+			StartedAt:       opts.Started,
+			FinishedAt:      finishedPtr,
+			Mode:            opts.Mode,
+			Host:            opts.Inventory.Asset.Hostname,
+			Offline:         opts.Offline,
+			FeedFreshness:   opts.FeedStates,
+			Permissions:     permissionsNote(),
+			Errors:          opts.Errors,
+			SkippedChecks:   opts.Inventory.Skipped,
+			Coverage:        coverage,
+			Scope:           opts.Scope,
+			Policy:          opts.Policy,
+			DetectionPolicy: opts.DetectionPolicy,
 		},
 		Inventory: opts.Inventory,
 		Findings:  opts.Findings,
@@ -192,16 +195,11 @@ func computeDelta(prev *model.RunRecord, findings []model.Finding) *model.Delta 
 // FindingID returns the stable identity of a finding. It is used for history,
 // delta comparison and as the URL identifier in the HTTP API, so it must not
 // depend on report-local numbering.
-func FindingID(f model.Finding) string { return fingerprint(f) }
+func FindingID(f model.Finding) string { return model.FindingFingerprint(f) }
 
-// fingerprint is the stable identity used for history/delta comparison. It must
-// not include report-local data such as finding ids or timestamps.
-func fingerprint(f model.Finding) string {
-	h := sha256.Sum256([]byte(strings.Join([]string{
-		strings.ToLower(f.Ecosystem), strings.ToLower(f.Product), f.InstalledVersion, f.VulnerabilityID,
-	}, "\x00")))
-	return hex.EncodeToString(h[:8])
-}
+// fingerprint is kept for internal use; identity lives in the model so the API,
+// history and CLI all agree.
+func fingerprint(f model.Finding) string { return model.FindingFingerprint(f) }
 
 // FindingFingerprints returns the stable fingerprints for a finding set; the
 // run history stores these so deltas survive re-numbering.

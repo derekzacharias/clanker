@@ -395,6 +395,14 @@ injection, scan execution, and refusal to install a tampered artifact
 
 ---
 
+## 11b. Continuous improvement
+
+Analyst reviews, evidence-based verification, detection-policy proposals,
+fixture evaluation, approval/rollback and quality metrics live in
+`internal/vuln/improve` and are documented in [IMPROVEMENT.md](IMPROVEMENT.md).
+Deployed rules are consumed by this scanner through `improve.ActivePolicy`, and
+reports record the non-default decisions in `metadata.detection_policy`.
+
 ## 12. Roadmap and known gaps
 
 Implemented (Phase 1 + much of Phase 2):

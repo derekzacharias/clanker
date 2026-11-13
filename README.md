@@ -20,6 +20,23 @@ Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)
 
 Homebrew tap: [clankercloud/homebrew-tap](https://github.com/clankercloud/homebrew-tap)
 
+### Continuous improvement
+
+Analyst reviews feed a controlled improvement loop: reviews are verified against
+advisory evidence, recurring limitations become proposals backed by test
+fixtures, and a proposal is deployed only after a human approves it and its tests
+pass. Changes are versioned detection rules with a one-command rollback — the
+scanner never rewrites its own code.
+
+```bash
+clanker vuln feedback <finding-id> --verdict false_positive --reason vendor_patch_installed
+clanker vuln improve list
+clanker vuln improve approve IMP-0001 --actor you
+clanker vuln improve deploy  IMP-0001 --actor you
+```
+
+See [docs/IMPROVEMENT.md](docs/IMPROVEMENT.md).
+
 ### Web interface
 
 ```bash

@@ -75,6 +75,13 @@ func isDistroEcosystem(eco string) bool {
 //  4. Explicit introduced/fixed ranges are authoritative when present.
 //  5. Anything unresolved becomes needs_investigation, never "affected".
 func Match(pkg model.Package, adv intel.Advisory) (Outcome, bool) {
+	return MatchWithPolicy(pkg, adv, DefaultPolicy())
+}
+
+// MatchWithPolicy applies a detection policy. The improvement engine evaluates
+// candidate policies through this entry point, so evaluation and production
+// scans share exactly one matcher.
+func MatchWithPolicy(pkg model.Package, adv intel.Advisory, pol Policy) (Outcome, bool) {
 	var best Outcome
 	matched := false
 	for _, aff := range adv.Affected {
@@ -86,7 +93,7 @@ func Match(pkg model.Package, adv intel.Advisory) (Outcome, bool) {
 			}
 			continue
 		}
-		out, ok := evaluateEntry(pkg, adv, aff)
+		out, ok := evaluateEntry(pkg, adv, aff, pol)
 		if !ok {
 			continue
 		}
@@ -123,14 +130,33 @@ func betterOutcome(a, b Outcome) bool {
 	return rank(a) > rank(b)
 }
 
-func evaluateEntry(pkg model.Package, adv intel.Advisory, aff intel.Affected) (Outcome, bool) {
+func evaluateEntry(pkg model.Package, adv intel.Advisory, aff intel.Affected, pol Policy) (Outcome, bool) {
 	distro := IsDistroAdvisory(adv)
 	out := Outcome{DistroAdvisory: distro, MatchedEcosystem: aff.Ecosystem}
+
+	// Snap transition packages carry no application code: the version is a
+	// pointer to the snap. When the policy says so, never resolve them from
+	// vendor version data.
+	snapStub := pol.SnapStubUnresolved && isSnapStub(pkg.Version)
 
 	// --- binary-view matching (Ubuntu/Pro records) ---------------------------
 	if len(aff.Binaries) > 0 {
 		if bv, ok := findBinary(aff.Binaries, pkg.Name); ok {
 			out.VendorAdvisory = vendorAdvisoryFor(adv, aff.Ecosystem, "")
+			if snapStub {
+				out.Applicability = model.ApplicabilityNeedsInvestigation
+				out.Confidence = model.ConfidenceLow
+				out.PatchStatus = model.PatchUnknown
+				out.Explanation = fmt.Sprintf(
+					"Installed %s is a snap transition package; the listed version identifies the snap pointer, not the application build, so vendor version data cannot establish applicability.",
+					pkg.Version)
+				out.Evidence = append(out.Evidence, model.Evidence{
+					Kind: "snap_stub", Source: "detection policy",
+					Detail: "package version carries a snap transition marker; the vulnerable code lives in the snap",
+				})
+				out.Raise = append(out.Raise, "the snap's own version is inspected and mapped to the advisory")
+				return out, true
+			}
 			cmp, err := version.Compare(pkg.Ecosystem, pkg.Version, bv)
 			if err != nil {
 				return unresolved(out, adv, fmt.Sprintf(
@@ -149,8 +175,21 @@ func evaluateEntry(pkg model.Package, adv intel.Advisory, aff intel.Affected) (O
 						URL:    advURL(adv)})
 				out.PatchStatus = model.PatchVulnerable
 			case cmp > 0:
-				if marker := foreignBuildMarker(pkg.Ecosystem, pkg.Version); marker != "" {
+				if snapStub {
 					out.Applicability = model.ApplicabilityNeedsInvestigation
+					out.Confidence = model.ConfidenceLow
+					out.PatchStatus = model.PatchUnknown
+					out.Explanation = fmt.Sprintf(
+						"Installed %s is a snap transition package; vendor version enumeration does not describe the application it points at.",
+						pkg.Version)
+					out.Evidence = append(out.Evidence, model.Evidence{
+						Kind: "snap_stub", Source: "detection policy",
+						Detail: "package version carries a snap transition marker",
+					})
+					return out, true
+				}
+				if marker := foreignBuildMarker(pkg.Ecosystem, pkg.Version); marker != "" {
+					out.Applicability = model.Applicability(pol.ForeignBuildOutcome)
 					out.Confidence = model.ConfidenceLow
 					out.PatchStatus = model.PatchUnknown
 					out.Explanation = fmt.Sprintf(
@@ -163,7 +202,7 @@ func evaluateEntry(pkg model.Package, adv intel.Advisory, aff intel.Affected) (O
 					out.Raise = append(out.Raise, "the third-party packager publishes a patched build")
 					return out, true
 				}
-				out.Applicability = model.ApplicabilityNotAffected
+				out.Applicability = unlistedOutcome(pol)
 				out.Confidence = model.ConfidenceMedium
 				out.Explanation = fmt.Sprintf(
 					"Installed %s (%s) is newer than the last build %s enumerates as affected; the vendor appears to have shipped a fixed build. No explicit fixed version is published in this advisory.",
@@ -194,6 +233,19 @@ func evaluateEntry(pkg model.Package, adv intel.Advisory, aff intel.Affected) (O
 		return Outcome{}, false
 	}
 	out.VendorAdvisory = vendorAdvisoryFor(adv, aff.Ecosystem, "")
+	if snapStub {
+		out.Applicability = model.ApplicabilityNeedsInvestigation
+		out.Confidence = model.ConfidenceLow
+		out.PatchStatus = model.PatchUnknown
+		out.Explanation = fmt.Sprintf(
+			"Installed %s is a snap transition package; the advisory's version data describes the application, not the snap pointer.",
+			pkg.Version)
+		out.Evidence = append(out.Evidence, model.Evidence{
+			Kind: "snap_stub", Source: "detection policy",
+			Detail: "package version carries a snap transition marker",
+		})
+		return out, true
+	}
 
 	// 1) authoritative ranges
 	if fixed, verdict, reason, ok := evaluateRanges(pkg, aff, adv); ok {
@@ -227,7 +279,7 @@ func evaluateEntry(pkg model.Package, adv intel.Advisory, aff intel.Affected) (O
 
 	// 2) enumerated affected versions (Ubuntu-style, no fixed boundary)
 	if len(aff.Versions) > 0 {
-		outcome := evaluateVersionEnumeration(pkg, aff, adv)
+		outcome := evaluateVersionEnumeration(pkg, aff, adv, pol)
 		return outcome, true
 	}
 
@@ -349,7 +401,7 @@ func rangeSuffix(introduced, fixed string) string {
 
 // evaluateVersionEnumeration handles advisories that list affected versions but
 // publish no fixed boundary (Ubuntu OSV exports work this way).
-func evaluateVersionEnumeration(pkg model.Package, aff intel.Affected, adv intel.Advisory) Outcome {
+func evaluateVersionEnumeration(pkg model.Package, aff intel.Affected, adv intel.Advisory, pol Policy) Outcome {
 	out := Outcome{
 		DistroAdvisory:   IsDistroAdvisory(adv),
 		MatchedEcosystem: aff.Ecosystem,
@@ -385,7 +437,7 @@ func evaluateVersionEnumeration(pkg model.Package, aff intel.Affected, adv intel
 	}
 	if cmpHi > 0 {
 		if marker := foreignBuildMarker(pkg.Ecosystem, pkg.Version); marker != "" {
-			out.Applicability = model.ApplicabilityNeedsInvestigation
+			out.Applicability = model.Applicability(pol.ForeignBuildOutcome)
 			out.Confidence = model.ConfidenceLow
 			out.PatchStatus = model.PatchUnknown
 			out.Explanation = fmt.Sprintf(
@@ -399,7 +451,7 @@ func evaluateVersionEnumeration(pkg model.Package, aff intel.Affected, adv intel
 			out.Raise = append(out.Raise, "the third-party packager confirms the build contains the upstream fix")
 			return out
 		}
-		out.Applicability = model.ApplicabilityNotAffected
+		out.Applicability = unlistedOutcome(pol)
 		out.Confidence = model.ConfidenceMedium
 		out.PatchStatus = model.PatchVendorFixed
 		out.Explanation = fmt.Sprintf(
@@ -484,6 +536,68 @@ func foreignBuildMarker(ecosystem, installed string) string {
 	}
 	return ""
 }
+
+// unlistedOutcome is the verdict for a build newer than every enumerated
+// affected version. "not_affected" is the shipped default; a rule may require
+// investigation instead when the enumeration is known to be incomplete.
+func unlistedOutcome(pol Policy) model.Applicability {
+	if pol.UnlistedBuildOutcome == string(model.ApplicabilityNeedsInvestigation) {
+		return model.ApplicabilityNeedsInvestigation
+	}
+	return model.ApplicabilityNotAffected
+}
+
+// Classify applies matching and the policy-level downgrades that shape the
+// reported verdict. Evaluation in the improvement engine and production scans
+// both go through this function so a test can never disagree with reality.
+func Classify(pkg model.Package, adv intel.Advisory, pol Policy) (Outcome, bool) {
+	out, ok := MatchWithPolicy(pkg, adv, pol)
+	if !ok {
+		return out, false
+	}
+	return applyBackportPolicy(pkg, out, pol), true
+}
+
+// applyBackportPolicy downgrades upstream-only advisory matches on distribution
+// builds. Distributions backport fixes without changing the upstream version, so
+// a bare upstream range match is not authoritative for a distro build.
+func applyBackportPolicy(pkg model.Package, out Outcome, pol Policy) Outcome {
+	if !pol.BackportDowngrade || out.DistroAdvisory || !isDistroEcosystem(pkg.Ecosystem) ||
+		!looksDistroVersion(pkg.Version) || out.Applicability != model.ApplicabilityConfirmed {
+		return out
+	}
+	switch pol.BackportOutcome {
+	case string(model.ApplicabilityNeedsInvestigation):
+		out.Applicability = model.ApplicabilityNeedsInvestigation
+		out.Confidence = model.ConfidenceLow
+	default:
+		out.Applicability = model.ApplicabilityProbable
+		out.Confidence = model.ConfidenceMedium
+	}
+	out.PatchStatus = model.PatchUnknown
+	out.Explanation += fmt.Sprintf(
+		" Downgraded: the installed build carries a distribution revision (%s) and distributions backport security fixes without changing the upstream version, so an upstream version range cannot establish applicability.",
+		distroRevision(pkg.Version))
+	out.Lower = append(out.Lower,
+		"the distribution security tracker confirms the installed build contains the fix")
+	out.Raise = append(out.Raise,
+		"the distribution vendor confirms the installed build is affected")
+	out.Evidence = append(out.Evidence, model.Evidence{
+		Kind:   "vendor_backport_caveat",
+		Source: "detection policy",
+		Detail: fmt.Sprintf("upstream range matched against distribution build %s; vendor patch status is unverified", pkg.Version),
+	})
+	return out
+}
+
+// IdentifyBuildMarker reports a third-party build marker for a version, or "".
+// Exported for the improvement engine so explanations share one implementation.
+func IdentifyBuildMarker(ecosystem, installed string) string {
+	return foreignBuildMarker(ecosystem, installed)
+}
+
+// IsSnapStub reports whether a version identifies a snap transition wrapper.
+func IsSnapStub(version string) bool { return isSnapStub(version) }
 
 // findBinary matches an installed package name against OSV binary entries.
 // Distribution binary names are sometimes suffixed (libssl3t64), so an exact

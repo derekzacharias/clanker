@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/vuln/assess"
+	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/inventory"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
@@ -126,8 +127,12 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	opts.report(Stage{Name: "discovery", Percent: 20, Detail: fmt.Sprintf("%d packages collected", len(inv.Packages))})
 
 	// --- assessment ----------------------------------------------------------
+	// Deployed improvement rules shape detection. A missing or broken rule set
+	// falls back to the shipped policy and records why.
+	detectionPolicy, ruleID, _, _ := improve.ActivePolicy(ctx, store)
 	engine := &assess.Engine{
-		Host: inv.Asset.Hostname,
+		Policy: detectionPolicy,
+		Host:   inv.Asset.Hostname,
 		Progress: func(stage, detail string) {
 			opts.report(Stage{Name: stage, Percent: stagePercent(stage), Detail: detail})
 		},
@@ -172,18 +177,19 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	rep := report.Build(report.BuildOptions{
-		ToolVersion: opts.ToolVersion,
-		Mode:        "local",
-		Inventory:   inv,
-		Findings:    res.Findings,
-		Started:     started,
-		Finished:    opts.Now(),
-		Offline:     opts.Offline,
-		FeedStates:  feedStates,
-		Errors:      errors,
-		Policy:      opts.Policy,
-		Coverage:    coverage,
-		Previous:    previous,
+		ToolVersion:     opts.ToolVersion,
+		Mode:            "local",
+		Inventory:       inv,
+		Findings:        res.Findings,
+		Started:         started,
+		Finished:        opts.Now(),
+		Offline:         opts.Offline,
+		FeedStates:      feedStates,
+		Errors:          errors,
+		Policy:          opts.Policy,
+		Coverage:        coverage,
+		Previous:        previous,
+		DetectionPolicy: policyNotesFor(engine.PolicyNotes(), ruleID),
 	})
 
 	// --- persist history -----------------------------------------------------
@@ -250,6 +256,15 @@ func stagePercent(stage string) int {
 	default:
 		return 50
 	}
+}
+
+// policyNotesFor records which detection decisions (and rule) shaped the run.
+func policyNotesFor(notes []string, ruleID string) []string {
+	out := append([]string(nil), notes...)
+	if ruleID != "" {
+		out = append(out, "deployed detection rule "+ruleID)
+	}
+	return out
 }
 
 func writeReport(opts Options, rep model.Report) (string, error) {

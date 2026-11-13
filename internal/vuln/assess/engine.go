@@ -36,6 +36,9 @@ type Engine struct {
 	Now func() time.Time
 	// Weights tunes the risk model.
 	Weights RiskWeights
+	// Policy holds the detection decisions in force. The zero value means the
+	// shipped defaults; see assess.ParsePolicy for rule-provided policies.
+	Policy Policy
 	// Progress reports pipeline stages to a caller (CLI/HTTP). It is optional and
 	// must be cheap: it is called from the scan goroutine.
 	Progress func(stage, detail string)
@@ -64,6 +67,19 @@ type Result struct {
 	Findings []model.Finding
 	Stats    Stats
 }
+
+// policy returns the effective detection policy. A zero policy (empty outcome
+// strings and no trusted vendors) means "shipped defaults".
+func (e *Engine) policy() Policy {
+	p := e.Policy
+	if p.BackportOutcome == "" && p.UnlistedBuildOutcome == "" && p.ForeignBuildOutcome == "" && len(p.TrustedVendors) == 0 {
+		return DefaultPolicy()
+	}
+	return p
+}
+
+// PolicyNotes exposes the non-default detection decisions for reporting.
+func (e *Engine) PolicyNotes() []string { return e.policy().Notes() }
 
 func (e *Engine) progress(stage, detail string) {
 	if e.Progress != nil {
@@ -153,7 +169,7 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 		}
 		matchedAny := false
 		for _, adv := range advs {
-			out, ok := Match(p, adv)
+			out, ok := Classify(p, adv, e.policy())
 			if !ok {
 				continue
 			}
@@ -200,6 +216,7 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 	})
 	for i := range findings {
 		findings[i].FindingID = fmt.Sprintf("FINDING-%04d", i+1)
+		findings[i].StableID = model.FindingStableID(e.Host, findings[i])
 	}
 
 	res.Findings = findings
@@ -366,30 +383,8 @@ func (e *Engine) findingFor(p model.Package, adv intel.Advisory, out Outcome) mo
 	}
 	f.LastChecked = &checked
 
-	// Vendor backport rule: an upstream-only advisory matched against a distro
-	// build. Distributions carry security patches without bumping the upstream
-	// version, so the strongest defensible state is "probable".
-	if !out.DistroAdvisory && isDistroEcosystem(p.Ecosystem) && looksDistroVersion(p.Version) &&
-		f.Affected == model.ApplicabilityConfirmed {
-		f.Affected = model.ApplicabilityProbable
-		f.Confidence = model.ConfidenceMedium
-		vendor := e.Vendor
-		if vendor == "" {
-			vendor = "the distribution vendor"
-		}
-		f.Explanation += fmt.Sprintf(
-			" Downgraded from confirmed: the installed build carries a %s revision, and %s backports security fixes without changing the upstream version, so an upstream version range cannot establish applicability.",
-			distroRevision(p.Version), vendor)
-		f.LowerConfidence = append(f.LowerConfidence,
-			fmt.Sprintf("%s advisory lists %s %s as affected", vendor, p.Name, p.Version))
-		f.RaiseConfidence = append(f.RaiseConfidence,
-			fmt.Sprintf("%s security tracker confirms the installed build contains the fix (backport verified)", vendor))
-		f.Evidence = append(f.Evidence, model.Evidence{
-			Kind:   "vendor_backport_caveat",
-			Source: vendor,
-			Detail: fmt.Sprintf("installed %s has a distribution revision; upstream range matching alone is not authoritative", p.Version),
-		})
-	}
+	// Vendor backport downgrades are applied by Classify (see
+	// applyBackportPolicy) so evaluation and production share one decision path.
 
 	f.Remediation = remediationFor(f, adv, out)
 	return f

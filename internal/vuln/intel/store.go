@@ -114,6 +114,11 @@ func OpenStore(path string) (*Store, error) {
 	return &Store{db: db, Path: path}, nil
 }
 
+// DB exposes the underlying handle for subsystems that own their own tables
+// (the improvement engine). Sharing one connection keeps SQLite writes
+// serialised across the whole process.
+func (s *Store) DB() *sql.DB { return s.db }
+
 // Close releases the database handle.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {

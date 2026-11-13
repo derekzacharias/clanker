@@ -5,7 +5,12 @@
 // advisory matching a version is not evidence of exploitability.
 package model
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+	"time"
+)
 
 // Applicability captures how strongly the evidence supports that an advisory
 // applies to the observed software. It is intentionally independent from
@@ -214,7 +219,9 @@ type VendorAdvisory struct {
 
 // Finding is one (package, vulnerability) pair with its evidence chain.
 type Finding struct {
-	FindingID        string           `json:"finding_id"`
+	FindingID string `json:"finding_id"`
+	// StableID is the cross-report identity (asset + package + version + CVE).
+	StableID         string           `json:"stable_id,omitempty"`
 	Asset            string           `json:"asset"`
 	Product          string           `json:"product"`
 	InstalledVersion string           `json:"installed_version"`
@@ -271,6 +278,9 @@ type ScanMetadata struct {
 	Coverage      Coverage       `json:"coverage"`
 	Scope         *Scope         `json:"scope,omitempty"`
 	Policy        Policy         `json:"policy"`
+	// DetectionPolicy lists non-default detection decisions that shaped the
+	// findings, so a report explains itself without external context.
+	DetectionPolicy []string `json:"detection_policy,omitempty"`
 }
 
 // Coverage states what the scan actually inspected. A completed scan with no
@@ -354,4 +364,23 @@ type RunRecord struct {
 	FindingCount int       `json:"finding_count"`
 	Actionable   int       `json:"actionable"`
 	KEVCount     int       `json:"kev_count"`
+}
+
+// ----------------------------------------------------------------- identity ---
+
+// FindingFingerprint is the stable, host-independent identity of a finding. It
+// is used for run history and delta comparison, so it must not depend on report
+// numbering or timestamps.
+func FindingFingerprint(f Finding) string {
+	h := sha256.Sum256([]byte(strings.Join([]string{
+		strings.ToLower(f.Ecosystem), strings.ToLower(f.Product), f.InstalledVersion, f.VulnerabilityID,
+	}, "\x00")))
+	return hex.EncodeToString(h[:8])
+}
+
+// FindingStableID is the identity used by the HTTP API and the CLI to address a
+// finding: the fingerprint plus the asset, so two hosts cannot collide.
+func FindingStableID(host string, f Finding) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(host) + "\x00" + FindingFingerprint(f)))
+	return hex.EncodeToString(sum[:8])
 }

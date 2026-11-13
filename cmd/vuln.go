@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bgdnvk/clanker/internal/vuln/api"
+	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
@@ -50,6 +51,9 @@ what was and was not covered.`,
 		newVulnScopeCmd(),
 		newVulnAgentCmd(),
 		newVulnServeCmd(),
+		newVulnFeedbackCmd(),
+		newVulnImproveCmd(),
+		newVulnQualityCmd(),
 	)
 	return vuln
 }
@@ -483,4 +487,362 @@ func valueOrDash(s string) string {
 		return "(none: API only)"
 	}
 	return s
+}
+
+// ---------------------------------------------------------------- feedback ---
+
+func newVulnFeedbackCmd() *cobra.Command {
+	var (
+		common  vulnCommonFlags
+		verdict string
+		reason  string
+		note    string
+		analyst string
+	)
+	cmd := &cobra.Command{
+		Use:   "feedback <finding-id>",
+		Short: "Record an analyst review for a finding",
+		Long: `Record an analyst review. A false-positive claim is verified against cached
+advisory data before it changes anything; when no evidence can decide it, the
+scanner classification is kept and the gap is recorded for the improvement loop.
+
+Finding ids are the stable ids shown in reports and the web interface.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			store, err := intel.OpenStore(common.path())
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			eng, err := improve.New(store)
+			if err != nil {
+				return err
+			}
+			ref, err := findFindingRef(ctx, store, args[0])
+			if err != nil {
+				return err
+			}
+			fb, err := eng.ApplyFeedback(ctx, improve.Feedback{
+				Finding:    ref,
+				Verdict:    improve.Verdict(verdict),
+				ReasonCode: improve.ReasonCode(reason),
+				ReasonText: note,
+				Analyst:    firstNonEmpty(analyst, os.Getenv("USER"), "cli"),
+			})
+			if err != nil {
+				return configError(err.Error())
+			}
+			fmt.Fprintf(os.Stderr, "recorded %s for %s (%s)\n", fb.Verdict, ref.Product, ref.CVE)
+			if fb.Verification != nil {
+				status := "inconclusive"
+				if fb.Verification.Supported {
+					status = "supported"
+				} else if fb.Verification.Confidence == "high" {
+					status = "contradicted"
+				}
+				fmt.Fprintf(os.Stderr, "verification: %s (confidence %s)\n", status, fb.Verification.Confidence)
+				fmt.Fprintf(os.Stderr, "  %s\n", fb.Verification.Explanation)
+				if fb.Verification.Changed {
+					fmt.Fprintf(os.Stderr, "classification: %s → %s\n", fb.Verification.Original, fb.Verification.Reassessed)
+				} else if fb.Verification.Supported {
+					fmt.Fprintf(os.Stderr, "classification unchanged (%s)\n", fb.Verification.Original)
+				}
+			}
+			if improvements, err := eng.Analyze(ctx); err == nil && len(improvements) > 0 {
+				for _, imp := range improvements {
+					for _, fid := range imp.AffectedFindings {
+						if fid == ref.ID {
+							fmt.Fprintf(os.Stderr, "improvement %s: %s [%s]\n", imp.ID, imp.Title, imp.Status)
+						}
+					}
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&verdict, "verdict", "false_positive", "confirmed | false_positive | needs_investigation | remediated | request_verification")
+	cmd.Flags().StringVar(&reason, "reason", "", "vendor_patch_installed | incorrect_identification | feature_not_enabled | advisory_not_applicable | other")
+	cmd.Flags().StringVar(&note, "note", "", "free-text note (stored as data)")
+	cmd.Flags().StringVar(&analyst, "analyst", "", "analyst name recorded in the audit trail")
+	common.register(cmd)
+	return cmd
+}
+
+// findFindingRef resolves a stable finding id against the stored reports.
+func findFindingRef(ctx context.Context, store *intel.Store, id string) (improve.FindingRef, error) {
+	hosts, err := store.LatestRunsPerHost(ctx)
+	if err != nil {
+		return improve.FindingRef{}, err
+	}
+	for _, run := range hosts {
+		payload, err := store.ReportByID(ctx, run.ID)
+		if err != nil {
+			continue
+		}
+		var rep model.Report
+		if err := json.Unmarshal(payload, &rep); err != nil {
+			continue
+		}
+		for _, f := range rep.Findings {
+			stable := f.StableID
+			if stable == "" {
+				stable = model.FindingStableID(rep.Metadata.Host, f)
+			}
+			if stable != id {
+				continue
+			}
+			return improve.FindingRef{
+				ID: stable, ReportID: rep.ReportID, Host: rep.Metadata.Host, CVE: f.VulnerabilityID,
+				AdvisoryID: f.AdvisoryID, Product: f.Product, Version: f.InstalledVersion,
+				Ecosystem: f.Ecosystem, Severity: f.Severity,
+				Applicability: string(f.Affected), Confidence: string(f.Confidence),
+				Explanation: f.Explanation,
+			}, nil
+		}
+	}
+	return improve.FindingRef{}, configError("finding " + id + " not found in stored reports; run `clanker vuln scan --local` first")
+}
+
+// ------------------------------------------------------------- improvements ---
+
+func newVulnImproveCmd() *cobra.Command {
+	var common vulnCommonFlags
+	cmd := &cobra.Command{
+		Use:   "improve",
+		Short: "Review, test, approve and deploy detection improvements",
+		Long: `The improvement loop is deterministic and versioned.
+
+Reviewed findings generate proposals; a proposal carries a detection-policy
+change and a fixture suite. Tests run against the shipped baseline, approval is
+an explicit human action, deployment activates a numbered rule, and rollback
+restores the previous rule. Nothing is deployed automatically.`,
+	}
+	cmd.PersistentFlags().StringVar(&common.cache, "cache", "", "intelligence cache path")
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List improvement proposals",
+		RunE: func(c *cobra.Command, _ []string) error {
+			eng, store, err := openImprove(common.path())
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			items, err := eng.ListImprovements(context.Background(), 100)
+			if err != nil {
+				return err
+			}
+			if len(items) == 0 {
+				fmt.Println("no improvement proposals yet — record feedback with `clanker vuln feedback`")
+				return nil
+			}
+			fmt.Printf("%-12s %-18s %-10s %-14s %s\n", "ID", "STATUS", "TESTS", "CATEGORY", "TITLE")
+			for _, imp := range items {
+				tests := "—"
+				if imp.Evaluation != nil {
+					tests = "failed"
+					if imp.Evaluation.Passed {
+						tests = "passed"
+					}
+				}
+				fmt.Printf("%-12s %-18s %-10s %-14s %s\n", imp.ID, imp.Status, tests, imp.Category, imp.Title)
+			}
+			return nil
+		},
+	}
+
+	show := &cobra.Command{
+		Use:   "show <id>",
+		Short: "Show a proposal, its fixtures and its audit trail",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			eng, store, err := openImprove(common.path())
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			imp, err := eng.GetImprovement(ctx, args[0])
+			if err != nil || imp == nil {
+				return configError("improvement not found: " + args[0])
+			}
+			fmt.Printf("%s [%s] %s\n", imp.ID, imp.Status, imp.Title)
+			fmt.Printf("category: %s · risk: %s · affected findings: %d\n\n", imp.Category, imp.RiskLevel, len(imp.AffectedFindings))
+			fmt.Printf("problem:\n  %s\n\n", imp.Problem)
+			fmt.Printf("proposed change:\n  %s\n\n", imp.ProposedChange)
+			fmt.Printf("expected benefit:\n  %s\n\n", imp.ExpectedBenefit)
+			if imp.Policy != nil {
+				fmt.Printf("detection policy change: %s\n\n", strings.Join(imp.PolicyNotes, ", "))
+			}
+			if imp.Evaluation != nil {
+				fmt.Printf("tests: %s (%d fixtures, %d corrected, %d regressions)\n",
+					map[bool]string{true: "passed", false: "failed"}[imp.Evaluation.Passed],
+					len(imp.Evaluation.Cases), len(imp.Evaluation.Fixed), len(imp.Evaluation.Regressions))
+				for _, c := range imp.Evaluation.Cases {
+					mark := "pass"
+					if !c.Pass {
+						mark = "FAIL"
+					}
+					fmt.Printf("  %-4s %-32s expected %-22s baseline %-22s candidate %s\n",
+						mark, c.Fixture, c.Expected, c.Baseline, c.Candidate)
+				}
+				fmt.Println()
+			}
+			events, _ := eng.Events(ctx, imp.ID)
+			fmt.Println("history:")
+			for _, ev := range events {
+				fmt.Printf("  %s  %s → %s  (%s)  %s\n", ev.CreatedAt.Format("2006-01-02 15:04"),
+					ev.From, ev.To, ev.Actor, ev.Note)
+			}
+			return nil
+		},
+	}
+
+	analyze := &cobra.Command{
+		Use:   "analyze",
+		Short: "Regenerate proposals from recorded reviews",
+		RunE: func(c *cobra.Command, _ []string) error {
+			eng, store, err := openImprove(common.path())
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			items, err := eng.Analyze(context.Background())
+			if err != nil {
+				return err
+			}
+			for _, imp := range items {
+				fmt.Printf("%s [%s] %s\n", imp.ID, imp.Status, imp.Title)
+			}
+			if len(items) == 0 {
+				fmt.Println("no verified reviews to derive proposals from")
+			}
+			return nil
+		},
+	}
+
+	evaluate := &cobra.Command{
+		Use:   "evaluate <id>",
+		Short: "Run the fixture suite for a proposal",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			eng, store, err := openImprove(common.path())
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			imp, err := eng.EvaluateImprovement(context.Background(), args[0])
+			if err != nil {
+				return configError(err.Error())
+			}
+			fmt.Printf("%s → %s\n", imp.ID, imp.Status)
+			if imp.Evaluation != nil {
+				fmt.Printf("%s: %d fixtures, %d corrected, %d regressions\n",
+					map[bool]string{true: "passed", false: "failed"}[imp.Evaluation.Passed],
+					len(imp.Evaluation.Cases), len(imp.Evaluation.Fixed), len(imp.Evaluation.Regressions))
+			}
+			return nil
+		},
+	}
+
+	transition := func(name, to, short string, requireNote bool) *cobra.Command {
+		var actor, note string
+		cmd := &cobra.Command{
+			Use:   name + " <id>",
+			Short: short,
+			Args:  cobra.ExactArgs(1),
+			RunE: func(c *cobra.Command, args []string) error {
+				eng, store, err := openImprove(common.path())
+				if err != nil {
+					return err
+				}
+				defer store.Close()
+				imp, err := eng.Transition(context.Background(), args[0], improve.Status(to),
+					firstNonEmpty(actor, os.Getenv("USER"), "cli"), note)
+				if err != nil {
+					return configError(err.Error())
+				}
+				fmt.Printf("%s → %s\n", imp.ID, imp.Status)
+				if imp.RuleID != "" && to == "deployed" {
+					fmt.Printf("active rule: %s\n", imp.RuleID)
+				}
+				return nil
+			},
+		}
+		cmd.Flags().StringVar(&actor, "actor", "", "who is performing this action (recorded)")
+		cmd.Flags().StringVar(&note, "note", "", "note recorded in the audit trail")
+		if requireNote {
+			_ = cmd.MarkFlagRequired("note")
+		}
+		return cmd
+	}
+
+	cmd.AddCommand(
+		list,
+		show,
+		analyze,
+		evaluate,
+		transition("approve", "approved", "Approve a tested proposal (human decision)", false),
+		transition("deploy", "deployed", "Deploy an approved proposal as a versioned rule", false),
+		transition("rollback", "rolled_back", "Roll back a deployed proposal to the previous rule", false),
+		transition("reject", "rejected", "Reject a proposal with a reason", true),
+	)
+	return cmd
+}
+
+func openImprove(cachePath string) (*improve.Engine, *intel.Store, error) {
+	if cachePath == "" {
+		cachePath = scan.DefaultCachePath()
+	}
+	store, err := intel.OpenStore(cachePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	eng, err := improve.New(store)
+	if err != nil {
+		store.Close()
+		return nil, nil, err
+	}
+	return eng, store, nil
+}
+
+func newVulnQualityCmd() *cobra.Command {
+	var common vulnCommonFlags
+	cmd := &cobra.Command{
+		Use:   "quality",
+		Short: "Show detection-quality metrics from reviewed findings",
+		RunE: func(c *cobra.Command, _ []string) error {
+			eng, store, err := openImprove(common.path())
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			q, err := eng.Quality(context.Background(), improve.FindingStats{})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("reviewed findings:        %d\n", q.Reviewed)
+			fmt.Printf("  confirmed:              %d\n", q.Confirmed)
+			fmt.Printf("  false positive:         %d\n", q.FalsePositives)
+			fmt.Printf("  needs investigation:    %d\n", q.NeedsInvestigation)
+			fmt.Printf("  remediated:             %d\n", q.Remediated)
+			fmt.Printf("verification supported:   %d\n", q.VerificationSupported)
+			fmt.Printf("verification contradicted:%d\n", q.VerificationContradicted)
+			fmt.Printf("verification inconclusive:%d\n", q.VerificationInconclusive)
+			if q.FalsePositiveRate != nil {
+				fmt.Printf("false-positive rate:      %.0f%% of reviewed findings\n", *q.FalsePositiveRate*100)
+			} else {
+				fmt.Println("false-positive rate:      not available (no reviews)")
+			}
+			fmt.Printf("improvements:             %d open, %d deployed, %d rejected\n",
+				q.OpenImprovements, q.DeployedImprovements, q.RejectedImprovements)
+			for _, n := range q.Notes {
+				fmt.Println("note:", n)
+			}
+			return nil
+		},
+	}
+	common.register(cmd)
+	return cmd
 }

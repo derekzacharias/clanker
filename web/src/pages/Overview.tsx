@@ -79,6 +79,15 @@ export default function Overview() {
         </Banner>
       ) : null}
 
+      {data.improvements_available > 0 ? (
+        <Banner tone="success" title={`${data.improvements_available} detection improvement(s) available for review`}>
+          Generated from verified analyst reviews, tested against fixtures. Nothing is deployed without approval.{" "}
+          <Link to="/settings?tab=improvement" className="text-accent underline-offset-2 hover:underline">
+            Review proposals
+          </Link>
+        </Banner>
+      ) : null}
+
       {data.metrics.needs_investigation > 0 ? (
         <Banner tone="info" title={`${data.metrics.needs_investigation} finding(s) need investigation`}>
           These matched an advisory but the evidence is incomplete or conflicting (often a vendor backport or a

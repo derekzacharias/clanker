@@ -55,6 +55,8 @@ export interface Overview {
   feeds: FeedStatus[];
   limitations: string[];
   errors: string[];
+  improvements_available: number;
+  reviewed_findings: number;
 }
 
 export interface CountRow {
@@ -136,6 +138,191 @@ export interface Vulnerability {
   confidence_reduction?: string[];
   risk_factors?: RiskFactor[];
   references?: Link[];
+  analyst?: AnalystState;
+  effective_affected?: Applicability;
+}
+
+export type Verdict =
+  | "confirmed"
+  | "false_positive"
+  | "needs_investigation"
+  | "remediated"
+  | "request_verification";
+
+export type ReasonCode =
+  | "vendor_patch_installed"
+  | "incorrect_identification"
+  | "feature_not_enabled"
+  | "advisory_not_applicable"
+  | "other";
+
+export interface Verification {
+  supported: boolean;
+  confidence: "high" | "medium" | "low";
+  explanation: string;
+  evidence: Evidence[];
+  original_applicability: string;
+  reassessed_applicability?: string;
+  changed: boolean;
+  category?: string;
+}
+
+export interface AnalystState {
+  verdict: Verdict;
+  applicability: Applicability;
+  confidence: string;
+  explanation: string;
+  evidence?: Evidence[];
+  verified_at: string;
+}
+
+export interface Feedback {
+  id: string;
+  finding: {
+    id: string;
+    cve: string;
+    product: string;
+    version: string;
+    ecosystem: string;
+    applicability: string;
+  };
+  verdict: Verdict;
+  reason_code?: ReasonCode;
+  reason_text?: string;
+  analyst: string;
+  created_at: string;
+  verification?: Verification;
+}
+
+export interface FeedbackResponse {
+  feedback: Feedback;
+  verification: Verification;
+  state: {
+    finding_id: string;
+    verdict: Verdict;
+    applicability: string;
+    confidence: string;
+    explanation: string;
+    verified_at: string;
+  } | null;
+  improvement_ids: string[];
+  note: string;
+}
+
+export type ImprovementStatus =
+  | "discovered"
+  | "researching"
+  | "proposed"
+  | "testing"
+  | "awaiting_approval"
+  | "approved"
+  | "deployed"
+  | "monitoring"
+  | "rolled_back"
+  | "rejected";
+
+export interface Metrics {
+  available: boolean;
+  cases: number;
+  true_positives: number;
+  false_positives: number;
+  true_negatives: number;
+  false_negatives: number;
+  precision: number;
+  recall: number;
+  accuracy: number;
+}
+
+export interface CaseResult {
+  fixture: string;
+  label: string;
+  expected: string;
+  baseline: string;
+  candidate: string;
+  pass: boolean;
+  note?: string;
+}
+
+export interface Evaluation {
+  passed: boolean;
+  baseline: Metrics;
+  candidate: Metrics;
+  cases: CaseResult[];
+  regressions?: string[];
+  fixed_cases?: string[];
+  notes?: string[];
+  evaluated_at: string;
+}
+
+export interface Improvement {
+  id: string;
+  category: string;
+  status: ImprovementStatus;
+  title: string;
+  problem: string;
+  proposed_change: string;
+  expected_benefit: string;
+  risk_level: "low" | "medium" | "high";
+  signature: string;
+  affected_findings: string[];
+  evidence: Evidence[];
+  policy?: Record<string, unknown>;
+  policy_notes?: string[];
+  evaluation?: Evaluation;
+  created_at: string;
+  updated_at: string;
+  approved_by?: string;
+  approved_at?: string;
+  deployed_at?: string;
+  rolled_back_at?: string;
+  rule_id?: string;
+  rejected_reason?: string;
+}
+
+export interface ImprovementEvent {
+  id: number;
+  improvement_id: string;
+  from: string;
+  to: string;
+  actor: string;
+  note?: string;
+  created_at: string;
+}
+
+export interface QualityMetrics {
+  reviewed: number;
+  confirmed: number;
+  false_positives: number;
+  needs_investigation: number;
+  remediated: number;
+  verification_supported: number;
+  verification_contradicted: number;
+  verification_inconclusive: number;
+  false_positive_rate: number | null;
+  reviewed_rate: number | null;
+  findings_considered: number;
+  actionable: number;
+  needs_investigation_findings: number;
+  open_improvements: number;
+  deployed_improvements: number;
+  rejected_improvements: number;
+  notes?: string[];
+}
+
+export interface QualityResponse {
+  metrics: QualityMetrics;
+  improvement_counts: Record<string, number>;
+  recent_feedback?: {
+    finding_id: string;
+    cve: string;
+    product: string;
+    verdict: Verdict;
+    reason?: ReasonCode;
+    analyst: string;
+    created_at: string;
+    supported?: boolean;
+    explanation?: string;
+  }[];
 }
 
 export interface VulnList {
@@ -429,6 +616,34 @@ export const api = {
     offline_default?: boolean;
     release_base?: string;
   }) => request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
+  feedback: (id: string, body: { verdict: Verdict; reason_code?: ReasonCode; reason_text?: string; analyst?: string }) =>
+    request<FeedbackResponse>(`/api/vulnerabilities/${encodeURIComponent(id)}/feedback`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  feedbackHistory: (id: string) =>
+    request<{ feedback: Feedback[]; state?: { applicability: string; verdict: Verdict; explanation: string } }>(
+      `/api/vulnerabilities/${encodeURIComponent(id)}/history`,
+    ),
+  deleteFeedback: (id: string) =>
+    request<{ deleted: string }>(`/api/vulnerabilities/${encodeURIComponent(id)}/feedback`, { method: "DELETE" }),
+  improvements: (status?: string) =>
+    request<{ items: Improvement[]; counts: Record<string, number>; total: number }>(
+      `/api/improvements${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  improvement: (id: string) =>
+    request<{ improvement: Improvement; events: ImprovementEvent[]; rules: unknown[]; active: { rule_id: string; notes: string[] } }>(
+      `/api/improvements/${encodeURIComponent(id)}`,
+    ),
+  transitionImprovement: (id: string, body: { to: ImprovementStatus; actor?: string; note?: string }) =>
+    request<{ improvement: Improvement }>(`/api/improvements/${encodeURIComponent(id)}/transition`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  evaluateImprovement: (id: string) =>
+    request<{ improvement: Improvement }>(`/api/improvements/${encodeURIComponent(id)}/evaluate`, { method: "POST" }),
+  quality: () => request<QualityResponse>("/api/quality"),
+  feedbackExportUrl: () => "/api/feedback/export",
   ask: (question: string, host?: string) =>
     request<AskResponse>("/api/ask", { method: "POST", body: JSON.stringify({ question, host }) }),
 };

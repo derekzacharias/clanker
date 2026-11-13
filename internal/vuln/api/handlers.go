@@ -30,6 +30,10 @@ type overviewResponse struct {
 	Feeds    []feedRow       `json:"feeds"`
 	Limits   []string        `json:"limitations"`
 	Errors   []string        `json:"errors"`
+	// ImprovementsAvailable drives the compact "N detection improvements
+	// available for review" indicator; Reviewed counts analyst-verified findings.
+	ImprovementsAvailable int `json:"improvements_available"`
+	Reviewed              int `json:"reviewed_findings"`
 }
 
 type overviewMetrics struct {
@@ -87,12 +91,16 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	limitations := map[string]bool{}
 	for _, hv := range ds.Hosts {
 		for _, f := range hv.Findings {
-			if f.Affected == string(model.ApplicabilityNotAffected) {
+			if f.Analyst != nil {
+				resp.Reviewed++
+			}
+			effective := f.effective()
+			if effective == string(model.ApplicabilityNotAffected) {
 				continue
 			}
 			resp.Metrics.Total++
 			counts[f.Severity]++
-			switch f.Affected {
+			switch effective {
 			case string(model.ApplicabilityConfirmed), string(model.ApplicabilityValidated), string(model.ApplicabilityProbable):
 				resp.Metrics.Actionable++
 			case string(model.ApplicabilityNeedsInvestigation):
@@ -120,10 +128,15 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	sorted := append([]vulnRow(nil), ds.Vulns...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].RiskScore > sorted[j].RiskScore })
 	for i := 0; i < len(sorted) && i < 8; i++ {
-		if sorted[i].Affected == string(model.ApplicabilityNotAffected) {
+		if sorted[i].effective() == string(model.ApplicabilityNotAffected) {
 			continue
 		}
 		resp.Priority = append(resp.Priority, sorted[i])
+	}
+	if counts, err := s.improve.CountByStatus(ctx); err == nil {
+		// Everything not yet decided is reviewable, including research-only items.
+		resp.ImprovementsAvailable = counts["awaiting_approval"] + counts["proposed"] +
+			counts["testing"] + counts["discovered"] + counts["researching"]
 	}
 
 	now := s.opts.Now()
@@ -208,11 +221,12 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 			IsContainer: hv.Asset.IsContainer,
 		}
 		for _, f := range hv.Findings {
-			if f.Affected == string(model.ApplicabilityNotAffected) {
+			effective := f.effective()
+			if effective == string(model.ApplicabilityNotAffected) {
 				continue
 			}
 			row.Findings++
-			if f.Affected != string(model.ApplicabilityNeedsInvestigation) {
+			if effective != string(model.ApplicabilityNeedsInvestigation) {
 				row.Actionable++
 			}
 			switch f.Severity {
@@ -339,7 +353,7 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	assetCounts := map[string]int{}
 	for _, v := range all {
 		sevCounts[v.Severity]++
-		appCounts[v.Affected]++
+		appCounts[v.effective()]++
 		assetCounts[v.Asset]++
 		if v.KEV {
 			facets.KEV++
@@ -364,13 +378,14 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 
 	filtered := make([]vulnRow, 0, len(all))
 	for _, v := range all {
-		if !state.includeNotAffected() && v.Affected == string(model.ApplicabilityNotAffected) {
+		effective := v.effective()
+		if !state.includeNotAffected() && effective == string(model.ApplicabilityNotAffected) {
 			continue
 		}
 		if len(state.Severity) > 0 && !contains(state.Severity, v.Severity) {
 			continue
 		}
-		if len(state.Applicability) > 0 && !contains(state.Applicability, v.Affected) {
+		if len(state.Applicability) > 0 && !contains(state.Applicability, effective) {
 			continue
 		}
 		if state.KEV && !v.KEV {
@@ -912,6 +927,21 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "report_corrupt", "stored report is unreadable")
 		return
 	}
+	// Questions about detection quality and improvement are answered from the
+	// improvement store, then fall through to the finding-oriented assistant.
+	if answer, citations, ok := s.answerImprovementQuestion(r.Context(), ds, body.Question); ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"answer":    answer,
+			"citations": citations,
+			"grounding": map[string]any{
+				"report_id": hv.ReportID, "host": hv.Host, "generated_by": "deterministic",
+				"llm_used": false,
+				"note":     "Answer derived from stored reviews, proposals and scan evidence. No model was consulted.",
+			},
+		})
+		return
+	}
+
 	answer := scan.Ask(rep, body.Question)
 
 	// Cite the findings the answer actually references, so a reader can verify.

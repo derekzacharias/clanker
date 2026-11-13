@@ -13,6 +13,9 @@ const SUGGESTIONS = [
   "Which findings have fixes available?",
   "Which findings are likely false positives?",
   "What changed since the last scan?",
+  "What did you learn from my false-positive reviews?",
+  "Which scanning capabilities are missing?",
+  "Tests behind the proposed detection update?",
 ];
 
 /**

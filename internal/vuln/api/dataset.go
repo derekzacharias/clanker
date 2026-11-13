@@ -145,6 +145,11 @@ type vulnRow struct {
 	Lower            []string      `json:"confidence_reduction,omitempty"`
 	RiskFactors      []riskRow     `json:"risk_factors,omitempty"`
 	References       []linkRow     `json:"references,omitempty"`
+	// Analyst is the evidence-backed correction applied by a review, when one
+	// exists. The scanner verdict stays in Affected.
+	Analyst *analystView `json:"analyst,omitempty"`
+	// Effective is what the UI should treat as current (Analyst if present).
+	Effective string `json:"effective_affected,omitempty"`
 	// Fingerprint is the history identity (host-independent); it links a finding
 	// to stored run history for first-seen dates. Not exposed over the API.
 	Fingerprint string `json:"-"`
@@ -288,6 +293,12 @@ func (s *Server) buildDataset(ctx context.Context) (*dataset, error) {
 			}
 		}
 		ds.Hosts[hv.Host] = hv
+	}
+
+	// Analyst-verified corrections are an overlay: stored reports are never
+	// rewritten, so the scanner verdict and the correction remain comparable.
+	if states, err := s.improve.States(ctx); err == nil && len(states) > 0 {
+		ds.applyAnalystStates(states)
 	}
 	return ds, nil
 }

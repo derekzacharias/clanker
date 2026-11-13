@@ -2,6 +2,7 @@ package assess
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,12 +160,15 @@ func TestBackportDowngradeForUpstreamAdvisory(t *testing.T) {
 		FetchedAt: time.Now().UTC(),
 	}
 	pkg := debianPkg("openssl", "3.0.13-1~deb12u1")
-	out, ok := Match(pkg, adv)
+	out, ok := Classify(pkg, adv, DefaultPolicy())
 	if !ok {
 		t.Fatal("expected a range match")
 	}
 	if out.DistroAdvisory {
 		t.Fatal("this advisory is not a distribution advisory")
+	}
+	if out.Applicability != model.ApplicabilityProbable {
+		t.Fatalf("Classify must apply the backport downgrade, got %s", out.Applicability)
 	}
 	e := &Engine{Vendor: "Debian", Now: time.Now}
 	f := e.findingFor(pkg, adv, out)
@@ -353,5 +357,111 @@ func TestSnapTransitionPackageIsUnresolved(t *testing.T) {
 	pkg := model.Package{Name: "thunderbird", Version: "2:1snap1-0ubuntu3", Ecosystem: "Ubuntu:24.04:LTS", Source: model.OriginDpkg}
 	if _, ok := Match(pkg, adv); ok {
 		t.Log("snap shim version parsed with epoch, matched by vendor enumeration")
+	}
+}
+
+// ------------------------------------------------------------ detection policy ---
+
+func TestPolicySnapStubIsOptIn(t *testing.T) {
+	adv := intel.Advisory{
+		ID:     "UBUNTU-CVE-2022-25236",
+		Source: "Ubuntu",
+		Affected: []intel.Affected{{
+			Ecosystem: "Ubuntu:24.04:LTS",
+			Name:      "thunderbird",
+			Versions:  []string{"1snap1-0ubuntu2", "1snap1-0ubuntu3"},
+			// Ubuntu's OSV record ships a binary view; this is what makes the
+			// snap stub compare equal and get confirmed on a live host.
+			Binaries: []intel.Binary{{Name: "thunderbird", Version: "2:1snap1-0ubuntu3"}},
+		}},
+		FetchedAt: time.Now().UTC(),
+	}
+	pkg := model.Package{Name: "thunderbird", Version: "2:1snap1-0ubuntu3", Ecosystem: "Ubuntu:24.04:LTS", Source: model.OriginDpkg}
+
+	// Shipped default: the vendor lists this exact build, so it is confirmed.
+	out, ok := MatchWithPolicy(pkg, adv, DefaultPolicy())
+	if !ok || out.Applicability != model.ApplicabilityConfirmed {
+		t.Fatalf("default policy should confirm the enumerated build, got %+v ok=%v", out, ok)
+	}
+
+	// Deployed rule: snap transition wrappers are unresolved, not confirmed.
+	pol := DefaultPolicy()
+	pol.SnapStubUnresolved = true
+	out, ok = MatchWithPolicy(pkg, adv, pol)
+	if !ok {
+		t.Fatal("expected the advisory to still match the package name")
+	}
+	if out.Applicability != model.ApplicabilityNeedsInvestigation {
+		t.Fatalf("snap stub policy should downgrade to needs_investigation, got %s", out.Applicability)
+	}
+	var sawEvidence bool
+	for _, e := range out.Evidence {
+		if e.Kind == "snap_stub" {
+			sawEvidence = true
+		}
+	}
+	if !sawEvidence {
+		t.Fatalf("snap stub evidence missing: %+v", out.Evidence)
+	}
+}
+
+func TestPolicyUnlistedBuildOutcome(t *testing.T) {
+	adv := intel.Advisory{
+		ID: "UBUNTU-CVE-2026-0002", Source: "Ubuntu",
+		Affected: []intel.Affected{{
+			Ecosystem: "Ubuntu:24.04:LTS", Name: "openssl",
+			Versions: []string{"3.0.13-0ubuntu3.4", "3.0.13-0ubuntu3.5"},
+		}},
+		FetchedAt: time.Now().UTC(),
+	}
+	pkg := ubuntuPkg("openssl", "3.0.13-0ubuntu3.9")
+
+	out, _ := MatchWithPolicy(pkg, adv, DefaultPolicy())
+	if out.Applicability != model.ApplicabilityNotAffected {
+		t.Fatalf("default: newer build should be not_affected, got %s", out.Applicability)
+	}
+
+	pol := DefaultPolicy()
+	pol.UnlistedBuildOutcome = string(model.ApplicabilityNeedsInvestigation)
+	out, _ = MatchWithPolicy(pkg, adv, pol)
+	if out.Applicability != model.ApplicabilityNeedsInvestigation {
+		t.Fatalf("policy: expected needs_investigation, got %s", out.Applicability)
+	}
+}
+
+func TestParsePolicyStartsFromDefaults(t *testing.T) {
+	// A partial rule must not silently disable backport awareness.
+	pol, err := ParsePolicy([]byte(`{"snap_stub_unresolved": true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pol.BackportDowngrade {
+		t.Fatal("backport downgrade must stay enabled when a partial rule is applied")
+	}
+	if pol.BackportOutcome != "probable" {
+		t.Fatalf("unexpected backport outcome: %q", pol.BackportOutcome)
+	}
+	if !pol.SnapStubUnresolved {
+		t.Fatal("explicit field not applied")
+	}
+
+	// Invalid values are rejected rather than silently coerced.
+	if _, err := ParsePolicy([]byte(`{"backport_outcome":"whatever"}`)); err == nil {
+		t.Fatal("invalid policy must be rejected")
+	}
+	if _, err := ParsePolicy([]byte(`not json`)); err == nil {
+		t.Fatal("malformed policy must be rejected")
+	}
+}
+
+func TestPolicyNotesAreExplicit(t *testing.T) {
+	pol := DefaultPolicy()
+	pol.SnapStubUnresolved = true
+	notes := pol.Notes()
+	if len(notes) != 1 || !strings.Contains(notes[0], "snap stub") {
+		t.Fatalf("expected one explicit note, got %v", notes)
+	}
+	if len(DefaultPolicy().Notes()) != 0 {
+		t.Fatal("default policy should produce no notes")
 	}
 }

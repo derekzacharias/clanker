@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
 )
@@ -47,6 +48,7 @@ type Options struct {
 type Server struct {
 	opts    Options
 	store   *intel.Store
+	improve *improve.Engine
 	jobs    *jobManager
 	mux     *http.ServeMux
 	log     *slog.Logger
@@ -71,9 +73,15 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
+	improveEngine, err := improve.New(store)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("initialise improvement engine: %w", err)
+	}
 	s := &Server{
 		opts:    opts,
 		store:   store,
+		improve: improveEngine,
 		jobs:    newJobManager(),
 		mux:     http.NewServeMux(),
 		log:     opts.Logger,
@@ -137,6 +145,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 	s.mux.HandleFunc("POST /api/ask", s.handleAsk)
+
+	// Continuous improvement: analyst feedback, proposals, quality metrics.
+	s.mux.HandleFunc("POST /api/vulnerabilities/{id}/feedback", s.handleFindingFeedback)
+	s.mux.HandleFunc("GET /api/vulnerabilities/{id}/history", s.handleFindingHistory)
+	s.mux.HandleFunc("DELETE /api/vulnerabilities/{id}/feedback", s.handleDeleteFeedback)
+	s.mux.HandleFunc("GET /api/improvements", s.handleImprovements)
+	s.mux.HandleFunc("GET /api/improvements/{id}", s.handleImprovement)
+	s.mux.HandleFunc("POST /api/improvements/{id}/transition", s.handleImprovementTransition)
+	s.mux.HandleFunc("POST /api/improvements/{id}/evaluate", s.handleImprovementEvaluate)
+	s.mux.HandleFunc("GET /api/quality", s.handleQuality)
+	s.mux.HandleFunc("GET /api/feedback/export", s.handleFeedbackExport)
 
 	// Static SPA (built frontend). Missing build renders a helpful page.
 	s.mux.HandleFunc("/", s.handleStatic)
