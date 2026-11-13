@@ -20,6 +20,25 @@ Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)
 
 Homebrew tap: [clankercloud/homebrew-tap](https://github.com/clankercloud/homebrew-tap)
 
+## Vulnerability assessment (Clanker Guard)
+
+`clanker vuln` is a separate, evidence-based vulnerability assessment subsystem:
+endpoint software inventory, OSV/KEV/EPSS correlation with ecosystem-aware
+version semantics, vendor-backport handling, and JSON/Markdown/SARIF/HTML
+reports. It does not replace `clanker scan` (cost) or `clanker security`
+(posture), and it never scans a network without an authorisation scope file.
+
+```bash
+clanker vuln scan --local
+clanker vuln feeds update --with-osv
+clanker vuln ask "what should I patch first?"
+```
+
+A standalone endpoint agent (`clanker-guard-agent`) runs the same assessment with
+no cloud dependency, no service and no privileges. See
+[docs/VULN.md](docs/VULN.md) for architecture, accuracy rules, coverage limits,
+the confidence model and the roadmap.
+
 ## Install
 
 ### Homebrew (can be outdated, the best is to build from master)

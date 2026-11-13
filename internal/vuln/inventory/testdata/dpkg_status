@@ -1,0 +1,36 @@
+Package: openssl
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 122
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Multi-Arch: same
+Source: openssl
+Version: 3.0.13-0ubuntu3.5
+Description: Secure Sockets Layer toolkit
+ This is a multi-line description
+ that continues with indented lines.
+
+Package: bash
+Status: install ok installed
+Priority: required
+Section: shells
+Architecture: amd64
+Version: 5.2.21-2ubuntu4
+Description: GNU Bourne Again SHell
+
+Package: libc6
+Status: deinstall ok config-files
+Priority: optional
+Architecture: amd64
+Version: 2.39-0ubuntu8.4
+Description: GNU C Library (removed but config remains)
+
+Package: curl
+Status: install ok installed
+Priority: optional
+Architecture: amd64
+Source: curl (8.5.0-1)
+Version: 8.5.0-2ubuntu10.1
+Description: command line tool for transferring data

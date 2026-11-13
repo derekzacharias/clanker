@@ -1,0 +1,13 @@
+C:Q1abc=
+P:musl
+V:1.2.4-r2
+A:x86_64
+S:383152
+I:622592
+o:musl
+
+C:Q1def=
+P:openssl
+V:3.1.4-r0
+A:x86_64
+o:openssl

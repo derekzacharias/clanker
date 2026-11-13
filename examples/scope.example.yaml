@@ -1,0 +1,21 @@
+# Authorisation scope for Clanker Guard network assessment.
+#
+# A scope is mandatory for any remote work: it names WHO approved the scan and
+# exactly WHAT may be touched. Clanker Guard refuses public ranges unless you
+# opt in explicitly, and refuses scopes larger than max_hosts.
+name: lab-servers
+authorized_by: derek zacharias
+authorized_at: 2026-11-13T12:00:00Z
+
+targets:
+  - 192.168.20.0/28      # docker host range (example)
+  - 192.168.65.13        # single authorised host
+
+ports: [22, 80, 443, 5432]
+max_hosts: 32
+
+# Set to true only for ranges you are explicitly authorised to test.
+allow_public_addresses: false
+
+notes: |
+  Internal lab assessment. No exploitation, no credential attacks, no DoS.

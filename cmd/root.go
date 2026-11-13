@@ -177,6 +177,10 @@ func init() {
 	// Unified multi-provider logs (query/tail/chat) — drives the cloud app's
 	// logs viewer + talk-to-logs agent.
 	rootCmd.AddCommand(newLogsCmd())
+
+	// Vulnerability assessment subsystem (Clanker Guard). Deliberately separate
+	// from `clanker scan` (cost) and `clanker security` (HTTP/API posture).
+	rootCmd.AddCommand(newVulnCmd())
 }
 
 // initConfig reads in config file and ENV variables if set.
