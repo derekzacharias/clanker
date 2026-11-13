@@ -266,6 +266,13 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if st, err := os.Stat(full); err == nil && !st.IsDir() {
+		// Hashed assets are immutable; the shell must be revalidated so a rebuilt
+		// interface is picked up without a hard refresh.
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		http.ServeFile(w, r, full)
 		return
 	}
@@ -274,6 +281,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		s.renderBuildHint(w)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeFile(w, r, index)
 }
 

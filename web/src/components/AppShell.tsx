@@ -1,5 +1,6 @@
 import {
   FileBarChart2,
+  KeyRound,
   LayoutDashboard,
   Menu,
   Moon,
@@ -20,7 +21,7 @@ import { cn } from "../lib/cn";
 import { Button } from "./ui/Button";
 import { AskGuard } from "./AskGuard";
 import { AuthGate } from "./AuthGate";
-import { ApiError, api, getToken } from "../lib/api";
+import { ApiError, api, getToken, setToken } from "../lib/api";
 
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -38,6 +39,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [askOpen, setAskOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [authNeeded, setAuthNeeded] = useState(false);
+  const [authReason, setAuthReason] = useState<"required" | "rejected" | "manual">("required");
   const [authVersion, setAuthVersion] = useState(0);
 
   useEffect(() => {
@@ -51,7 +53,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Detect "token required" up front and react to any 401 from a data call.
   useEffect(() => {
     let cancelled = false;
-    const onUnauthorized = () => setAuthNeeded(true);
+    const onUnauthorized = () => {
+      // A rejected token must not stay in place: leaving it stored means every
+      // retry fails silently with the same 401.
+      const hadToken = Boolean(getToken());
+      if (hadToken) setToken("");
+      setAuthReason(hadToken ? "rejected" : "required");
+      setAuthNeeded(true);
+    };
     window.addEventListener("guard:unauthorized", onUnauthorized);
     // Probe an authenticated endpoint: a 401 means the server wants a token.
     api
@@ -70,9 +79,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [authVersion]);
 
-  useEffect(() => {
-    if (getToken() && authNeeded) setAuthNeeded(false);
-  }, [authNeeded]);
+
 
   function submitSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -193,6 +200,19 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => {
+                setAuthReason("manual");
+                setAuthNeeded(true);
+              }}
+              aria-label="API token"
+              title="API token"
+            >
+              <KeyRound className="h-4 w-4" aria-hidden="true" />
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
               aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
               title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
@@ -221,6 +241,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {authNeeded ? (
         <AuthGate
+          reason={authReason}
+          onClose={() => setAuthNeeded(false)}
           onAuthenticated={() => {
             setAuthNeeded(false);
             setAuthVersion((v) => v + 1);

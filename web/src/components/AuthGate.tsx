@@ -10,7 +10,15 @@ import { Input } from "./ui/Field";
  * browser has not supplied one. The token is stored locally in this browser and
  * sent as X-Guard-Token; it is never sent anywhere else.
  */
-export function AuthGate({ onAuthenticated }: { onAuthenticated: () => void }) {
+export function AuthGate({
+  reason = "required",
+  onAuthenticated,
+  onClose,
+}: {
+  reason?: "required" | "rejected" | "manual";
+  onAuthenticated: () => void;
+  onClose?: () => void;
+}) {
   const [value, setValue] = useState(() => getToken());
   const [error, setError] = useState<string | null>(null);
 
@@ -29,14 +37,18 @@ export function AuthGate({ onAuthenticated }: { onAuthenticated: () => void }) {
     <Modal
       open
       onOpenChange={(open) => {
-        if (!open) return; // dismissible only by authenticating
+        if (!open) onClose?.();
       }}
       title={
         <span className="flex items-center gap-2">
           <ShieldAlert className="h-4 w-4 text-high" aria-hidden="true" /> This server requires an API token
         </span>
       }
-      description="It is listening beyond localhost, so control of scans requires authentication."
+      description={
+        reason === "rejected"
+          ? "The stored token was rejected by the server and has been cleared. Paste the current token to continue."
+          : "It is listening beyond localhost, so control of scans requires authentication."
+      }
       footer={
         <>
           <Button variant="ghost" onClick={() => window.location.assign("/")}>
