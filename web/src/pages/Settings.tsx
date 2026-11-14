@@ -178,13 +178,13 @@ function IntelligenceTab() {
               </Banner>
             </div>
           ) : null}
-          {data.feeds.length === 0 ? (
+          {(data.feeds ?? []).length === 0 ? (
             <div className="space-y-2">
               <p className="text-sm text-muted">No intelligence has been downloaded yet.</p>
               <p className="text-sm text-muted">Run an update to fetch CISA KEV and FIRST EPSS.</p>
             </div>
           ) : (
-            <FeedTable feeds={data.feeds} />
+            <FeedTable feeds={data.feeds ?? []} />
           )}
         </CardBody>
       </Card>
@@ -279,7 +279,7 @@ function AgentsTab() {
 
       <Card>
         <CardHeader title="Endpoints reporting assessments" description="Hosts with a stored report in this cache" />
-        {data.endpoints.length === 0 ? (
+        {(data.endpoints ?? []).length === 0 ? (
           <CardBody>
             <p className="text-sm text-muted">No endpoint assessments yet.</p>
           </CardBody>
@@ -296,7 +296,7 @@ function AgentsTab() {
                 </tr>
               </thead>
               <tbody>
-                {data.endpoints.map((e) => (
+                {(data.endpoints ?? []).map((e) => (
                   <Tr key={e.host}>
                     <Td className="mono text-xs">{e.host}</Td>
                     <Td>{e.os} {e.os_version}</Td>

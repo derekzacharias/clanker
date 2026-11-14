@@ -206,6 +206,12 @@ func (s *Server) handleImprovements(w http.ResponseWriter, r *http.Request) {
 		items = filtered
 	}
 	counts, _ := s.improve.CountByStatus(r.Context())
+	if items == nil {
+		items = []improve.Improvement{}
+	}
+	if counts == nil {
+		counts = map[improve.Status]int{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":  items,
 		"counts": counts,

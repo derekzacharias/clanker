@@ -21,6 +21,7 @@ import { cn } from "../lib/cn";
 import { Button } from "./ui/Button";
 import { AskGuard } from "./AskGuard";
 import { AuthGate } from "./AuthGate";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { ApiError, api, getToken, setToken } from "../lib/api";
 
 const NAV = [
@@ -232,8 +233,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         </header>
 
         <main id="main" className="mx-auto w-full max-w-[100rem] px-3 py-5 sm:px-5">
-          {/* keyed so pages refetch after unlocking */}
-          <div key={authVersion}>{children}</div>
+          {/* keyed so pages refetch after unlocking; isolated so one bad screen
+              cannot blank the whole application */}
+          <ErrorBoundary resetKey={pathname + ":" + authVersion}>
+            <div key={authVersion}>{children}</div>
+          </ErrorBoundary>
         </main>
       </div>
 

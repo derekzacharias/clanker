@@ -388,11 +388,11 @@ function ImprovementDrawer({
             </Block>
           )}
 
-          {imp.evidence.length > 0 ? (
+          {(imp.evidence ?? []).length > 0 ? (
             <section>
               <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Supporting evidence</h3>
               <ul className="space-y-1.5">
-                {imp.evidence.map((e, i) => (
+                {(imp.evidence ?? []).map((e, i) => (
                   <li key={i} className="rounded border border-border bg-surface-2 p-2 text-sm">
                     <span className="mono text-xs text-muted">{e.kind}</span>
                     {e.source ? <span className="ml-2 text-xs text-muted">{e.source}</span> : null}
@@ -424,7 +424,7 @@ function ImprovementDrawer({
           <section>
             <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Affected findings</h3>
             <ul className="flex flex-wrap gap-1.5">
-              {imp.affected_findings.map((fid) => (
+              {(imp.affected_findings ?? []).map((fid) => (
                 <li key={fid} className="mono rounded border border-border px-1.5 py-0.5 text-xs text-muted">
                   {fid}
                 </li>
@@ -470,7 +470,7 @@ function EvaluationView({ evaluation }: { evaluation: Evaluation }) {
             </tr>
           </thead>
           <tbody>
-            {evaluation.cases.map((c: CaseResult) => (
+            {(evaluation.cases ?? []).map((c: CaseResult) => (
               <Tr key={c.fixture}>
                 <Td className="mono text-xs">{c.fixture}</Td>
                 <Td className="text-xs">{c.label}</Td>

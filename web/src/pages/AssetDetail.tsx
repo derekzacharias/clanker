@@ -19,6 +19,10 @@ export default function AssetDetail({ host }: { host: string }) {
   const [pkgEcosystem, setPkgEcosystem] = useState("all");
   const [openSection, setOpenSection] = useState<Record<string, boolean>>({ packages: false });
 
+  const findings = data?.findings ?? [];
+  const history = data?.history ?? [];
+  const skipped = data?.skipped ?? [];
+  const runErrors = data?.errors ?? [];
   const ecosystems = useMemo(
     () => Array.from(new Set((data?.packages ?? []).map((p) => p.ecosystem))).sort(),
     [data?.packages],
@@ -33,7 +37,9 @@ export default function AssetDetail({ host }: { host: string }) {
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
   if (!data) return null;
 
-  const actionable = data.findings.filter((f) => f.affected !== "needs_investigation" && f.affected !== "not_affected").length;
+  const actionable = findings.filter(
+    (f) => f.affected !== "needs_investigation" && f.affected !== "not_affected",
+  ).length;
 
   return (
     <div className="space-y-4">
@@ -62,7 +68,7 @@ export default function AssetDetail({ host }: { host: string }) {
         <Card className="p-4">
           <p className="text-xs uppercase tracking-wide text-muted">Findings</p>
           <p className="num mt-1 text-2xl font-semibold">{actionable}</p>
-          <p className="text-xs text-muted">{data.findings.length} total records</p>
+          <p className="text-xs text-muted">{findings.length} total records</p>
         </Card>
         <Card className="p-4">
           <p className="text-xs uppercase tracking-wide text-muted">Packages</p>
@@ -81,10 +87,10 @@ export default function AssetDetail({ host }: { host: string }) {
         </Card>
       </div>
 
-      {data.errors.length > 0 ? (
+      {runErrors.length > 0 ? (
         <Banner tone="warn" title="This assessment was incomplete">
           <ul className="list-disc pl-4">
-            {data.errors.map((e) => (
+            {runErrors.map((e) => (
               <li key={e}>{e}</li>
             ))}
           </ul>
@@ -92,8 +98,8 @@ export default function AssetDetail({ host }: { host: string }) {
       ) : null}
 
       <Card>
-        <CardHeader title="Findings on this asset" description={`${data.findings.length} records from the latest assessment`} />
-        {data.findings.length === 0 ? (
+        <CardHeader title="Findings on this asset" description={`${findings.length} records from the latest assessment`} />
+        {findings.length === 0 ? (
           <CardBody>
             <p className="text-sm text-muted">
               No findings recorded for this asset in the assessed scope. Review the coverage limitations below.
@@ -113,7 +119,7 @@ export default function AssetDetail({ host }: { host: string }) {
                 </tr>
               </thead>
               <tbody>
-                {data.findings.slice(0, 200).map((f) => (
+                {findings.slice(0, 200).map((f) => (
                   <Tr key={f.id}>
                     <Td>
                       <Link to={`/vulnerabilities?q=${encodeURIComponent(f.cve)}`} className="mono text-accent hover:underline">
@@ -244,11 +250,11 @@ export default function AssetDetail({ host }: { host: string }) {
                 </ul>
               </div>
             ) : null}
-            {(data.skipped ?? []).length > 0 ? (
+            {skipped.length > 0 ? (
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-muted">Skipped checks</p>
                 <ul className="mt-1 list-disc pl-4 text-muted">
-                  {data.skipped.map((s) => (
+                  {skipped.map((s) => (
                     <li key={s.check}>
                       <span className="mono">{s.check}</span> — {s.reason}
                     </li>
@@ -263,7 +269,7 @@ export default function AssetDetail({ host }: { host: string }) {
           <CardHeader title="Scan history" description="Assessments stored for this host" />
           <CardBody className="p-0">
             <ul className="divide-y divide-border">
-              {data.history.map((h) => (
+              {history.map((h) => (
                 <li key={h.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm">
                   <span>
                     <span className="block">{formatDate(h.finished_at)}</span>

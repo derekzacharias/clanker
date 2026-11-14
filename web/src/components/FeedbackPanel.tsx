@@ -148,19 +148,19 @@ export function FeedbackPanel({
           ) : (
             <p className="mt-1 text-xs">The scanner classification was not changed.</p>
           )}
-          {result.verification.evidence.length > 0 ? (
+          {(result.verification.evidence ?? []).length > 0 ? (
             <ul className="mt-2 space-y-1 text-xs">
-              {result.verification.evidence.slice(0, 3).map((e, i) => (
+              {(result.verification.evidence ?? []).slice(0, 3).map((e, i) => (
                 <li key={i} className="text-fg/90">
                   <span className="mono">{e.kind}</span> — {e.detail}
                 </li>
               ))}
             </ul>
           ) : null}
-          {result.improvement_ids.length > 0 ? (
+          {(result.improvement_ids ?? []).length > 0 ? (
             <p className="mt-2 text-xs">
-              Improvement proposal{result.improvement_ids.length > 1 ? "s" : ""}:{" "}
-              {result.improvement_ids.map((id) => (
+              Improvement proposal{(result.improvement_ids ?? []).length > 1 ? "s" : ""}:{" "}
+              {(result.improvement_ids ?? []).map((id) => (
                 <a key={id} href="/settings?tab=improvement" className="mono text-accent hover:underline">
                   {id}{" "}
                 </a>

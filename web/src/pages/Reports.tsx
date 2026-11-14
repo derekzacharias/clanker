@@ -26,7 +26,7 @@ export default function Reports() {
 
       {data ? (
         <Card>
-          {data.items.length === 0 ? (
+          {(data.items ?? []).length === 0 ? (
             <EmptyState
               icon={<FileBarChart2 className="h-5 w-5" />}
               title="No reports yet"
@@ -47,7 +47,7 @@ export default function Reports() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.items.map((r) => (
+                  {(data.items ?? []).map((r) => (
                     <Tr key={r.id}>
                       <Td>
                         <button

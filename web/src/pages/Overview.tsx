@@ -46,7 +46,15 @@ export default function Overview() {
     );
   }
 
-  const staleFeeds = data.feeds.filter((f) => f.stale);
+  // The API now always sends arrays, but a stale cached response or an older
+  // server must not be able to crash the screen.
+  const errors = data.errors ?? [];
+  const limitations = data.limitations ?? [];
+  const priority = data.priority ?? [];
+  const activity = data.activity ?? [];
+  const feeds = data.feeds ?? [];
+  const severity = data.severity ?? [];
+  const staleFeeds = feeds.filter((f) => f.stale);
   return (
     <div className="space-y-4">
       <PageHeader
@@ -114,14 +122,14 @@ export default function Overview() {
             }
           />
           <CardBody className="p-0">
-            {data.priority.length === 0 ? (
+            {priority.length === 0 ? (
               <p className="p-4 text-sm text-muted">
                 No actionable findings in the assessed scope. This is not proof the environment is secure — review
                 coverage below.
               </p>
             ) : (
               <ul className="divide-y divide-border">
-                {data.priority.map((f) => (
+                {priority.map((f) => (
                   <li key={f.id}>
                     <Link
                       to={`/vulnerabilities?q=${encodeURIComponent(f.cve)}`}
@@ -150,7 +158,7 @@ export default function Overview() {
           <Card>
             <CardHeader title="Severity distribution" />
             <CardBody>
-              <SeverityBar rows={data.severity} />
+              <SeverityBar rows={severity} />
             </CardBody>
           </Card>
 
@@ -167,11 +175,11 @@ export default function Overview() {
           <Card>
             <CardHeader title="Recent activity" />
             <CardBody className="p-0">
-              {data.activity.length === 0 ? (
+              {activity.length === 0 ? (
                 <p className="p-4 text-sm text-muted">No scans recorded yet.</p>
               ) : (
                 <ul className="divide-y divide-border">
-                  {data.activity.slice(0, 6).map((a) => (
+                  {activity.slice(0, 6).map((a) => (
                     <li key={a.id + a.finished_at} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm">
                       <span className="min-w-0">
                         <span className="block truncate">{a.host || a.kind}</span>
@@ -197,15 +205,15 @@ export default function Overview() {
         />
         <CardBody>
           <ul className="list-disc space-y-1 pl-5 text-sm text-muted">
-            {(data.limitations.length ? data.limitations : ["No limitations reported."]).map((l) => (
+            {(limitations.length ? limitations : ["No limitations reported."]).map((l) => (
               <li key={l}>{l}</li>
             ))}
           </ul>
-          {data.errors.length > 0 ? (
+          {errors.length > 0 ? (
             <div className="mt-3">
               <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Degraded coverage</h3>
               <ul className="mt-1 space-y-1 text-sm text-high">
-                {data.errors.map((e) => (
+                {errors.map((e) => (
                   <li key={e}>{e}</li>
                 ))}
               </ul>

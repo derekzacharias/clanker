@@ -44,7 +44,7 @@ export default function Scans() {
               description="Jobs started from the web interface. Progress is reported by the scanner."
               actions={data.active > 0 ? <Badge className="border-accent/30 bg-accent-soft text-accent">{data.active} running</Badge> : null}
             />
-            {data.jobs.length === 0 ? (
+            {(data.jobs ?? []).length === 0 ? (
               <EmptyState
                 title="No scans started from the interface"
                 description="Assessments run from the CLI still appear below in the report history."
@@ -67,7 +67,7 @@ export default function Scans() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.jobs.map((j) => (
+                    {(data.jobs ?? []).map((j) => (
                       <Tr key={j.id}>
                         <Td>
                           <span className="mono text-xs">{j.id}</span>
@@ -106,7 +106,7 @@ export default function Scans() {
 
           <Card>
             <CardHeader title="Assessment history" description="Stored reports on this host" />
-            {data.runs.length === 0 ? (
+            {(data.runs ?? []).length === 0 ? (
               <EmptyState title="No assessments yet" description="Run your first scan to create a baseline." />
             ) : (
               <TableWrap>
@@ -122,7 +122,7 @@ export default function Scans() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.runs.map((r) => (
+                    {(data.runs ?? []).map((r) => (
                       <Tr key={r.id}>
                         <Td>
                           <button

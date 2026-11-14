@@ -84,7 +84,15 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "dataset_error", err.Error())
 		return
 	}
-	resp := overviewResponse{HasData: len(ds.Hosts) > 0}
+	resp := overviewResponse{
+		HasData:  len(ds.Hosts) > 0,
+		Severity: []countRow{},
+		Priority: []vulnRow{},
+		Activity: []activityRow{},
+		Feeds:    []feedRow{},
+		Limits:   []string{},
+		Errors:   []string{},
+	}
 	resp.Metrics.Assets = len(ds.Hosts)
 
 	counts := map[string]int{}
@@ -269,6 +277,21 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 			history = append(history, run)
 		}
 	}
+	findings := hv.Findings
+	if findings == nil {
+		findings = []vulnRow{}
+	}
+	skipped := hv.Skipped
+	if skipped == nil {
+		skipped = []skippedRow{}
+	}
+	errorsList := hv.Errors
+	if errorsList == nil {
+		errorsList = []string{}
+	}
+	if history == nil {
+		history = []intel.RunSummary{}
+	}
 	pkgs := hv.Packages
 	limit := 500
 	if len(pkgs) > limit {
@@ -285,10 +308,10 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 		"packages":           pkgs,
 		"package_count":      len(hv.Packages),
 		"packages_truncated": len(hv.Packages) > limit,
-		"findings":           hv.Findings,
+		"findings":           findings,
 		"coverage":           hv.Coverage,
-		"skipped":            hv.Skipped,
-		"errors":             hv.Errors,
+		"skipped":            skipped,
+		"errors":             errorsList,
 		"policy":             hv.Policy,
 		"history":            history,
 	})
@@ -661,6 +684,9 @@ func (s *Server) handleReports(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reports_error", err.Error())
 		return
 	}
+	if runs == nil {
+		runs = []intel.RunSummary{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": runs, "total": len(runs)})
 }
 
@@ -770,7 +796,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "dataset_error", err.Error())
 		return
 	}
-	var endpoints []map[string]any
+	endpoints := []map[string]any{}
 	for _, hv := range ds.Hosts {
 		endpoints = append(endpoints, map[string]any{
 			"host": hv.Host, "agent_version": hv.ToolVersion,
