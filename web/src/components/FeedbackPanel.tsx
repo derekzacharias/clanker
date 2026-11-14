@@ -110,7 +110,7 @@ export function FeedbackPanel({
         <button
           type="button"
           onClick={loadHistory}
-          className="text-xs text-accent hover:underline"
+          className="text-xs text-accent underline underline-offset-2"
           aria-expanded={showHistory}
         >
           {showHistory ? "Hide history" : "Review history"}
@@ -161,7 +161,7 @@ export function FeedbackPanel({
             <p className="mt-2 text-xs">
               Improvement proposal{(result.improvement_ids ?? []).length > 1 ? "s" : ""}:{" "}
               {(result.improvement_ids ?? []).map((id) => (
-                <a key={id} href="/settings?tab=improvement" className="mono text-accent hover:underline">
+                <a key={id} href="/settings?tab=improvement" className="mono text-accent underline underline-offset-2">
                   {id}{" "}
                 </a>
               ))}

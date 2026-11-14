@@ -59,7 +59,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       // retry fails silently with the same 401.
       const hadToken = Boolean(getToken());
       if (hadToken) setToken("");
-      setAuthReason(hadToken ? "rejected" : "required");
+      // Later unauthenticated retries must not overwrite the explanation: once a
+      // token was rejected, that is what the user needs to see.
+      setAuthReason((current) => (hadToken || current === "rejected" ? "rejected" : "required"));
       setAuthNeeded(true);
     };
     window.addEventListener("guard:unauthorized", onUnauthorized);

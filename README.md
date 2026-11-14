@@ -20,6 +20,18 @@ Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)
 
 Homebrew tap: [clankercloud/homebrew-tap](https://github.com/clankercloud/homebrew-tap)
 
+### Testing
+
+```bash
+cd web && npm run test          # jsdom component tests
+cd web && npm run test:e2e      # Playwright: real browser, real API, isolated cache
+```
+
+The Playwright suite covers every route, the scan workflow, authenticated
+downloads, accessibility (axe + keyboard) and five viewports across Chromium,
+Firefox and WebKit. See [docs/TESTING.md](docs/TESTING.md) for the harness and the
+defect log it produced.
+
 ### Continuous improvement
 
 Analyst reviews feed a controlled improvement loop: reviews are verified against

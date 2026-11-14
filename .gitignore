@@ -81,3 +81,5 @@ dist/
 clanker-guard-report.*
 web/node_modules/
 web/dist/
+web/.e2e/
+test-results/

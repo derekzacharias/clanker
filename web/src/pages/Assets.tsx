@@ -120,7 +120,7 @@ export default function Assets() {
                 {filtered.map((a) => (
                   <Tr key={a.host}>
                     <Td>
-                      <Link to={`/assets/${encodeURIComponent(a.host)}`} className="font-medium text-accent hover:underline">
+                      <Link to={`/assets/${encodeURIComponent(a.host)}`} className="font-medium text-accent underline underline-offset-2">
                         {a.host}
                       </Link>
                       <div className="text-xs text-muted">

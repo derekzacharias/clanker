@@ -16,7 +16,7 @@ import { Card, CardHeader } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Banner, EmptyState, ErrorState, LoadingBlock } from "../components/ui/Feedback";
-import { Drawer } from "../components/ui/Dialog";
+import { Drawer, Modal } from "../components/ui/Dialog";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 import { cn } from "../lib/cn";
@@ -44,6 +44,8 @@ export default function Improvement() {
   const { data: improvements, error, loading, reload } = useAsync(() => api.improvements());
   const { data: quality, reload: reloadQuality } = useAsync(() => api.quality());
   const [openId, setOpenId] = useState<string | null>(null);
+  const [rejectId, setRejectId] = useState<string | null>(null);
+  const [rejectNote, setRejectNote] = useState("");
   const { push } = useToast();
 
   function refresh() {
@@ -105,7 +107,7 @@ export default function Improvement() {
             description={
               <>
                 Mark a finding as a false positive with a reason on the{" "}
-                <Link to="/vulnerabilities" className="text-accent hover:underline">
+                <Link to="/vulnerabilities" className="text-accent underline underline-offset-2">
                   Vulnerabilities
                 </Link>{" "}
                 page. When advisory evidence supports the review, a proposal appears here with generated test fixtures.
@@ -148,7 +150,14 @@ export default function Improvement() {
                         <Button size="sm" variant="primary" onClick={() => act(imp.id, "approved", "approved from web UI")}>
                           <Check className="h-3.5 w-3.5" aria-hidden="true" /> Approve
                         </Button>
-                        <Button size="sm" variant="danger" onClick={() => rejection(imp.id, act)}>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => {
+                            setRejectNote("");
+                            setRejectId(imp.id);
+                          }}
+                        >
                           <X className="h-3.5 w-3.5" aria-hidden="true" /> Reject
                         </Button>
                       </>
@@ -173,6 +182,46 @@ export default function Improvement() {
 
       <RecentFeedback quality={quality} />
 
+      <Modal
+        open={Boolean(rejectId)}
+        onOpenChange={(open) => {
+          if (!open) setRejectId(null);
+        }}
+        title="Reject this proposal"
+        description="A reason is required and is recorded in the audit trail with your name."
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setRejectId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              disabled={!rejectNote.trim()}
+              onClick={async () => {
+                if (!rejectId) return;
+                await act(rejectId, "rejected", rejectNote.trim());
+                setRejectId(null);
+              }}
+            >
+              Reject proposal
+            </Button>
+          </>
+        }
+      >
+        <label htmlFor="reject-reason" className="block text-xs font-medium text-muted">
+          Reason
+        </label>
+        <textarea
+          id="reject-reason"
+          value={rejectNote}
+          onChange={(e) => setRejectNote(e.target.value)}
+          rows={3}
+          autoFocus
+          placeholder="Why is this proposal not acceptable?"
+          className="mt-1 w-full rounded-md border border-border-strong bg-surface px-2.5 py-1.5 text-sm"
+        />
+      </Modal>
+
       <ImprovementDrawer
         id={openId}
         onClose={() => setOpenId(null)}
@@ -183,19 +232,12 @@ export default function Improvement() {
   );
 }
 
-function rejection(id: string, act: (id: string, to: ImprovementStatus, note?: string) => Promise<void>) {
-  const note = window.prompt("Reason for rejecting this proposal (required):");
-  if (note && note.trim()) {
-    void act(id, "rejected", note.trim());
-  }
-}
-
 function QualityCards({ quality }: { quality: QualityResponse | null }) {
   if (!quality) return null;
   const m = quality.metrics;
   const counts = quality.improvement_counts ?? {};
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <Card className="p-4">
         <p className="text-xs uppercase tracking-wide text-muted">Reviewed findings</p>
         <p className="num mt-1 text-2xl font-semibold">{m.reviewed}</p>

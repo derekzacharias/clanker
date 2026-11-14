@@ -127,7 +127,7 @@ export default function Scans() {
                         <Td>
                           <button
                             type="button"
-                            className="mono text-xs text-accent hover:underline"
+                            className="mono text-xs text-accent underline underline-offset-2"
                             onClick={() => navigate(`/reports/${encodeURIComponent(r.id)}`)}
                           >
                             {r.id}

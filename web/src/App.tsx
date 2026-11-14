@@ -30,7 +30,7 @@ function Routes() {
     <div className="mx-auto max-w-lg py-16 text-center">
       <h1 className="text-lg font-semibold">Page not found</h1>
       <p className="mt-1 text-sm text-muted">The address {pathname} does not match any screen.</p>
-      <a href="/" className="mt-4 inline-block text-sm text-accent hover:underline">
+      <a href="/" className="mt-4 inline-block text-sm text-accent underline underline-offset-2">
         Back to overview
       </a>
     </div>

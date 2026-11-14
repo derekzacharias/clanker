@@ -1,6 +1,6 @@
 import { AlertTriangle, CheckCircle2, Laptop, Loader2, Network, Package, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api, ApiError, type Job } from "../lib/api";
+import { api, ApiError, downloadReportExport, type Job } from "../lib/api";
 import { navigate } from "../lib/router";
 import { formatDate } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
@@ -99,7 +99,7 @@ export default function NewScan() {
         description="Three steps: choose what to assess, configure it, review. Nothing runs until you confirm."
       />
 
-      <ol className="mb-4 flex items-center gap-2 text-sm" aria-label="Scan setup steps">
+      <ol className="mb-4 flex flex-wrap items-center gap-2 text-sm" aria-label="Scan setup steps">
         {["Choose scan type", "Configure", "Review"].map((label, i) => {
           const n = i + 1;
           return (
@@ -121,7 +121,7 @@ export default function NewScan() {
       </ol>
 
       {step === 1 ? (
-        <div className="grid gap-3 sm:grid-cols-3" role="group" aria-label="Scan type">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" role="group" aria-label="Scan type">
           <TypeCard
             selected={kind === "local"}
             onSelect={() => setKind("local")}
@@ -182,7 +182,11 @@ export default function NewScan() {
                 : "The SBOM reader is on the roadmap; inventory already produces package URLs, so this is an adapter, not a redesign."}
             </Banner>
             <fieldset disabled className="space-y-3">
-              <Field label="Authorisation scope file" hint="Names who approved the scan, the exact targets, and the host cap.">
+              <Field
+                label="Authorisation scope file"
+                htmlFor="scope-file"
+                hint="Names who approved the scan, the exact targets, and the host cap."
+              >
                 <Input
                   id="scope-file"
                   value={scopeFile}
@@ -190,7 +194,7 @@ export default function NewScan() {
                   placeholder="scope.yaml"
                 />
               </Field>
-              <Field label="Targets" hint="Comma-separated addresses or CIDRs. Must be inside the approved scope.">
+              <Field label="Targets" htmlFor="targets" hint="Comma-separated addresses or CIDRs. Must be inside the approved scope.">
                 <Input
                   id="targets"
                   value={targets}
@@ -226,8 +230,12 @@ export default function NewScan() {
         <Card>
           <CardHeader title="Configure local assessment" description="Defaults are safe: read-only, unprivileged, no uploads." />
           <CardBody className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Failure threshold" hint="Sets the report policy and scan exit code. Does not change detection.">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field
+                label="Failure threshold"
+                htmlFor="fail-on"
+                hint="Sets the report policy and scan exit code. Does not change detection."
+              >
                 <Select id="fail-on" value={failOn} onChange={(e) => setFailOn(e.target.value)}>
                   <option value="">Never fail (report only)</option>
                   <option value="critical">Fail on critical</option>
@@ -489,12 +497,13 @@ function ScanProgress({ job, onCancel, error }: { job: Job; onCancel: () => void
                 <Button size="sm" variant="ghost" onClick={() => navigate("/vulnerabilities")}>
                   Review findings
                 </Button>
-                <a
-                  className="inline-flex h-8 items-center rounded-md border border-border-strong px-2.5 text-[0.8125rem] hover:bg-surface-2"
-                  href={api.exportUrl(job.report_id, "markdown")}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => void downloadReportExport(job.report_id!, "markdown")}
                 >
                   Download Markdown
-                </a>
+                </Button>
               </div>
             </Banner>
           ) : null}

@@ -1,5 +1,5 @@
 import { Download, FileBarChart2 } from "lucide-react";
-import { api } from "../lib/api";
+import { api, downloadReportExport } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { navigate } from "../lib/router";
 import { formatDate } from "../lib/format";
@@ -8,11 +8,13 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { EmptyState, ErrorState, LoadingBlock } from "../components/ui/Feedback";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
+import { useToast } from "../components/ui/Toast";
 
 const FORMATS = ["json", "markdown", "sarif", "html"] as const;
 
 export default function Reports() {
   const { data, error, loading, reload } = useAsync(() => api.reports());
+  const { push } = useToast();
 
   return (
     <div>
@@ -52,7 +54,7 @@ export default function Reports() {
                       <Td>
                         <button
                           type="button"
-                          className="mono text-xs text-accent hover:underline"
+                          className="mono text-xs text-accent underline underline-offset-2"
                           onClick={() => navigate(`/reports/${encodeURIComponent(r.id)}`)}
                         >
                           {r.id}
@@ -68,14 +70,21 @@ export default function Reports() {
                       <Td>
                         <div className="flex flex-wrap gap-1">
                           {FORMATS.map((f) => (
-                            <a
+                            <button
                               key={f}
-                              href={api.exportUrl(r.id, f)}
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  await downloadReportExport(r.id, f);
+                                } catch (err) {
+                                  push(err instanceof Error ? err.message : String(err), "error");
+                                }
+                              }}
                               className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-2 hover:text-fg"
                             >
                               <Download className="h-3 w-3" aria-hidden="true" />
                               {f}
-                            </a>
+                            </button>
                           ))}
                         </div>
                       </Td>

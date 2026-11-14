@@ -118,6 +118,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("inventory failed: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
+	}
 	if len(inv.Packages) == 0 {
 		return Result{}, fmt.Errorf("inventory returned no packages; refusing to report a clean scan")
 	}
@@ -143,6 +146,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		AssetCriticality:   opts.AssetCriticality,
 		Now:                opts.Now,
 	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
+	}
 	res, assessErr := engine.Assess(ctx, inv)
 
 	errors := append([]string{}, res.Stats.Errors...)
@@ -158,6 +164,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// A cancelled assessment must not become the newest baseline for the host.
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
+	}
 	opts.report(Stage{Name: "report", Percent: 92, Detail: "assembling report"})
 
 	// --- metadata ------------------------------------------------------------

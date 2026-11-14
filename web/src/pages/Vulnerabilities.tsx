@@ -267,7 +267,7 @@ export default function Vulnerabilities() {
                     <Td>
                       <button
                         type="button"
-                        className="mono text-left text-accent hover:underline"
+                        className="mono text-left text-accent underline underline-offset-2"
                         onClick={(e) => {
                           e.stopPropagation();
                           setOpenId(v.id);

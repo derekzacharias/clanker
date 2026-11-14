@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,3 +177,43 @@ func TestRunRefusesEmptyInventory(t *testing.T) {
 type io_Discard struct{}
 
 func (io_Discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestRunAbortsWhenCancelled covers the cancellation defect found by the
+// Playwright suite: a cancelled scan must return an error and must not write a
+// report, which would otherwise become the newest baseline for the host.
+func TestRunAbortsWhenCancelled(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "intel.db")
+	seedCache(t, cachePath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the work starts
+
+	_, err := Run(ctx, Options{
+		Root:       fixtureRoot(t, true),
+		CachePath:  cachePath,
+		Offline:    true,
+		Format:     "json",
+		OutputPath: filepath.Join(t.TempDir(), "report.json"),
+		Collectors: []inventory.Collector{&inventory.OSPackageCollector{}},
+		Stderr:     io_Discard{},
+	})
+	if err == nil {
+		t.Fatal("a cancelled scan must return an error, not a report")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("error should say the run was cancelled, got %v", err)
+	}
+
+	store, openErr := intel.OpenStore(cachePath)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer store.Close()
+	runs, listErr := store.ListRuns(context.Background(), 10)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("a cancelled scan must not be stored as an assessment, found %d", len(runs))
+	}
+}

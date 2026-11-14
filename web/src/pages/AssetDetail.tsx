@@ -64,7 +64,7 @@ export default function AssetDetail({ host }: { host: string }) {
         }
       />
 
-      <div className="grid gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
         <Card className="p-4">
           <p className="text-xs uppercase tracking-wide text-muted">Findings</p>
           <p className="num mt-1 text-2xl font-semibold">{actionable}</p>
@@ -122,7 +122,7 @@ export default function AssetDetail({ host }: { host: string }) {
                 {findings.slice(0, 200).map((f) => (
                   <Tr key={f.id}>
                     <Td>
-                      <Link to={`/vulnerabilities?q=${encodeURIComponent(f.cve)}`} className="mono text-accent hover:underline">
+                      <Link to={`/vulnerabilities?q=${encodeURIComponent(f.cve)}`} className="mono text-accent underline underline-offset-2">
                         {f.cve}
                       </Link>
                       <div className="text-xs text-muted">{f.source}</div>
@@ -222,7 +222,7 @@ export default function AssetDetail({ host }: { host: string }) {
         ) : null}
       </section>
 
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <Card>
           <CardHeader title="Coverage" description="What this assessment actually inspected" />
           <CardBody className="space-y-2 text-sm">
@@ -285,7 +285,7 @@ export default function AssetDetail({ host }: { host: string }) {
 
       <Card>
         <CardHeader title="Endpoint identification" description="Where the inventory came from" />
-        <CardBody className="grid gap-2 text-sm sm:grid-cols-2">
+        <CardBody className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
           <Row label="Hostname" value={data.asset.hostname} />
           <Row label="Distribution" value={data.asset.distro_id || "unknown"} />
           <Row label="OS" value={`${data.asset.os} ${data.asset.os_version}`} />

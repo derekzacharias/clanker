@@ -196,6 +196,13 @@ hardware.
 
 ---
 
+## 7a. Browser-level verification
+
+The interface is tested in Chromium, Firefox and WebKit with Playwright, against
+an isolated snapshot of the scanner database: routes, workflows, authenticated
+downloads, axe accessibility checks, keyboard flows and five viewport sizes.
+Harness details and the defects that pass found: [TESTING.md](TESTING.md).
+
 ## 7b. Continuous improvement screens
 
 Finding details include an analyst review panel (five actions, structured

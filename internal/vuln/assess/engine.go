@@ -158,6 +158,9 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
+	}
 	e.progress("intelligence", fmt.Sprintf("%d advisories fetched, %d from cache", e.stats.AdvisoriesFetched, e.stats.AdvisoriesCached))
 
 	// 3) match
@@ -201,6 +204,10 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 
 	// 4) collapse advisories that describe the same vulnerability
 	findings = dedupeFindings(findings)
+
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
+	}
 
 	// 5) enrich with KEV / EPSS and score risk
 	for i := range findings {

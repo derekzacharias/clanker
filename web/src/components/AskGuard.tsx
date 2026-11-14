@@ -111,7 +111,7 @@ export function AskGuard({ open, onOpenChange }: { open: boolean; onOpenChange: 
                   <li key={c.id} className="flex flex-wrap items-center gap-2 text-sm">
                     <Link
                       to={`/vulnerabilities?q=${encodeURIComponent(c.cve)}`}
-                      className="mono text-accent hover:underline"
+                      className="mono text-accent underline underline-offset-2"
                     >
                       {c.cve}
                     </Link>
@@ -123,7 +123,7 @@ export function AskGuard({ open, onOpenChange }: { open: boolean; onOpenChange: 
                         href={c.advisory_url}
                         target="_blank"
                         rel="noreferrer"
-                        className="text-xs text-accent hover:underline"
+                        className="text-xs text-accent underline underline-offset-2"
                       >
                         advisory ↗
                       </a>

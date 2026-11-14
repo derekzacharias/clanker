@@ -12,7 +12,8 @@
   --border-strong: #cfd7e2;
   --fg: #0f1729;
   --fg-muted: #5b6675;
-  --fg-subtle: #7c8798;
+  /* 5.01:1 on white, 4.54:1 on surface-2 — AA for small text */
+  --fg-subtle: #667080;
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
   --accent-fg: #ffffff;
@@ -42,7 +43,8 @@
   --border-strong: #334054;
   --fg: #e8edf5;
   --fg-muted: #9aa6b8;
-  --fg-subtle: #7d8998;
+  /* 6.06:1 on surface, 5.44:1 on the darkest card — AA for small text */
+  --fg-subtle: #8b97a8;
   --accent: #3b82f6;
   --accent-hover: #60a5fa;
   --accent-fg: #08101f;

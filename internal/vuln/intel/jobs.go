@@ -44,18 +44,25 @@ func (s *Store) CreateJob(ctx context.Context, j Job) error {
 	return err
 }
 
-// UpdateJobProgress writes a progress tick.
+// UpdateJobProgress writes a progress tick for a job that is still running.
+// A cancelled or finished job must not receive further progress.
 func (s *Store) UpdateJobProgress(ctx context.Context, id, stage, detail string, percent int) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE scan_jobs
-		SET stage = ?, stage_detail = ?, percent = ? WHERE id = ?`, stage, detail, percent, id)
+		SET stage = ?, stage_detail = ?, percent = ? WHERE id = ? AND status = ?`,
+		stage, detail, percent, id, JobRunning)
 	return err
 }
 
-// FinishJob marks a job terminal.
+// FinishJob marks a running job terminal.
+//
+// The update is conditional on the job still being 'running': a cancelled job
+// must not be flipped back to 'completed' by the goroutine that was doing the
+// work, which is exactly what happened before cancellation propagated.
 func (s *Store) FinishJob(ctx context.Context, id, status, reportID, errMsg string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE scan_jobs
 		SET status = ?, finished_at = ?, report_id = ?, error = ?, percent = CASE WHEN ? = 'completed' THEN 100 ELSE percent END
-		WHERE id = ?`, status, ts(time.Now().UTC()), reportID, errMsg, status, id)
+		WHERE id = ? AND status = ?`,
+		status, ts(time.Now().UTC()), reportID, errMsg, status, id, JobRunning)
 	return err
 }
 

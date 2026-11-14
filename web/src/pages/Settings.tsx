@@ -16,12 +16,16 @@ import { Switch } from "../components/ui/Switch";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 
+const TABS = ["general", "intelligence", "agents", "improvement", "access"] as const;
+
 export default function Settings() {
   const tabParam = useQueryParam("tab");
+  // An unknown or stale tab value must fall back instead of rendering nothing.
+  const initialTab = TABS.includes((tabParam ?? "") as (typeof TABS)[number]) ? (tabParam as string) : "general";
   return (
     <div>
       <PageHeader title="Settings" description="Scanner policy, vulnerability intelligence, endpoint agents and access." />
-      <Tabs.Root defaultValue={tabParam ?? "general"}>
+      <Tabs.Root defaultValue={initialTab}>
         <Tabs.List className="mb-3 flex flex-wrap gap-1 border-b border-border" aria-label="Settings sections">
           {[
             ["general", "General"],
@@ -98,7 +102,11 @@ function GeneralTab() {
     <Card>
       <CardHeader title="Assessment policy" description="Applied to new scans and the CLI exit code. Detection is unchanged." />
       <CardBody className="max-w-2xl space-y-4">
-        <Field label="Failure threshold" hint="Exit code 2 when an actionable finding is at or above this severity.">
+        <Field
+          label="Failure threshold"
+          htmlFor="policy-fail-on"
+          hint="Exit code 2 when an actionable finding is at or above this severity."
+        >
           <Select id="policy-fail-on" value={failOn} onChange={(e) => setFailOn(e.target.value)}>
             <option value="">Never fail (report only)</option>
             <option value="critical">Critical</option>
@@ -191,7 +199,7 @@ function IntelligenceTab() {
 
       <Card>
         <CardHeader title="Local cache" />
-        <CardBody className="grid gap-2 text-sm sm:grid-cols-3">
+        <CardBody className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
           <Count label="Advisories" value={data.counts.advisories} />
           <Count label="KEV records" value={data.counts.kev} />
           <Count label="EPSS scores" value={data.counts.epss} />
@@ -226,7 +234,7 @@ function AgentsTab() {
           title="This endpoint"
           description="The server host's own agent-equivalent inventory path"
         />
-        <CardBody className="grid gap-2 text-sm sm:grid-cols-2">
+        <CardBody className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
           <Row label="Hostname" value={data.local.host} />
           <Row label="Agent version" value={data.local.version} />
           <Row label="Platform" value={data.local.platform} />
@@ -243,7 +251,7 @@ function AgentsTab() {
         />
         <CardBody className="space-y-3">
           {data.install.published ? (
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <InstallCommand title="Linux" command={data.install.commands?.linux ?? ""} />
               <InstallCommand title="macOS" command={data.install.commands?.macos ?? ""} />
               <InstallCommand title="Windows (PowerShell)" command={data.install.commands?.windows ?? ""} />
@@ -344,7 +352,7 @@ function AccessTab() {
             <span className="mono"> CLANKER_GUARD_TOKEN</span>, which this interface sends as the
             <span className="mono"> X-Guard-Token</span> header.
           </p>
-          <Field label="API token" hint="Stored in this browser only. Leave empty for a loopback server.">
+          <Field label="API token" htmlFor="api-token" hint="Stored in this browser only. Leave empty for a loopback server.">
             <div className="flex gap-2">
               <Input
                 id="api-token"
@@ -371,7 +379,7 @@ function AccessTab() {
       <Card>
         <CardHeader title="Capabilities in this build" description="What the interface will and will not do" />
         <CardBody>
-          <ul className="grid gap-2 text-sm sm:grid-cols-2">
+          <ul className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
             {Object.entries(data.capabilities).map(([key, enabled]) => (
               <li key={key} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                 <span className="mono text-xs">{key}</span>

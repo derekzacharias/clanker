@@ -81,7 +81,7 @@ export default function Overview() {
         <Banner tone="warn" title="Vulnerability intelligence is stale">
           {staleFeeds.map((f) => `${f.source} last synced ${relativeTime(f.last_sync)}`).join(" · ")}. Findings may be
           incomplete until the feeds are refreshed.{" "}
-          <Link to="/settings?tab=intelligence" className="text-accent underline-offset-2 hover:underline">
+          <Link to="/settings?tab=intelligence" className="text-accent underline underline-offset-2 hover:text-accent-hover">
             Update intelligence
           </Link>
         </Banner>
@@ -90,7 +90,7 @@ export default function Overview() {
       {data.improvements_available > 0 ? (
         <Banner tone="success" title={`${data.improvements_available} detection improvement(s) available for review`}>
           Generated from verified analyst reviews, tested against fixtures. Nothing is deployed without approval.{" "}
-          <Link to="/settings?tab=improvement" className="text-accent underline-offset-2 hover:underline">
+          <Link to="/settings?tab=improvement" className="text-accent underline underline-offset-2 hover:text-accent-hover">
             Review proposals
           </Link>
         </Banner>
@@ -103,20 +103,20 @@ export default function Overview() {
         </Banner>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Assets" value={data.metrics.assets} hint={`${data.coverage.assessed} with a completed scan`} icon={<Server className="h-4 w-4" />} />
         <StatCard label="Critical" value={data.metrics.critical} tone="critical" hint="Confirmed or probable" icon={<ShieldAlert className="h-4 w-4" />} />
         <StatCard label="High" value={data.metrics.high} tone="high" hint="Confirmed or probable" icon={<TriangleAlert className="h-4 w-4" />} />
         <StatCard label="Known exploited" value={data.metrics.kev} tone={data.metrics.kev > 0 ? "critical" : "default"} hint="CISA KEV membership" icon={<Sparkles className="h-4 w-4" />} />
       </div>
 
-      <div className="grid gap-3 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
         <Card className="xl:col-span-2">
           <CardHeader
             title="Priority findings"
             description="Ranked by the backend risk model: KEV, EPSS, severity, exposure, confidence and fix availability."
             actions={
-              <Link to="/vulnerabilities" className="text-xs text-accent hover:underline">
+              <Link to="/vulnerabilities" className="text-xs text-accent underline underline-offset-2">
                 View all
               </Link>
             }
@@ -169,6 +169,10 @@ export default function Overview() {
               <Row label={`Not scanned in ${data.coverage.stale_after_days} days`} value={String(data.coverage.stale)} />
               <Row label="Failed assessments (24 h)" value={String(data.coverage.failed_recent)} />
               <Row label="Latest completed" value={formatDate(data.coverage.last_scan_at)} />
+              <p className="mt-2 border-t border-border pt-2 text-xs text-muted">
+                A completed scan is not proof the environment is secure: it covers only the packages and sources listed
+                below.
+              </p>
             </CardBody>
           </Card>
 

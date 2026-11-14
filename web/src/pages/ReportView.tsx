@@ -1,5 +1,5 @@
 import { ArrowLeft, Download } from "lucide-react";
-import { api } from "../lib/api";
+import { api, downloadReportExport } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { Link } from "../lib/router";
 import { formatDate, num, pct, relativeTime, riskTone, severityLabel } from "../lib/format";
@@ -7,6 +7,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Banner, ErrorState, LoadingBlock } from "../components/ui/Feedback";
+import { useToast } from "../components/ui/Toast";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { ApplicabilityBadge, ConfidenceBadge, FixBadge, KevBadge, SeverityBadge } from "../components/badges";
 import type { Applicability, Severity } from "../lib/api";
@@ -27,10 +28,20 @@ interface ReportFinding {
   source: string;
 }
 
-const FORMATS = ["json", "markdown", "sarif", "html"] as const;
+const FORMATS_EXPORT = ["json", "markdown", "sarif", "html"] as const;
 
 export default function ReportView({ id }: { id: string }) {
   const { data, error, loading, reload } = useAsync(() => api.report(id), [id]);
+  const { push } = useToast();
+
+  async function download(format: (typeof FORMATS_EXPORT)[number]) {
+    try {
+      const name = await downloadReportExport(id, format);
+      push(`Downloaded ${name}`);
+    } catch (err) {
+      push(err instanceof Error ? err.message : String(err), "error");
+    }
+  }
 
   if (loading && !data) return <LoadingBlock label="Loading report" />;
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
@@ -55,21 +66,22 @@ export default function ReportView({ id }: { id: string }) {
             <Link to="/reports" className="inline-flex items-center gap-1 text-sm text-muted hover:text-fg">
               <ArrowLeft className="h-4 w-4" aria-hidden="true" /> All reports
             </Link>
-            {FORMATS.map((f) => (
-              <a
+            {FORMATS_EXPORT.map((f) => (
+              <button
                 key={f}
-                href={api.exportUrl(id, f)}
+                type="button"
+                onClick={() => void download(f)}
                 className="inline-flex h-8 items-center gap-1 rounded-md border border-border-strong px-2.5 text-[0.8125rem] hover:bg-surface-2"
               >
                 <Download className="h-3.5 w-3.5" aria-hidden="true" />
                 {f}
-              </a>
+              </button>
             ))}
           </>
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {(["critical", "high", "medium", "low"] as Severity[]).map((s) => (
           <Card key={s} className="p-4">
             <p className="text-xs uppercase tracking-wide text-muted">{severityLabel[s]}</p>
@@ -84,7 +96,7 @@ export default function ReportView({ id }: { id: string }) {
 
       <Card>
         <CardHeader title="Assessment summary" description="What the scan did and did not cover" />
-        <CardBody className="grid gap-3 text-sm sm:grid-cols-2">
+        <CardBody className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
           <div className="space-y-2">
             <Row label="Packages inspected" value={String(data.metadata.coverage?.packages_inspected ?? 0)} />
             <Row label="Packages with matches" value={String(data.metadata.coverage?.packages_matched ?? 0)} />
@@ -102,6 +114,10 @@ export default function ReportView({ id }: { id: string }) {
                 </li>
               ))}
             </ul>
+            <p className="pt-2 text-xs text-muted">
+              This report describes what was checked. It is not a statement that the environment is secure: findings are
+              limited to the sources, packages and detection methods listed here.
+            </p>
             {(data.metadata.coverage?.limitations ?? []).length > 0 ? (
               <>
                 <p className="pt-2 text-xs font-semibold uppercase tracking-wide text-muted">Limitations</p>
@@ -156,7 +172,7 @@ export default function ReportView({ id }: { id: string }) {
                     <Td>
                       <Link
                         to={`/vulnerabilities?q=${encodeURIComponent(f.vulnerability_id)}`}
-                        className="mono text-xs text-accent hover:underline"
+                        className="mono text-xs text-accent underline underline-offset-2"
                       >
                         {f.vulnerability_id}
                       </Link>
@@ -190,9 +206,9 @@ export default function ReportView({ id }: { id: string }) {
       </Card>
 
       <div className="flex flex-wrap gap-2">
-        <Button onClick={() => window.location.assign(api.exportUrl(id, "json"))}>Download JSON</Button>
-        <Button onClick={() => window.location.assign(api.exportUrl(id, "sarif"))}>Download SARIF</Button>
-        <Button onClick={() => window.location.assign(api.exportUrl(id, "html"))}>Download HTML</Button>
+        <Button onClick={() => void download("json")}>Download JSON</Button>
+        <Button onClick={() => void download("sarif")}>Download SARIF</Button>
+        <Button onClick={() => void download("html")}>Download HTML</Button>
       </div>
     </div>
   );

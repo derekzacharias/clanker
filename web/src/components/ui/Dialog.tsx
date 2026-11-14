@@ -1,6 +1,6 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 /** Side panel on Radix Dialog: focus trap, aria-modal, Escape, restored focus. */
@@ -21,11 +21,23 @@ export function Drawer({
   footer?: ReactNode;
   width?: "md" | "lg";
 }) {
+  // Radix restores focus to its own trigger when one exists; our dialogs are
+  // opened programmatically, so remember the opener and return focus to it.
+  const opener = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (open) opener.current = document.activeElement as HTMLElement | null;
+  }, [open]);
+
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/30" />
         <DialogPrimitive.Content
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const target = opener.current;
+            if (target && document.contains(target)) target.focus();
+          }}
           className={cn(
             "fixed right-0 top-0 z-50 flex h-full w-full flex-col border-l border-border bg-surface shadow-xl",
             width === "lg" ? "sm:max-w-3xl" : "sm:max-w-xl",
@@ -72,11 +84,23 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
 }) {
+  const opener = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (open) opener.current = document.activeElement as HTMLElement | null;
+  }, [open]);
+
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/30" />
-        <DialogPrimitive.Content className="fixed left-1/2 top-1/2 z-50 w-[min(34rem,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-surface p-5 shadow-xl">
+        <DialogPrimitive.Content
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const target = opener.current;
+            if (target && document.contains(target)) target.focus();
+          }}
+          className="fixed left-1/2 top-1/2 z-50 w-[min(34rem,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-surface p-5 shadow-xl"
+        >
           <div className="flex items-start justify-between gap-4">
             <div>
               <DialogPrimitive.Title className="text-base font-semibold">{title}</DialogPrimitive.Title>

@@ -577,6 +577,62 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
   return s ? `?${s}` : "";
 }
 
+/**
+ * Fetch a file with the API token and save it.
+ *
+ * Export endpoints are authenticated, so a plain <a href> would navigate to a
+ * 401 JSON body instead of downloading (the browser does not attach custom
+ * headers to link navigations). Everything therefore goes through fetch + Blob.
+ */
+export async function downloadFile(path: string, fallbackName: string): Promise<string> {
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set("X-Guard-Token", token);
+  let res: Response;
+  try {
+    res = await fetch(path, { headers });
+  } catch {
+    throw new ApiError(0, "network_error", "Cannot reach the Clanker Guard API.");
+  }
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) message = body.error;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(res.status, "download_failed", message);
+  }
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  const filename = match?.[1] ?? fallbackName;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoke on the next tick so Safari has time to start the download.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return filename;
+}
+
+export async function downloadReportExport(
+  id: string,
+  format: "json" | "markdown" | "sarif" | "html",
+): Promise<string> {
+  const ext = format === "markdown" ? "md" : format;
+  return downloadFile(`/api/reports/${encodeURIComponent(id)}/export?format=${format}`, `clanker-guard-${id}.${ext}`);
+}
+
+export async function downloadFeedbackExport(): Promise<string> {
+  return downloadFile("/api/feedback/export", "clanker-guard-feedback.json");
+}
+
 export const api = {
   meta: () => request<Meta>("/api/meta"),
   health: () => request<{ status: string }>("/api/health"),
