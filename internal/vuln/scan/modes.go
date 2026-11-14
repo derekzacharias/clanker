@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -57,7 +58,12 @@ func runNetwork(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	// --- CVE correlation ------------------------------------------------------
-	nvd := netscan.NewNVDClient(opts.NVDAPIKey)
+	apiKey := opts.NVDAPIKey
+	if apiKey == "" {
+		// NVD allows five requests per 30s without a key; a key raises it to 50.
+		apiKey = os.Getenv("CLANKER_NVD_API_KEY")
+	}
+	nvd := netscan.NewNVDClient(apiKey)
 	lookup := opts.NVDFunc
 	if lookup == nil {
 		lookup = nvd.MatchCPE
