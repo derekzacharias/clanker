@@ -9,15 +9,12 @@ async function jobs(page: Page): Promise<Job[]> {
 }
 
 test.describe("scan workflow", () => {
-  test("three-step flow, network blocked with a reason", async ({ page }) => {
+  test("offers all three assessment types", async ({ page }) => {
     await page.goto("/scans/new");
     await expect(page.getByRole("heading", { name: /New scan/i })).toBeVisible();
-
-    // Local only is available; network and SBOM are explained, not silently absent.
-    await page.getByRole("button", { name: /Network Assessment/i }).click();
-    await expect(page.getByText(/Network assessment is not implemented in this build/i)).toBeVisible();
-    await expect(page.getByRole("button", { name: /^Continue$/ })).toBeDisabled();
-
+    for (const label of [/Local Endpoint/i, /Network Assessment/i, /Software \/ Container/i]) {
+      await expect(page.getByRole("button", { name: label })).toBeVisible();
+    }
     await page.getByRole("button", { name: /Local Endpoint/i }).click();
     await expect(page.getByRole("button", { name: /^Continue$/ })).toBeEnabled();
   });

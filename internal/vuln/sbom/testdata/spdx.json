@@ -1,0 +1,10 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "name": "payments-api",
+  "packages": [
+    { "name": "flask", "versionInfo": "3.0.0",
+      "externalRefs": [{ "referenceType": "purl", "referenceLocator": "pkg:pypi/flask@3.0.0" }] },
+    { "name": "lodash", "versionInfo": "4.17.21",
+      "externalRefs": [{ "referenceType": "purl", "referenceLocator": "pkg:npm/lodash@4.17.21" }] }
+  ]
+}

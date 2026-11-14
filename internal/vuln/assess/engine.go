@@ -95,13 +95,17 @@ func (e *Engine) now() time.Time {
 }
 
 // SupportsOSV reports whether an ecosystem can be correlated against OSV.
+//
+// The identifier is validated against OSV's known ecosystems: an unknown string
+// would make OSV answer "no results", which must be reported as a coverage gap
+// rather than as a clean package.
 func SupportsOSV(ecosystem string) bool {
 	l := strings.ToLower(ecosystem)
 	switch {
-	case l == "", l == "unknown", l == "windows", l == "homebrew":
+	case l == "", l == "unknown", l == "windows", l == "homebrew", l == "network-service":
 		return false
 	}
-	return true
+	return intel.ValidEcosystem(ecosystem)
 }
 
 // Assess runs correlation + enrichment for a whole inventory.
@@ -202,11 +206,23 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 
 	e.progress("matching", fmt.Sprintf("%d matched records", len(findings)))
 
-	// 4) collapse advisories that describe the same vulnerability
+	// 4-6) collapse duplicates, enrich, score, sort and number the findings
+	findings = e.Finalize(ctx, findings)
+	res.Findings = findings
+	e.stats.Findings = len(findings)
+	res.Stats = e.stats
+	return res, nil
+}
+
+// Finalize deduplicates, enriches (KEV/EPSS), scores, sorts and numbers a
+// finding set. It is exported so network and SBOM assessments can merge
+// observations into engine findings and get identical treatment.
+func (e *Engine) Finalize(ctx context.Context, findings []model.Finding) []model.Finding {
+	// collapse advisories that describe the same vulnerability
 	findings = dedupeFindings(findings)
 
 	if err := ctx.Err(); err != nil {
-		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
+		return findings // caller checks ctx and aborts; partial output is discarded
 	}
 
 	// 5) enrich with KEV / EPSS and score risk
@@ -223,13 +239,13 @@ func (e *Engine) Assess(ctx context.Context, inv model.Inventory) (Result, error
 	})
 	for i := range findings {
 		findings[i].FindingID = fmt.Sprintf("FINDING-%04d", i+1)
-		findings[i].StableID = model.FindingStableID(e.Host, findings[i])
+		stableHost := findings[i].Asset
+		if stableHost == "" {
+			stableHost = e.Host
+		}
+		findings[i].StableID = model.FindingStableID(stableHost, findings[i])
 	}
-
-	res.Findings = findings
-	e.stats.Findings = len(findings)
-	res.Stats = e.stats
-	return res, nil
+	return findings
 }
 
 func versionValidate(p model.Package) error {

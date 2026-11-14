@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -15,7 +16,9 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
+	"github.com/bgdnvk/clanker/internal/vuln/sbom"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
+	"github.com/bgdnvk/clanker/internal/vuln/scope"
 )
 
 // ------------------------------------------------------------------ overview ---
@@ -547,11 +550,14 @@ type startScanRequest struct {
 	IncludeNotAffected bool   `json:"include_not_affected"`
 	FailOn             string `json:"fail_on,omitempty"`
 	FailOnKEV          bool   `json:"fail_on_kev,omitempty"`
-	// Network/SBOM fields are accepted so the API can explain precisely why the
-	// request is refused instead of returning a generic 400.
-	ScopeFile string   `json:"scope_file,omitempty"`
-	Targets   []string `json:"targets,omitempty"`
-	SBOM      string   `json:"sbom,omitempty"`
+	// Network assessment.
+	ScopeYAML  string   `json:"scope_yaml,omitempty"`
+	ScopeFile  string   `json:"scope_file,omitempty"`
+	Targets    []string `json:"targets,omitempty"`
+	Authorized bool     `json:"authorized,omitempty"`
+	// Software / container assessment.
+	SBOMPath string `json:"sbom_path,omitempty"`
+	Image    string `json:"image,omitempty"`
 }
 
 func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
@@ -563,16 +569,32 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	if req.Kind == "" {
 		req.Kind = "local"
 	}
+	scanOpts := scan.Options{
+		CachePath:  s.opts.CachePath,
+		Offline:    req.Offline,
+		SkipRender: true,
+	}
+	var modeDetail string
+
 	switch req.Kind {
 	case "local":
 	case "network":
-		writeError(w, http.StatusUnprocessableEntity, "not_implemented",
-			"network assessment is not implemented in this build. The authorisation scope gate exists and is enforced by the CLI; service discovery and safe validation arrive with Phase 3.")
-		return
+		sc, err := s.authorisedScope(req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_scope", err.Error())
+			return
+		}
+		scanOpts.Scope = &sc
+		modeDetail = fmt.Sprintf("scope %q (%d targets, authorised by %s)", sc.Name, len(sc.Targets), sc.AuthorizedBy)
 	case "sbom":
-		writeError(w, http.StatusUnprocessableEntity, "not_implemented",
-			"SBOM ingestion is not implemented in this build: inventory already carries purls, but the SBOM reader/exporter is on the roadmap.")
-		return
+		path, err := s.sbomPath(req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_sbom", err.Error())
+			return
+		}
+		scanOpts.SBOMPath = path
+		scanOpts.Image = strings.TrimSpace(req.Image)
+		modeDetail = firstNonEmpty(path, req.Image)
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_kind", "kind must be local, network or sbom")
 		return
@@ -593,30 +615,29 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	}
 	s.jobs.register(id, cancel)
 
-	go s.runScanJob(ctx, id, cancel, req)
+	go s.runScanJob(ctx, id, cancel, req, scanOpts, modeDetail)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
 // runScanJob executes an assessment and streams stage updates into the job row.
-func (s *Server) runScanJob(ctx context.Context, id string, cancel context.CancelFunc, req startScanRequest) {
+func (s *Server) runScanJob(ctx context.Context, id string, cancel context.CancelFunc, req startScanRequest, scanOpts scan.Options, detail string) {
 	defer cancel()
 	defer s.jobs.forget(id)
 
-	res, err := s.opts.RunScan(ctx, scan.Options{
-		CachePath:          s.opts.CachePath,
-		Offline:            req.Offline,
-		Format:             "json",
-		SkipRender:         true,
-		IncludeNotAffected: req.IncludeNotAffected,
-		Policy:             model.Policy{FailOnSeverity: req.FailOn, FailOnKEV: req.FailOnKEV},
-		ToolVersion:        s.opts.ToolVersion,
-		Progress: func(st scan.Stage) {
-			if err := s.store.UpdateJobProgress(ctx, id, st.Name, st.Detail, st.Percent); err != nil {
-				s.log.Debug("job progress write failed", "id", id, "err", err)
-			}
-		},
-		Stderr: os.Stderr,
-	})
+	scanOpts.IncludeNotAffected = req.IncludeNotAffected
+	scanOpts.Policy = model.Policy{FailOnSeverity: req.FailOn, FailOnKEV: req.FailOnKEV}
+	scanOpts.ToolVersion = s.opts.ToolVersion
+	scanOpts.Stderr = os.Stderr
+	scanOpts.Progress = func(st scan.Stage) {
+		if err := s.store.UpdateJobProgress(ctx, id, st.Name, st.Detail, st.Percent); err != nil {
+			s.log.Debug("job progress write failed", "id", id, "err", err)
+		}
+	}
+	if detail != "" {
+		_ = s.store.UpdateJobProgress(ctx, id, "queued", detail, 3)
+	}
+
+	res, err := s.opts.RunScan(ctx, scanOpts)
 	if err != nil {
 		status := intel.JobFailed
 		if ctx.Err() != nil {
@@ -628,7 +649,78 @@ func (s *Server) runScanJob(ctx context.Context, id string, cancel context.Cance
 	}
 	_ = s.store.FinishJob(ctx, id, intel.JobDone, res.Report.ReportID, "")
 	s.log.Info("scan job finished", "id", id, "report", res.Report.ReportID,
-		"findings", len(res.Report.Findings), "incomplete", res.Incomplete)
+		"mode", res.Report.Metadata.Mode, "findings", len(res.Report.Findings), "incomplete", res.Incomplete)
+}
+
+// authorisedScope validates the scope supplied with a network scan.
+//
+// Both a pasted document and a path are accepted; the authorisation
+// acknowledgement is mandatory and is checked here rather than in the UI.
+func (s *Server) authorisedScope(req startScanRequest) (model.Scope, error) {
+	if !req.Authorized {
+		return model.Scope{}, fmt.Errorf("network assessment requires explicit authorisation: set authorized=true after confirming you may scan these targets")
+	}
+	var (
+		sc  model.Scope
+		err error
+	)
+	switch {
+	case strings.TrimSpace(req.ScopeYAML) != "":
+		sc, err = scope.Parse([]byte(req.ScopeYAML))
+	case strings.TrimSpace(req.ScopeFile) != "":
+		sc, err = scope.Load(req.ScopeFile)
+	default:
+		return model.Scope{}, fmt.Errorf("a scope document is required (scope_yaml or scope_file)")
+	}
+	if err != nil {
+		return model.Scope{}, err
+	}
+	// An explicit target list narrows the authorised scope; it can never widen it.
+	if len(req.Targets) > 0 {
+		for _, t := range req.Targets {
+			if !scope.Allows(sc, t) {
+				return model.Scope{}, fmt.Errorf("target %q is outside the authorised scope %q", t, sc.Name)
+			}
+		}
+		sc.Targets = req.Targets
+	}
+	return sc, nil
+}
+
+// sbomPath validates the document path for a software assessment.
+func (s *Server) sbomPath(req startScanRequest) (string, error) {
+	image := strings.TrimSpace(req.Image)
+	path := strings.TrimSpace(req.SBOMPath)
+	switch {
+	case image != "" && path != "":
+		return "", fmt.Errorf("supply either a document path or a container image, not both")
+	case image != "":
+		return "", nil // validated in the scan (docker must be present)
+	case path == "":
+		return "", fmt.Errorf("a CycloneDX/SPDX/Syft document, a dependency manifest, or a container image reference is required")
+	}
+	cleaned := filepath.Clean(path)
+	for _, forbidden := range []string{"/proc", "/sys", "/dev"} {
+		if strings.HasPrefix(cleaned, forbidden) {
+			return "", fmt.Errorf("refusing to read %q", cleaned)
+		}
+	}
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("document not found: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory; point at a document", cleaned)
+	}
+	if info.Size() > sbom.MaxDocumentBytes {
+		return "", fmt.Errorf("%s is larger than %d bytes", cleaned, int64(sbom.MaxDocumentBytes))
+	}
+	// Parse now so an unsupported document is a clear 400 instead of a failed
+	// job the user only discovers afterwards.
+	if _, err := sbom.ParseFile(cleaned); err != nil {
+		return "", err
+	}
+	return cleaned, nil
 }
 
 func (s *Server) handleScanDetail(w http.ResponseWriter, r *http.Request) {

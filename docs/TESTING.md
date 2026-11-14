@@ -42,6 +42,7 @@ Helper (`e2e/helpers.ts`) attaches `console`, `pageerror`, `response` and
 | `scans.spec.ts` (5) | three-step flow; network blocked with a reason; **real scan** with server progress, report link, one job per submit; cancellation stops the scan and stores no report |
 | `reports.spec.ts` (6) | list/report parity; JSON/SARIF/Markdown/HTML validity; **authenticated downloads**; unknown report; "not a statement that the environment is secure" |
 | `settings.spec.ts` (6) | four tabs; policy persistence via API; feed freshness honesty; agent section shows no fabricated commands; access tab; unknown tab fallback |
+| `modes.spec.ts` (6) | network: authorisation gate, authorised loopback scan with scope recorded and distro builds never confirmed, expired scope rejected; software: document path scan, SBOM correlation, unsupported document rejected |
 | `improvement.spec.ts` (4) | quality metrics + sample caveats; proposal evidence/fixtures/audit trail; approve → deploy → rollback with backend confirmation; rejection requires a written reason |
 | `ask.spec.ts` (3) | grounded answers with citations, no privileged requests, improvement questions, Escape + focus return |
 | `a11y.spec.ts` (18) | axe (WCAG 2.2 AA tags) on all 12 pages + the finding panel, zero serious/critical; skip link; keyboard navigation; dialog focus trap; keyboard-operable filters; table headers + captions |

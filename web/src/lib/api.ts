@@ -660,6 +660,14 @@ export const api = {
     include_not_affected?: boolean;
     fail_on?: string;
     fail_on_kev?: boolean;
+    // network
+    scope_yaml?: string;
+    scope_file?: string;
+    targets?: string[];
+    authorized?: boolean;
+    // software / container
+    sbom_path?: string;
+    image?: string;
   }) => request<Job>("/api/scans", { method: "POST", body: JSON.stringify(body) }),
   cancelScan: (id: string) => request<{ id: string; status: string }>(`/api/scans/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   reports: () => request<{ items: RunSummary[]; total: number }>("/api/reports"),

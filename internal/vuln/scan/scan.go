@@ -18,6 +18,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/inventory"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
+	"github.com/bgdnvk/clanker/internal/vuln/netscan"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
 )
 
@@ -42,6 +43,29 @@ type Options struct {
 	AssetCriticality float64
 	// Collectors overrides the inventory collector set (tests, embedded use).
 	Collectors []inventory.Collector
+
+	// --- network assessment ---
+	// Scope is the authorised target set. Setting it selects network mode.
+	Scope *model.Scope
+	// TargetPorts overrides the scope's port list (still bounded per host).
+	TargetPorts []int
+	// NetConcurrency / NetConnectTimeout bound discovery.
+	NetConcurrency    int
+	NetConnectTimeout time.Duration
+	// NVDAPIKey raises NVD's rate limit when supplied.
+	NVDAPIKey string
+	// NVDFunc overrides the NVD CPE lookup (tests, embedded use).
+	NVDFunc func(ctx context.Context, cpe string) ([]netscan.CVEMatch, error)
+
+	// --- software / container assessment ---
+	// SBOMPath is a CycloneDX/SPDX/Syft document or a dependency manifest.
+	SBOMPath string
+	// Image is a container image reference (requires a local Docker daemon).
+	Image string
+	// DockerPath overrides the docker CLI.
+	DockerPath string
+	// MaxImageBytes refuses images above this size.
+	MaxImageBytes int64
 	// Progress receives pipeline stage updates (used by the HTTP API). It must
 	// not block: callers keep it cheap.
 	Progress func(Stage)
@@ -91,8 +115,22 @@ func (o *Options) normalize() {
 	}
 }
 
-// Run performs a local endpoint assessment end to end.
+// Run performs an assessment. The mode is chosen by the options: an image
+// reference, an SBOM path, an authorised network scope, or the local endpoint.
 func Run(ctx context.Context, opts Options) (Result, error) {
+	opts.normalize()
+	switch {
+	case strings.TrimSpace(opts.Image) != "" || strings.TrimSpace(opts.SBOMPath) != "":
+		return runSBOM(ctx, opts)
+	case opts.Scope != nil:
+		return runNetwork(ctx, opts)
+	default:
+		return runLocal(ctx, opts)
+	}
+}
+
+// runLocal performs the endpoint assessment.
+func runLocal(ctx context.Context, opts Options) (Result, error) {
 	opts.normalize()
 	started := opts.Now()
 
@@ -129,68 +167,118 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	opts.report(Stage{Name: "discovery", Percent: 20, Detail: fmt.Sprintf("%d packages collected", len(inv.Packages))})
 
-	// --- assessment ----------------------------------------------------------
+	return finish(ctx, store, opts, started, inv, nil, "local", nil, nil, nil, nil)
+}
+
+// pipelineInput is what a mode hands to the shared reporting stage.
+type pipelineInput struct {
+	Mode             string
+	Inventory        model.Inventory
+	ExtraFindings    []model.Finding
+	Scope            *model.Scope
+	ExtraSources     []string
+	ExtraLimitations []string
+	ExtraErrors      []string
+	Incomplete       bool
+	// CoverageHint overrides the "packages inspected" count when the mode did not
+	// build packages (network assessment counts services instead).
+	CoverageHint *model.Coverage
+}
+
+// finish runs correlation, reporting and history for any mode.
+func finish(ctx context.Context, store *intel.Store, opts Options, started time.Time,
+	inv model.Inventory, extra []model.Finding, mode string, scope *model.Scope,
+	extraSources, extraLimits, extraErrors []string) (Result, error) {
+	return finishWith(ctx, store, opts, started, pipelineInput{
+		Mode: mode, Inventory: inv, ExtraFindings: extra, Scope: scope,
+		ExtraSources: extraSources, ExtraLimitations: extraLimits, ExtraErrors: extraErrors,
+	})
+}
+
+func finishWith(ctx context.Context, store *intel.Store, opts Options, started time.Time, in pipelineInput) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
+	}
+
 	// Deployed improvement rules shape detection. A missing or broken rule set
 	// falls back to the shipped policy and records why.
 	detectionPolicy, ruleID, _, _ := improve.ActivePolicy(ctx, store)
 	engine := &assess.Engine{
 		Policy: detectionPolicy,
-		Host:   inv.Asset.Hostname,
+		Host:   in.Inventory.Asset.Hostname,
 		Progress: func(stage, detail string) {
 			opts.report(Stage{Name: stage, Percent: stagePercent(stage), Detail: detail})
 		},
-		Store:              store,
-		Online:             !opts.Offline,
-		Vendor:             vendorName(opts.Vendor, inv.Asset.DistroID),
+		Store: store,
+		// Network and SBOM modes never call OSV for the host: network evidence is
+		// NVD-derived and SBOM components are correlated from the cache/OSV
+		// depending on the offline flag.
+		Online:             !opts.Offline && in.Mode != "network",
+		Vendor:             vendorName(opts.Vendor, in.Inventory.Asset.DistroID),
 		IncludeNotAffected: opts.IncludeNotAffected,
 		AssetCriticality:   opts.AssetCriticality,
 		Now:                opts.Now,
 	}
+	res, assessErr := engine.Assess(ctx, in.Inventory)
 	if err := ctx.Err(); err != nil {
 		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
 	}
-	res, assessErr := engine.Assess(ctx, inv)
 
-	errors := append([]string{}, res.Stats.Errors...)
-	incomplete := false
+	errors := append([]string{}, in.ExtraErrors...)
+	errors = append(errors, res.Stats.Errors...)
+	incomplete := in.Incomplete
 	if assessErr != nil {
 		errors = append(errors, "assessment failed: "+assessErr.Error())
 		incomplete = true
 	}
-	if opts.Offline {
+	if opts.Offline && in.Mode != "network" {
 		if n, _ := store.AdvisoryCount(ctx); n == 0 {
 			errors = append(errors, "offline mode with an empty advisory cache: run `clanker vuln feeds update` while online")
 			incomplete = true
 		}
 	}
 
-	// A cancelled assessment must not become the newest baseline for the host.
+	findings := res.Findings
+	if len(in.ExtraFindings) > 0 {
+		findings = append(findings, in.ExtraFindings...)
+	}
+	// One finalisation pass gives observations the same enrichment, scoring,
+	// ordering and stable identity as advisory-derived findings.
+	findings = engine.Finalize(ctx, findings)
 	if err := ctx.Err(); err != nil {
 		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
 	}
+
 	opts.report(Stage{Name: "report", Percent: 92, Detail: "assembling report"})
 
-	// --- metadata ------------------------------------------------------------
 	feedStates, _ := FeedStates(ctx, store)
 	coverage := model.Coverage{
-		PackagesInspected: len(inv.Packages),
+		PackagesInspected: len(in.Inventory.Packages),
 		PackagesMatched:   res.Stats.PackagesMatched,
 		AdvisoriesChecked: res.Stats.AdvisoriesFetched + res.Stats.AdvisoriesCached,
 		Sources:           coverageSources(opts.Offline, feedStates),
 		NotCovered:        notCovered(res.Stats),
 		Limitations:       limitations(opts.Offline),
 	}
+	if in.CoverageHint != nil {
+		coverage = *in.CoverageHint
+		if coverage.Sources == nil {
+			coverage.Sources = coverageSources(opts.Offline, feedStates)
+		}
+	}
+	coverage.Sources = appendUnique(coverage.Sources, in.ExtraSources...)
+	coverage.Limitations = appendUnique(coverage.Limitations, in.ExtraLimitations...)
 
 	var previous *model.RunRecord
-	if prev, err := store.PreviousRun(ctx, inv.Asset.Hostname, ""); err == nil {
+	if prev, err := store.PreviousRun(ctx, in.Inventory.Asset.Hostname, ""); err == nil {
 		previous = prev
 	}
 
 	rep := report.Build(report.BuildOptions{
 		ToolVersion:     opts.ToolVersion,
-		Mode:            "local",
-		Inventory:       inv,
-		Findings:        res.Findings,
+		Mode:            in.Mode,
+		Inventory:       in.Inventory,
+		Findings:        findings,
 		Started:         started,
 		Finished:        opts.Now(),
 		Offline:         opts.Offline,
@@ -199,16 +287,16 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Policy:          opts.Policy,
 		Coverage:        coverage,
 		Previous:        previous,
+		Scope:           in.Scope,
 		DetectionPolicy: policyNotesFor(engine.PolicyNotes(), ruleID),
 	})
 
-	// --- persist history -----------------------------------------------------
 	rec := model.RunRecord{
 		ID:           rep.ReportID,
 		Host:         rep.Metadata.Host,
 		StartedAt:    started,
 		FinishedAt:   opts.Now(),
-		FindingIDs:   report.FindingFingerprints(res.Findings),
+		FindingIDs:   report.FindingFingerprints(findings),
 		FindingCount: rep.Summary.Total,
 		Actionable:   rep.Summary.Actionable,
 		KEVCount:     rep.Summary.KEVCount,
@@ -219,7 +307,6 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	// --- render --------------------------------------------------------------
 	outPath := ""
 	if !opts.SkipRender {
 		var err error
@@ -228,13 +315,28 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			return Result{Report: rep, Incomplete: incomplete}, err
 		}
 	}
-	opts.report(Stage{Name: "done", Percent: 100, Detail: fmt.Sprintf("%d findings", len(rep.Findings))})
+	opts.report(Stage{Name: "done", Percent: 100, Detail: fmt.Sprintf("%d findings", len(findings))})
 	return Result{
 		Report:     rep,
 		OutputPath: outPath,
 		ExitCode:   report.ExitCode(rep, incomplete),
 		Incomplete: incomplete,
 	}, nil
+}
+
+func appendUnique(base []string, extra ...string) []string {
+	seen := map[string]bool{}
+	for _, s := range base {
+		seen[s] = true
+	}
+	for _, s := range extra {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		base = append(base, s)
+	}
+	return base
 }
 
 // Stage is one progress update for a running assessment.

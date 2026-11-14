@@ -1,0 +1,5 @@
+# pinned for the deployment
+requests==2.31.0
+Flask_SQLAlchemy==3.1.1 ; python_version >= "3.9"
+urllib3==2.2.1
+unpinned-package>=1.0

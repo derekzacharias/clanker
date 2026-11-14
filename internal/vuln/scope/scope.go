@@ -23,11 +23,14 @@ type File struct {
 	Name         string    `yaml:"name"`
 	AuthorizedBy string    `yaml:"authorized_by"`
 	AuthorizedAt time.Time `yaml:"authorized_at"`
-	Targets      []string  `yaml:"targets"`
-	Ports        []int     `yaml:"ports"`
-	MaxHosts     int       `yaml:"max_hosts"`
-	AllowPublic  bool      `yaml:"allow_public_addresses"`
-	Notes        string    `yaml:"notes"`
+	// ExpiresAt bounds the authorisation. An expired scope is rejected, which is
+	// how temporary approvals avoid becoming permanent ones.
+	ExpiresAt   time.Time `yaml:"expires_at"`
+	Targets     []string  `yaml:"targets"`
+	Ports       []int     `yaml:"ports"`
+	MaxHosts    int       `yaml:"max_hosts"`
+	AllowPublic bool      `yaml:"allow_public_addresses"`
+	Notes       string    `yaml:"notes"`
 }
 
 // Load parses and validates a scope file.
@@ -36,9 +39,18 @@ func Load(path string) (model.Scope, error) {
 	if err != nil {
 		return model.Scope{}, fmt.Errorf("read scope: %w", err)
 	}
+	sc, err := Parse(b)
+	if err != nil {
+		return model.Scope{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return sc, nil
+}
+
+// Parse validates a scope document supplied as bytes (API/UI paste).
+func Parse(data []byte) (model.Scope, error) {
 	var f File
-	if err := yaml.Unmarshal(b, &f); err != nil {
-		return model.Scope{}, fmt.Errorf("parse scope %s: %w", path, err)
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return model.Scope{}, fmt.Errorf("parse scope: %w", err)
 	}
 	return Validate(f)
 }
@@ -54,6 +66,9 @@ func Validate(f File) (model.Scope, error) {
 	}
 	if f.AuthorizedAt.IsZero() {
 		problems = append(problems, "authorized_at is required (RFC3339 timestamp)")
+	}
+	if !f.ExpiresAt.IsZero() && !f.ExpiresAt.After(time.Now()) {
+		problems = append(problems, fmt.Sprintf("scope expired at %s; re-authorise the assessment", f.ExpiresAt.Format(time.RFC3339)))
 	}
 	if len(f.Targets) == 0 {
 		problems = append(problems, "targets must list at least one authorised address, CIDR or hostname")
@@ -109,6 +124,7 @@ func Validate(f File) (model.Scope, error) {
 		Name:         f.Name,
 		AuthorizedBy: f.AuthorizedBy,
 		AuthorizedAt: f.AuthorizedAt,
+		ExpiresAt:    f.ExpiresAt,
 		Targets:      f.Targets,
 		Ports:        f.Ports,
 		MaxHosts:     f.MaxHosts,

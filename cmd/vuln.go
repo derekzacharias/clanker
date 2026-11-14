@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/api"
 	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
+	"github.com/bgdnvk/clanker/internal/vuln/inventory"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
+	"github.com/bgdnvk/clanker/internal/vuln/sbom"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
 	"github.com/bgdnvk/clanker/internal/vuln/scope"
 )
@@ -51,11 +54,25 @@ what was and was not covered.`,
 		newVulnScopeCmd(),
 		newVulnAgentCmd(),
 		newVulnServeCmd(),
+		newVulnSBOMCmd(),
 		newVulnFeedbackCmd(),
 		newVulnImproveCmd(),
 		newVulnQualityCmd(),
 	)
 	return vuln
+}
+
+// vulnScanOptions carries scan flags between subcommands.
+type vulnScanOptions struct {
+	offline            bool
+	format             string
+	output             string
+	includeNotAffected bool
+	failOn             string
+	failOnKEV          bool
+	sbomPath           string
+	image              string
+	ports              []int
 }
 
 // vulnCommonFlags registers flags shared by scan/feeds/inventory.
@@ -92,18 +109,25 @@ func newVulnScanCmd() *cobra.Command {
 		scopeFile          string
 		authorized         bool
 		quiet              bool
+		sbomPath           string
+		imageRef           string
+		portList           []int
 	)
 	cmd := &cobra.Command{
 		Use:   "scan",
 		Short: "Assess the local endpoint (or an explicitly scoped network target)",
-		Long: `Assess installed software against public vulnerability intelligence.
+		Long: `Assess software against public vulnerability intelligence.
 
-Local assessment (default) reads package-manager metadata only: dpkg/rpm/apk,
-Python dist-info, npm global packages, Ruby gems. It performs no network
-scanning and needs no privileges.
+Modes:
+  --local              this endpoint's packages (default, unprivileged)
+  --scope <file>       explicitly authorised network assessment: TCP discovery,
+                       service fingerprinting, TLS inspection, NVD correlation
+  --sbom <file>        CycloneDX/SPDX/Syft document or a dependency manifest
+  --image <ref>        container image, read via "docker save" (never executed)
 
-Remote assessment is gated: it requires --scope <file> and --i-authorize, and is
-reported as not implemented in this build (see the roadmap).`,
+Network assessment requires --i-authorize and a scope naming who approved the
+targets. Nothing is exploited; validation is limited to observing what each
+service returns.`,
 		RunE: func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()
 			if ctx == nil {
@@ -111,11 +135,19 @@ reported as not implemented in this build (see the roadmap).`,
 			}
 			// Remote paths are deliberately refused until Phase 3 lands, but the
 			// authorisation machinery is exercised so the guard cannot regress.
+			scanOpts := vulnScanOptions{
+				offline: offline, format: format, output: output,
+				includeNotAffected: includeNotAffected, failOn: failOn, failOnKEV: failOnKEV,
+				sbomPath: sbomPath, image: imageRef, ports: portList,
+			}
 			if scopeFile != "" || len(targets) > 0 {
-				return handleRemoteScan(ctx, scopeFile, targets, authorized)
+				return runNetworkScan(ctx, common.path(), scopeFile, targets, authorized, scanOpts)
+			}
+			if sbomPath != "" || imageRef != "" {
+				return runSBOMScan(ctx, common.path(), scanOpts)
 			}
 			if !local {
-				return configError("nothing to scan: pass --local or an authorised --scope")
+				return configError("nothing to scan: pass --local, --scope, --sbom or --image")
 			}
 
 			res, err := scan.Run(ctx, scan.Options{
@@ -152,36 +184,77 @@ reported as not implemented in this build (see the roadmap).`,
 	cmd.Flags().BoolVar(&noNPM, "no-npm", false, "skip npm package inventory")
 	cmd.Flags().BoolVar(&noRuby, "no-ruby", false, "skip Ruby gem inventory")
 	cmd.Flags().Float64Var(&criticality, "asset-criticality", 0, "asset criticality 0..1, raises risk scores for important hosts")
-	cmd.Flags().StringSliceVar(&targets, "target", nil, "authorised network target(s) — requires --scope; not implemented in this build")
+	cmd.Flags().StringSliceVar(&targets, "target", nil, "authorised network target(s); must be inside --scope")
 	cmd.Flags().StringVar(&scopeFile, "scope", "", "scope file authorising remote assessment")
 	cmd.Flags().BoolVar(&authorized, "i-authorize", false, "acknowledge that you are authorised to scan the scope targets")
+	cmd.Flags().StringVar(&sbomPath, "sbom", "", "CycloneDX/SPDX/Syft document or dependency manifest to assess")
+	cmd.Flags().StringVar(&imageRef, "image", "", "container image reference to inventory (requires a local Docker daemon)")
+	cmd.Flags().IntSliceVar(&portList, "ports", nil, "override the scope's TCP port list")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress the human summary")
 	common.register(cmd)
 	return cmd
 }
 
-func handleRemoteScan(ctx context.Context, scopeFile string, targets []string, authorized bool) error {
+// runNetworkScan performs an explicitly authorised network assessment.
+func runNetworkScan(ctx context.Context, cachePath, scopeFile string, targets []string, authorized bool, opts vulnScanOptions) error {
 	if scopeFile == "" {
-		return configError("--target requires --scope <file>: Clanker Guard never scans an address that is not in an approved scope")
+		return configError("network assessment requires --scope <file>: Clanker Guard never scans an address that is not in an approved scope")
 	}
 	sc, err := scope.Load(scopeFile)
 	if err != nil {
 		return configError(err.Error())
 	}
 	if !authorized {
-		return configError("remote assessment requires --i-authorize to confirm you are authorised to scan: " + strings.Join(sc.Targets, ", "))
+		return configError("network assessment requires --i-authorize to confirm you are authorised to scan: " + strings.Join(sc.Targets, ", "))
 	}
-	for _, t := range targets {
-		if !scope.Allows(sc, t) {
-			return configError(fmt.Sprintf("target %q is outside the authorised scope %q", t, sc.Name))
+	if len(targets) > 0 {
+		for _, t := range targets {
+			if !scope.Allows(sc, t) {
+				return configError(fmt.Sprintf("target %q is outside the authorised scope %q", t, sc.Name))
+			}
 		}
+		// Explicit targets may only narrow the scope.
+		sc.Targets = targets
 	}
-	_ = ctx
-	return configError(fmt.Sprintf(
-		"scope %q is valid (%d targets, authorised by %s), but network assessment is not implemented in this build.\n"+
-			"Phase 3 (service discovery, fingerprinting, safe validation) is tracked in docs/VULN.md; "+
-			"the authorisation gate above is enforced and tested so it cannot be bypassed when that lands.",
-		sc.Name, len(sc.Targets), sc.AuthorizedBy))
+
+	res, err := scan.Run(ctx, scan.Options{
+		CachePath:          cachePath,
+		Offline:            opts.offline,
+		Format:             opts.format,
+		OutputPath:         opts.output,
+		IncludeNotAffected: opts.includeNotAffected,
+		Policy:             model.Policy{FailOnSeverity: opts.failOn, FailOnKEV: opts.failOnKEV},
+		ToolVersion:        Version,
+		Scope:              &sc,
+		TargetPorts:        opts.ports,
+	})
+	if err != nil {
+		return err
+	}
+	printScanSummary(res)
+	guardExitCode = res.ExitCode
+	return nil
+}
+
+// runSBOMScan correlates a bill of materials or container image.
+func runSBOMScan(ctx context.Context, cachePath string, opts vulnScanOptions) error {
+	res, err := scan.Run(ctx, scan.Options{
+		CachePath:          cachePath,
+		Offline:            opts.offline,
+		Format:             opts.format,
+		OutputPath:         opts.output,
+		IncludeNotAffected: opts.includeNotAffected,
+		Policy:             model.Policy{FailOnSeverity: opts.failOn, FailOnKEV: opts.failOnKEV},
+		ToolVersion:        Version,
+		SBOMPath:           opts.sbomPath,
+		Image:              opts.image,
+	})
+	if err != nil {
+		return err
+	}
+	printScanSummary(res)
+	guardExitCode = res.ExitCode
+	return nil
 }
 
 // Exit code contract shared with the standalone agent.
@@ -845,4 +918,90 @@ func newVulnQualityCmd() *cobra.Command {
 	}
 	common.register(cmd)
 	return cmd
+}
+
+// ------------------------------------------------------------------- sbom ----
+
+func newVulnSBOMCmd() *cobra.Command {
+	var common vulnCommonFlags
+	cmd := &cobra.Command{
+		Use:   "sbom",
+		Short: "Produce and inspect software bills of materials",
+	}
+	var (
+		output   string
+		sbomPath string
+		image    string
+	)
+	export := &cobra.Command{
+		Use:   "export",
+		Short: "Export a CycloneDX SBOM (1.5) from this endpoint, a document or an image",
+		Long: `Write a CycloneDX 1.5 document describing the assessed software.
+
+By default the local endpoint inventory is exported. --sbom re-exports a document
+that is already in a supported format; --image inventories a container image.`,
+		RunE: func(c *cobra.Command, _ []string) error {
+			ctx := context.Background()
+			inv := model.Inventory{}
+			warnings := []string{}
+			switch {
+			case sbomPath != "":
+				doc, err := sbom.ParseFile(sbomPath)
+				if err != nil {
+					return configError(err.Error())
+				}
+				inv.Asset = model.Asset{Hostname: "sbom:" + filepath.Base(sbomPath), OS: string(doc.Format)}
+				inv.Packages = doc.Packages
+				warnings = append(warnings, doc.Warnings...)
+			case image != "":
+				res, err := sbom.ScanImage(ctx, image, sbom.ImageOptions{})
+				if err != nil {
+					return configError(err.Error())
+				}
+				inv.Asset = model.Asset{Hostname: "image:" + image, OS: firstNonEmptyValue(res.OS, "container image")}
+				inv.Packages = res.Packages
+				warnings = append(warnings, res.Warnings...)
+			default:
+				collected, err := (&inventory.Runner{Collectors: inventory.DefaultCollectors()}).Run(ctx, inventory.DefaultOptions())
+				if err != nil {
+					return err
+				}
+				inv = collected
+			}
+			if len(inv.Packages) == 0 {
+				return configError("no packages found; refusing to write an empty bill of materials")
+			}
+			payload, err := sbom.ExportCycloneDX(inv.Packages, inv.Asset, Version, time.Now().UTC())
+			if err != nil {
+				return err
+			}
+			if output == "" || output == "-" {
+				_, err = os.Stdout.Write(payload)
+				return err
+			}
+			if err := os.WriteFile(output, payload, 0o600); err != nil {
+				return err
+			}
+			for _, w := range warnings {
+				fmt.Fprintln(os.Stderr, "warning:", w)
+			}
+			fmt.Fprintf(os.Stderr, "wrote %d components to %s\n", len(inv.Packages), output)
+			return nil
+		},
+	}
+	export.Flags().StringVar(&output, "output", "-", "output path ('-' for stdout)")
+	export.Flags().StringVar(&sbomPath, "sbom", "", "re-export an existing supported document")
+	export.Flags().StringVar(&image, "image", "", "inventory a container image")
+	common.register(export)
+	cmd.AddCommand(export)
+	return cmd
+}
+
+func firstNonEmptyValue(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

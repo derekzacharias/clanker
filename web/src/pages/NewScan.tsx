@@ -13,6 +13,17 @@ import { Switch } from "../components/ui/Switch";
 import { cn } from "../lib/cn";
 
 type Kind = "local" | "network" | "sbom";
+type SbomSource = "document" | "image";
+
+const SCOPE_TEMPLATE = `name: my-scope
+authorized_by: your name
+authorized_at: ${new Date().toISOString()}
+expires_at: ${new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()}
+targets:
+  - 127.0.0.1
+ports: [22, 80, 443]
+max_hosts: 8
+allow_public_addresses: false`;
 type Stage = { name: string; percent: number };
 
 const STAGES: Stage[] = [
@@ -32,9 +43,12 @@ export default function NewScan() {
   const [includeNotAffected, setIncludeNotAffected] = useState(false);
   const [failOn, setFailOn] = useState("high");
   const [failOnKev, setFailOnKev] = useState(false);
-  const [scopeFile, setScopeFile] = useState("");
+  const [scopeYaml, setScopeYaml] = useState(SCOPE_TEMPLATE);
   const [targets, setTargets] = useState("");
   const [authorized, setAuthorized] = useState(false);
+  const [sbomSource, setSbomSource] = useState<SbomSource>("document");
+  const [sbomPath, setSbomPath] = useState("");
+  const [imageRef, setImageRef] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -56,20 +70,34 @@ export default function NewScan() {
   const canStart = useMemo(() => {
     if (starting) return false;
     if (kind === "local") return true;
-    return false; // network/sbom are not implemented in this build
-  }, [kind, starting]);
+    if (kind === "network") return authorized && scopeYaml.trim().length > 0;
+    return sbomSource === "document" ? sbomPath.trim().length > 0 : imageRef.trim().length > 0;
+  }, [kind, starting, authorized, scopeYaml, sbomSource, sbomPath, imageRef]);
 
   async function start() {
     setStarting(true);
     setError(null);
     try {
-      const created = await api.startScan({
+      const body: Parameters<typeof api.startScan>[0] = {
         kind,
         offline,
         include_not_affected: includeNotAffected,
         fail_on: failOn,
         fail_on_kev: failOnKev,
-      });
+      };
+      if (kind === "network") {
+        body.authorized = authorized;
+        body.scope_yaml = scopeYaml;
+        body.targets = targets
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean);
+      }
+      if (kind === "sbom") {
+        if (sbomSource === "document") body.sbom_path = sbomPath.trim();
+        else body.image = imageRef.trim();
+      }
+      const created = await api.startScan(body);
       setJob(created);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
@@ -128,7 +156,7 @@ export default function NewScan() {
             icon={<Laptop className="h-5 w-5" />}
             title="Local Endpoint"
             description="Inventory installed software and the operating system on this machine."
-            badge="Available"
+            badge="No privileges needed"
           />
           <TypeCard
             selected={kind === "network"}
@@ -136,7 +164,7 @@ export default function NewScan() {
             icon={<Network className="h-5 w-5" />}
             title="Network Assessment"
             description="Assess services on explicitly authorised network assets."
-            badge="Not in this build"
+            badge="Requires a scope"
           />
           <TypeCard
             selected={kind === "sbom"}
@@ -144,84 +172,122 @@ export default function NewScan() {
             icon={<Package className="h-5 w-5" />}
             title="Software / Container"
             description="Assess dependency manifests, SBOMs or supported container images."
-            badge="Not in this build"
+            badge="CycloneDX · SPDX · manifests"
           />
         </div>
       ) : null}
 
-      {step === 1 && kind !== "local" ? (
-        <div className="mt-3">
-          <Banner tone="warn" title={`${kind === "network" ? "Network" : "SBOM"} assessment is not implemented in this build`}>
-            {kind === "network" ? (
-              <>
-                The authorisation gate exists and is enforced: a scope file naming who approved the scan, the exact
-                targets, and an expiry is required before any network work. Service discovery and safe validation ship in
-                Phase 3. Scanning without an authorised scope would be unsafe, so the option is disabled rather than
-                faked.
-              </>
-            ) : (
-              <>
-                Inventory already carries package URLs, but the SBOM reader/exporter is on the roadmap. Use{" "}
-                <span className="mono">clanker vuln scan --sbom</span> once available.
-              </>
-            )}
-          </Banner>
-        </div>
-      ) : null}
-
-      {step === 2 && kind !== "local" ? (
+      {step === 2 && kind === "network" ? (
         <Card>
           <CardHeader
-            title={kind === "network" ? "Configure network assessment" : "Configure SBOM assessment"}
-            description="This form documents the real requirements; submission is blocked because the feature is not implemented yet."
+            title="Authorise a network assessment"
+            description="Discovery uses TCP connect, fingerprinting uses one benign request per service, and nothing is exploited."
           />
           <CardBody className="space-y-4">
-            <Banner tone="warn" title="Not available in this build">
-              {kind === "network"
-                ? "Service discovery, fingerprinting and safe validation ship in Phase 3. The authorisation gate below already exists in the CLI and API."
-                : "The SBOM reader is on the roadmap; inventory already produces package URLs, so this is an adapter, not a redesign."}
+            <Banner tone="warn" title="Only scan what you are authorised to scan">
+              The scope below records who approved this assessment, which targets are in scope, and when the approval
+              expires. Targets outside it are refused by the scanner, not by this form.
             </Banner>
-            <fieldset disabled className="space-y-3">
+            <Field
+              label="Scope document (YAML)"
+              htmlFor="scope-yaml"
+              hint="name, authorized_by, authorized_at, expires_at, targets, ports, max_hosts"
+            >
+              <textarea
+                id="scope-yaml"
+                value={scopeYaml}
+                onChange={(e) => setScopeYaml(e.target.value)}
+                rows={12}
+                spellCheck={false}
+                className="mono w-full rounded-md border border-border-strong bg-surface px-2.5 py-2 text-xs"
+              />
+            </Field>
+            <Field
+              label="Targets (optional)"
+              htmlFor="targets"
+              hint="Comma-separated addresses or hostnames, must already be inside the scope. Leave empty to use the scope list."
+            >
+              <Input id="targets" value={targets} onChange={(e) => setTargets(e.target.value)} placeholder="192.168.20.10" />
+            </Field>
+            <div className="flex items-start gap-2">
+              <input
+                id="authorized"
+                type="checkbox"
+                checked={authorized}
+                onChange={(e) => setAuthorized(e.target.checked)}
+                className="mt-1 h-4 w-4"
+              />
+              <label htmlFor="authorized" className="text-sm">
+                I confirm I am authorised to assess these targets. Scans are read-only and non-destructive, but they do
+                contact the services.
+              </label>
+            </div>
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {step === 2 && kind === "sbom" ? (
+        <Card>
+          <CardHeader
+            title="Assess software or a container image"
+            description="Documents are parsed, never executed. Images are read with docker save; the image is never run."
+          />
+          <CardBody className="space-y-4">
+            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Software source">
+              {[
+                ["document", "SBOM or manifest"],
+                ["image", "Container image"],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={sbomSource === value}
+                  onClick={() => setSbomSource(value as SbomSource)}
+                  className={
+                    sbomSource === value
+                      ? "rounded-md border border-accent bg-accent-soft px-3 py-1.5 text-sm font-medium text-accent"
+                      : "rounded-md border border-border px-3 py-1.5 text-sm text-muted hover:bg-surface-2"
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {sbomSource === "document" ? (
               <Field
-                label="Authorisation scope file"
-                htmlFor="scope-file"
-                hint="Names who approved the scan, the exact targets, and the host cap."
+                label="Document path on the server"
+                htmlFor="sbom-path"
+                hint="CycloneDX, SPDX or Syft JSON, package-lock.json, requirements.txt, go.sum, Cargo.lock, composer.lock or Gemfile.lock."
               >
                 <Input
-                  id="scope-file"
-                  value={scopeFile}
-                  onChange={(e) => setScopeFile(e.target.value)}
-                  placeholder="scope.yaml"
+                  id="sbom-path"
+                  value={sbomPath}
+                  onChange={(e) => setSbomPath(e.target.value)}
+                  placeholder="/home/you/project/sbom.json"
                 />
               </Field>
-              <Field label="Targets" htmlFor="targets" hint="Comma-separated addresses or CIDRs. Must be inside the approved scope.">
+            ) : (
+              <Field
+                label="Container image"
+                htmlFor="image-ref"
+                hint="The image must exist on the server's Docker daemon. Layers are read with docker save."
+              >
                 <Input
-                  id="targets"
-                  value={targets}
-                  onChange={(e) => setTargets(e.target.value)}
-                  placeholder="192.168.20.10, 192.168.20.0/28"
+                  id="image-ref"
+                  value={imageRef}
+                  onChange={(e) => setImageRef(e.target.value)}
+                  placeholder="ghcr.io/acme/api:1.4.0"
                 />
               </Field>
-              <div className="flex items-start gap-2">
-                <input
-                  id="authorized"
-                  type="checkbox"
-                  checked={authorized}
-                  onChange={(e) => setAuthorized(e.target.checked)}
-                  className="mt-1"
-                />
-                <label htmlFor="authorized" className="text-sm">
-                  I am authorised to assess these targets. Scans are read-only and non-destructive, but still require
-                  explicit approval.
-                </label>
-              </div>
-            </fieldset>
-            <div className="flex justify-end gap-2">
-              <Button onClick={() => setStep(1)}>Back</Button>
-              <Button variant="primary" disabled>
-                Start Scan
-              </Button>
-            </div>
+            )}
+
+            <Banner tone="info" title="What this checks">
+              Components are correlated against public advisory data using their package URLs. Versions that are not
+              declared in the document cannot be assessed, and the report lists them as gaps.
+            </Banner>
+
           </CardBody>
         </Card>
       ) : null}
@@ -282,12 +348,38 @@ export default function NewScan() {
         <Card>
           <CardHeader title="Review" description="Confirm what will run." />
           <CardBody className="space-y-3 text-sm">
-            <Row label="Scan type" value="Local endpoint" />
+            <Row
+              label="Scan type"
+              value={kind === "local" ? "Local endpoint" : kind === "network" ? "Network assessment" : "Software / container"}
+            />
+            {kind === "network" ? (
+              <>
+                <Row label="Authorised by" value={scopeYaml.match(/authorized_by:\s*(.+)/)?.[1]?.trim() || "not set"} />
+                <Row label="Scope name" value={scopeYaml.match(/^name:\s*(.+)$/m)?.[1]?.trim() || "not set"} />
+                <Row label="Targets" value={targets.trim() || scopeYaml.match(/targets:\s*\n\s*-\s*(.+)/)?.[1]?.trim() || "not set"} />
+                <Row label="Authorisation acknowledged" value={authorized ? "yes" : "NO — required"} />
+              </>
+            ) : null}
+            {kind === "sbom" ? (
+              <Row
+                label={sbomSource === "document" ? "Document" : "Container image"}
+                value={sbomSource === "document" ? sbomPath.trim() || "not set" : imageRef.trim() || "not set"}
+              />
+            ) : null}
             <Row label="Intelligence" value={offline ? "Cached only (offline)" : "OSV online + cached KEV/EPSS"} />
             <Row label="Failure threshold" value={failOn ? `Fail on ${failOn}` : "Never fail (report only)"} />
             <Row label="KEV policy" value={failOnKev ? "Fail on known exploited" : "Report only"} />
             <Row label="Not-affected records" value={includeNotAffected ? "Included" : "Hidden"} />
             {error ? <ErrorState message={error} /> : null}
+            {!canStart ? (
+              <p className="text-xs text-high">
+                {kind === "network"
+                  ? "Confirm the authorisation checkbox to start."
+                  : kind === "sbom"
+                    ? "Enter a document path or an image reference to start."
+                    : ""}
+              </p>
+            ) : null}
             <div className="flex justify-end gap-2 pt-2">
               <Button onClick={() => setStep(2)}>Back</Button>
               <Button variant="primary" onClick={start} disabled={!canStart}>
@@ -304,7 +396,7 @@ export default function NewScan() {
           <Button variant="ghost" onClick={() => (step === 1 ? navigate("/") : setStep(step - 1))}>
             {step === 1 ? "Cancel" : "Back"}
           </Button>
-          <Button variant="primary" onClick={() => setStep(step + 1)} disabled={kind !== "local"}>
+          <Button variant="primary" onClick={() => setStep(step + 1)} disabled={starting}>
             Continue
           </Button>
         </div>

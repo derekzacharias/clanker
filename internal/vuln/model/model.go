@@ -310,6 +310,7 @@ type Scope struct {
 	Name         string    `json:"name"`
 	AuthorizedBy string    `json:"authorized_by"`
 	AuthorizedAt time.Time `json:"authorized_at"`
+	ExpiresAt    time.Time `json:"expires_at,omitempty"`
 	Targets      []string  `json:"targets"`
 	Ports        []int     `json:"ports,omitempty"`
 	MaxHosts     int       `json:"max_hosts,omitempty"`

@@ -465,3 +465,17 @@ func TestPolicyNotesAreExplicit(t *testing.T) {
 		t.Fatal("default policy should produce no notes")
 	}
 }
+
+func TestUnsupportedEcosystemIsACoverageGap(t *testing.T) {
+	// An ecosystem OSV does not know must never be queried: it would come back
+	// as "no vulnerabilities" and look like a clean result.
+	if SupportsOSV("Alpine:3.21.3") {
+		t.Fatal("a malformed Alpine identifier must not be queried")
+	}
+	if !SupportsOSV("Alpine:v3.21") {
+		t.Fatal("OSV's Alpine identifier should be queried")
+	}
+	if SupportsOSV("network-service") {
+		t.Fatal("fingerprinted services are correlated through NVD, not OSV")
+	}
+}

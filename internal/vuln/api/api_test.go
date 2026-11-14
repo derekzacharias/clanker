@@ -138,11 +138,13 @@ func TestMetaAdvertisesCapabilitiesHonestly(t *testing.T) {
 	if rec := doJSON(t, srv.Handler(), "GET", "/api/meta", nil, &meta); rec.Code != 200 {
 		t.Fatalf("status %d", rec.Code)
 	}
-	if meta.Capabilities["network_scan"] || meta.Capabilities["sbom_scan"] || meta.Capabilities["llm"] {
+	if meta.Capabilities["llm"] || meta.Capabilities["agent_push"] {
 		t.Fatalf("unimplemented capabilities must not be advertised as available: %+v", meta.Capabilities)
 	}
-	if !meta.Capabilities["local_scan"] {
-		t.Fatal("local scanning should be advertised")
+	for _, cap := range []string{"local_scan", "network_scan", "sbom_scan"} {
+		if !meta.Capabilities[cap] {
+			t.Fatalf("%s is implemented and should be advertised: %+v", cap, meta.Capabilities)
+		}
 	}
 	if meta.Release.Published {
 		t.Fatal("no release base configured: published must be false so the UI never shows fake commands")
@@ -317,17 +319,40 @@ func TestScanWorkflowLocalAndRefusalForUnimplemented(t *testing.T) {
 	}
 	h := srv.Handler()
 
-	// network and sbom must be refused with an explanation, not silently ignored
-	for _, kind := range []string{"network", "sbom"} {
-		rec := doJSON(t, h, "POST", "/api/scans", map[string]any{"kind": kind}, nil)
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("%s scan should be 422, got %d", kind, rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "not implemented") {
-			t.Fatalf("%s refusal must explain itself: %s", kind, rec.Body.String())
-		}
+	// Network and SBOM modes are implemented, so the API now validates their
+	// inputs instead of refusing the kind.
+	rec := doJSON(t, h, "POST", "/api/scans", map[string]any{"kind": "network"}, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "authorisation") {
+		t.Fatalf("network scan without authorisation must be rejected: %d %s", rec.Code, rec.Body.String())
 	}
-	rec := doJSON(t, h, "POST", "/api/scans", map[string]any{"kind": "carrier-pigeon"}, nil)
+	rec = doJSON(t, h, "POST", "/api/scans", map[string]any{
+		"kind": "network", "authorized": true,
+		"scope_yaml": "name: t\nauthorized_by: x\nauthorized_at: 2026-01-01T00:00:00Z\ntargets: [127.0.0.1]\n",
+		"targets":    []string{"10.9.9.9"},
+	}, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "outside the authorised scope") {
+		t.Fatalf("out-of-scope target must be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "POST", "/api/scans", map[string]any{
+		"kind": "network", "authorized": true,
+		"scope_yaml": "name: old\nauthorized_by: x\nauthorized_at: 2026-01-01T00:00:00Z\nexpires_at: 2026-01-02T00:00:00Z\ntargets: [127.0.0.1]\n",
+	}, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "expired") {
+		t.Fatalf("expired scope must be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "POST", "/api/scans", map[string]any{
+		"kind": "sbom", "sbom_path": "/nonexistent/SBOM.json",
+	}, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "not found") {
+		t.Fatalf("missing SBOM must be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "POST", "/api/scans", map[string]any{
+		"kind": "sbom", "sbom_path": t.TempDir(),
+	}, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "directory") {
+		t.Fatalf("directory SBOM path must be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, "POST", "/api/scans", map[string]any{"kind": "carrier-pigeon"}, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown kind should be 400, got %d", rec.Code)
 	}

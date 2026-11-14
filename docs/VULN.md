@@ -346,20 +346,69 @@ The suite makes no network calls and scans no remote systems.
 
 ---
 
-## 9. Network assessment (gated — not implemented yet)
+## 9. Network assessment (implemented)
 
-The authorisation machinery ships and is tested, but service discovery is not
-implemented in this build:
+```bash
+clanker vuln scan --scope scope.yaml --i-authorize
+```
 
-* `scope.yaml` requires `name`, `authorized_by`, `authorized_at`, `targets`;
-* public addresses require `allow_public_addresses: true`;
-* expansion beyond `max_hosts` (default 256) is refused;
-* out-of-scope `--target` values are refused before anything happens;
-* `--i-authorize` is mandatory.
+Safety model, enforced in code:
 
-`clanker vuln scan --scope ... --target ... --i-authorize` validates the scope
-and then returns exit code 3 stating that Phase 3 is not implemented. This is
-deliberate: the safety gate is not bolted on later.
+* `scope.yaml` requires `name`, `authorized_by`, `authorized_at`, `targets`, and
+  may set `expires_at` (an expired scope is refused);
+* public addresses require `allow_public_addresses: true`, expansion beyond
+  `max_hosts` (default 256) is refused, and `--target` can only narrow the scope;
+* a hostname is resolved exactly once and every resolved address is checked: if
+  the scope lists addresses, a name must resolve inside them; a name-only scope
+  authorises that name;
+* discovery is ordinary `TCP connect` — no raw sockets, no privileges, no
+  evasion, bounded ports/concurrency/timeouts;
+* fingerprinting sends at most one benign request per service (HTTP GET with an
+  honest User-Agent, TLS handshake, SSH banner read, a `PING` to Redis);
+* nothing is exploited, brute-forced or fuzzed.
+
+What it produces:
+
+* **services** — host, port, banner, HTTP/TLS observations, product/version when
+  observable, distribution-build markers;
+* **configuration findings** — deprecated TLS, self-signed/expired certificates,
+  unauthenticated Redis, management/data ports reachable from the assessed
+  network, plaintext HTTP where HTTPS exists, version disclosure;
+* **CVE findings** — NVD CPE lookup for fingerprinted products with a version.
+
+Accuracy rule for network findings (learned the hard way, see B-015 below):
+
+| Fingerprint | Reported as |
+|---|---|
+| distro build (`OpenSSH_9.6p1 Ubuntu-3ubuntu13.20`) | `needs_investigation` — distributions backport fixes; NVD only knows upstream versions |
+| upstream build, version matched by CPE | `probable` — version-level evidence, not proof of reachability |
+| configuration observation | `validated_behavior` — the observation is the evidence |
+
+Offline mode makes no outbound calls: NVD is not queried and cached matches are
+reused (findings are rebuilt from the cache, never silently dropped).
+
+## 9b. Software / container assessment (implemented)
+
+```bash
+clanker vuln scan --sbom ./sbom.json          # CycloneDX, SPDX, Syft
+clanker vuln scan --sbom ./package-lock.json  # npm; also requirements.txt,
+                                              # go.sum, Cargo.lock,
+                                              # composer.lock, Gemfile.lock
+clanker vuln scan --image acme/api:1.4.0      # container image
+clanker vuln sbom export --output sbom.json   # CycloneDX 1.5 export
+```
+
+* documents are parsed as data, never executed; unsupported documents are
+  rejected with a clear message (at submit time in the API, not after a job);
+* purls drive the ecosystem (`pkg:pypi/...`, `pkg:deb/ubuntu/...?distro=...`), so
+  distribution advisories are used where they apply;
+* container images are read with `docker save` (never run); both legacy and OCI
+  archives are handled, including gzipped layer blobs, and dpkg/apk databases are
+  parsed from the layers; RPM-based images are reported as a gap;
+* components without a version are listed as gaps instead of being guessed;
+* ecosystem identifiers are validated against OSV's naming before any query —
+  OSV answers HTTP 200 `{}` for an unknown ecosystem, which would otherwise look
+  like "no vulnerabilities" (see B-016).
 
 ---
 
@@ -403,6 +452,22 @@ fixture evaluation, approval/rollback and quality metrics live in
 Deployed rules are consumed by this scanner through `improve.ActivePolicy`, and
 reports record the non-default decisions in `metadata.detection_policy`.
 
+## 11b. Defects found while implementing these modes
+
+* **B-015** — the first live network scan reported 28 *confirmed* CVEs for a
+  patched Ubuntu OpenSSH build, because NVD matched the upstream version. Fixed
+  by detecting distribution packaging in the fingerprint and reporting those as
+  `needs_investigation` with `distro_build` evidence; upstream builds stay
+  `probable`.
+* **B-016** — Alpine's ecosystem was emitted as `Alpine:3.21.3`; OSV's format is
+  `Alpine:v3.21` and it returns HTTP 200 `{}` for unknown ecosystems, so a
+  malformed identifier silently produced "no vulnerabilities". Fixed the format
+  and added local ecosystem validation: unknown identifiers are reported as
+  coverage gaps and never queried.
+* **B-017** — the container scanner only read the outer `docker save` archive, so
+  every real image reported zero components (layers are nested gzipped blobs).
+  Fixed with nested-layer traversal, including `/usr/lib/os-release`.
+
 ## 12. Roadmap and known gaps
 
 Implemented (Phase 1 + much of Phase 2):
@@ -421,9 +486,10 @@ Implemented (Phase 1 + much of Phase 2):
 
 Not implemented yet — reported explicitly rather than approximated:
 
-1. **Network assessment (Phase 3)** — TCP/UDP discovery, service
-   fingerprinting, TLS/SSH analysis, safe signature validation (Nuclei subset),
-   asset persistence. Scope gate is in place and tested.
+1. **Network assessment** — shipped for TCP discovery, fingerprinting, TLS/SSH
+   analysis and NVD correlation. Still missing: UDP, asset persistence across
+   scopes, and vetted Nuclei-style signature templates for behaviour-specific
+   validation.
 2. **Vendor advisory depth (Phase 2 remainder)** — Debian Security Tracker /
    Ubuntu CVE tracker / Red Hat OVAL parsing for explicit patch status instead of
    inference from enumerations; unattended-upgrade state; Windows Update and
@@ -435,8 +501,8 @@ Not implemented yet — reported explicitly rather than approximated:
    reporting) are not wired into `internal/agent`.
 5. **Managed endpoint communications (Phase 5)** — no agent-to-server channel, no
    mutual TLS, no scheduling. Deliberately opt-in only.
-6. **SBOM ingestion** (`--sbom`) and CycloneDX export — inventory is already a
-   purl-carrying package list, so this is a serialiser, not a redesign.
-7. **Container image inventory** — needs a Docker/containerd read-only path and
-   explicit authorisation.
+6. **SBOM ingestion** — shipped (CycloneDX/SPDX/Syft + five manifest formats);
+   CycloneDX 1.5 export shipped. Not yet: CycloneDX XML/protobuf, SPDX export.
+7. **Container image inventory** — shipped via `docker save` for dpkg/apk images;
+   not yet: RPM-based images, containerd/remote registries, layer caching.
 8. **Scheduled rescans and upstream feed diffing** — history/delta exist; no cron.

@@ -25,6 +25,11 @@ func ParseDpkgStatus(path, ecosystem, vendor string) ([]model.Package, error) {
 	return parseDpkg(f, ecosystem, vendor)
 }
 
+// ParseDpkgReader parses a dpkg status stream (used for container layers).
+func ParseDpkgReader(r io.Reader, ecosystem, vendor string) ([]model.Package, error) {
+	return parseDpkg(r, ecosystem, vendor)
+}
+
 func parseDpkg(r io.Reader, ecosystem, vendor string) ([]model.Package, error) {
 	var out []model.Package
 	sc := bufio.NewScanner(r)
@@ -151,6 +156,11 @@ func ParseAPKInstalled(path, ecosystem, vendor string) ([]model.Package, error) 
 	}
 	defer f.Close()
 	return parseAPK(f, ecosystem, vendor)
+}
+
+// ParseAPKReader parses an APK installed database stream.
+func ParseAPKReader(r io.Reader, ecosystem, vendor string) ([]model.Package, error) {
+	return parseAPK(r, ecosystem, vendor)
 }
 
 func parseAPK(r io.Reader, ecosystem, vendor string) ([]model.Package, error) {

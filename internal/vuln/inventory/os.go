@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -75,6 +76,30 @@ func DetectAsset(ctx context.Context, opts Options) (model.Asset, []string) {
 	return asset, warnings
 }
 
+// ParseOSReleaseFields reads os-release key/value pairs from a stream.
+func ParseOSReleaseFields(r io.Reader) (map[string]string, error) {
+	out := map[string]string{}
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+	}
+	return out, sc.Err()
+}
+
+// EcosystemFromFields derives the OSV ecosystem from parsed os-release fields.
+func EcosystemFromFields(fields map[string]string) string {
+	return OSEcosystem(AssetInfo{ID: fields["ID"], VersionID: fields["VERSION_ID"]})
+}
+
+// ParseOSReleaseFieldsPath is kept for callers with a file path.
 func parseOSRelease(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -127,7 +152,12 @@ func OSEcosystem(info AssetInfo) string {
 		if ver == "" {
 			return ""
 		}
-		return "Alpine:" + ver
+		// OSV uses the major.minor form with a "v" prefix, e.g. Alpine:v3.19.
+		parts := strings.Split(ver, ".")
+		if len(parts) >= 2 {
+			ver = parts[0] + "." + parts[1]
+		}
+		return "Alpine:v" + ver
 	case "rocky", "rockylinux":
 		if ver == "" {
 			return ""

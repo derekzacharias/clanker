@@ -228,7 +228,7 @@ func TestOSEcosystemMapping(t *testing.T) {
 		{ID: "rocky", VersionID: "9"}:       "Rocky Linux:9",
 		{ID: "almalinux", VersionID: "9.3"}: "AlmaLinux:9.3",
 		{ID: "fedora", VersionID: "40"}:     "Fedora:40",
-		{ID: "alpine", VersionID: "3.19"}:   "Alpine:3.19",
+		{ID: "alpine", VersionID: "3.19"}: "Alpine:v3.19",
 		{ID: "arch", VersionID: ""}:         "",
 	}
 	for info, want := range cases {

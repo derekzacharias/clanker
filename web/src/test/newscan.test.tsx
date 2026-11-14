@@ -28,15 +28,24 @@ describe("New scan workflow", () => {
     render(<NewScan />);
     expect(screen.getByRole("heading", { name: /New scan/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Local Endpoint/i })).toBeInTheDocument();
-    expect(screen.getAllByText(/Not in this build/i).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByRole("button", { name: /Network Assessment/i })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: /Software \/ Container/i })).toBeInTheDocument();
   });
 
-  it("explains why network assessment cannot be started", async () => {
+  it("requires an explicit authorisation before a network scan can start", async () => {
     mockApi([]);
     render(<NewScan />);
     await userEvent.click(screen.getByRole("button", { name: /Network Assessment/i }));
-    expect(await screen.findByText(/Network assessment is not implemented in this build/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Continue$/ })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /^Continue$/ }));
+    expect(await screen.findByText(/Only scan what you are authorised to scan/i)).toBeInTheDocument();
+    // The wizard advances; starting is what requires authorisation.
+    await userEvent.click(screen.getByRole("button", { name: /^Continue$/ }));
+    const start = screen.getByRole("button", { name: /Start Scan/i });
+    expect(start).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /^Back$/ }));
+    await userEvent.click(screen.getByLabelText(/I confirm I am authorised/i));
+    await userEvent.click(screen.getByRole("button", { name: /^Continue$/ }));
+    expect(screen.getByRole("button", { name: /Start Scan/i })).toBeEnabled();
   });
 
   it("walks through configure, review and start, then shows real progress", async () => {

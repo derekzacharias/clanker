@@ -291,3 +291,23 @@ func gzipBytes(t *testing.T, s string) []byte {
 	}
 	return buf.Bytes()
 }
+
+func TestValidEcosystem(t *testing.T) {
+	valid := []string{
+		"Ubuntu:24.04:LTS", "Ubuntu:26.10", "Debian:12", "Alpine:v3.19",
+		"Red Hat:9", "Rocky Linux:9", "AlmaLinux:9.3", "Fedora:40",
+		"PyPI", "npm", "Go", "crates.io", "Maven", "RubyGems", "Packagist",
+	}
+	for _, eco := range valid {
+		if !ValidEcosystem(eco) {
+			t.Errorf("%q should be accepted", eco)
+		}
+	}
+	// These are the strings that OSV silently answered "no results" for.
+	invalid := []string{"", "unknown", "Alpine:3.21.3", "Alpine:3.19", "Ubuntu", "Debian", "network-service"}
+	for _, eco := range invalid {
+		if ValidEcosystem(eco) {
+			t.Errorf("%q must be rejected: OSV cannot answer for it", eco)
+		}
+	}
+}

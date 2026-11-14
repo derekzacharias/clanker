@@ -3,6 +3,7 @@ package scope
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,5 +73,34 @@ func TestScopeBoundsExpansion(t *testing.T) {
 		MaxHosts:     16,
 	}); err == nil {
 		t.Fatal("scope larger than max_hosts must be rejected")
+	}
+}
+
+func TestExpiredScopeIsRejected(t *testing.T) {
+	_, err := Validate(File{
+		Name:         "expired",
+		AuthorizedBy: "derek",
+		AuthorizedAt: time.Now().Add(-48 * time.Hour),
+		ExpiresAt:    time.Now().Add(-1 * time.Hour),
+		Targets:      []string{"192.168.20.0/28"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expected an expiry error, got %v", err)
+	}
+}
+
+func TestScopeWithFutureExpiryIsAccepted(t *testing.T) {
+	sc, err := Validate(File{
+		Name:         "temporary",
+		AuthorizedBy: "derek",
+		AuthorizedAt: time.Now().Add(-time.Hour),
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		Targets:      []string{"127.0.0.1"},
+	})
+	if err != nil {
+		t.Fatalf("future expiry should be valid: %v", err)
+	}
+	if sc.ExpiresAt.IsZero() {
+		t.Fatal("expiry should be carried into the normalised scope")
 	}
 }

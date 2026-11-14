@@ -237,8 +237,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		"web_dir": s.opts.WebDir,
 		"capabilities": map[string]bool{
 			"local_scan":   true,
-			"network_scan": false,
-			"sbom_scan":    false,
+			"network_scan": true,
+			"sbom_scan":    true,
 			"llm":          false,
 			"agent_push":   false,
 		},
