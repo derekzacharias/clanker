@@ -66,14 +66,9 @@ export default function Overview() {
           </>
         }
         actions={
-          <>
-            <Button onClick={() => navigate("/vulnerabilities")}>
-              Review findings <ArrowRight className="h-4 w-4" aria-hidden="true" />
-            </Button>
-            <Button variant="primary" onClick={() => navigate("/scans/new")}>
-              <Radar className="h-4 w-4" aria-hidden="true" /> New Scan
-            </Button>
-          </>
+          <Button variant="primary" onClick={() => navigate("/vulnerabilities")}>
+            Review findings <ArrowRight className="h-4 w-4" aria-hidden="true" />
+          </Button>
         }
       />
 
@@ -88,7 +83,10 @@ export default function Overview() {
       ) : null}
 
       {data.improvements_available > 0 ? (
-        <Banner tone="success" title={`${data.improvements_available} detection improvement(s) available for review`}>
+        <Banner
+          tone="success"
+          title={`${pluralize(data.improvements_available, "detection improvement")} available for review`}
+        >
           Generated from verified analyst reviews, tested against fixtures. Nothing is deployed without approval.{" "}
           <Link to="/settings?tab=improvement" className="text-accent underline underline-offset-2 hover:text-accent-hover">
             Review proposals
@@ -97,7 +95,10 @@ export default function Overview() {
       ) : null}
 
       {data.metrics.needs_investigation > 0 ? (
-        <Banner tone="info" title={`${data.metrics.needs_investigation} finding(s) need investigation`}>
+        <Banner
+          tone="info"
+          title={`${pluralize(data.metrics.needs_investigation, "finding")} ${data.metrics.needs_investigation === 1 ? "needs" : "need"} investigation`}
+        >
           These matched an advisory but the evidence is incomplete or conflicting (often a vendor backport or a
           third-party build). They are excluded from the actionable count until confirmed.
         </Banner>

@@ -42,7 +42,11 @@ test.describe("vulnerabilities", () => {
   test("KEV filter shows only known-exploited findings", async ({ page }) => {
     const kev = await apiGet<VulnList>(page, "/api/vulnerabilities?kev=true&limit=100");
     await page.goto("/vulnerabilities");
+    const filtered = page.waitForResponse(
+      (r) => r.url().includes("/api/vulnerabilities") && r.url().includes("kev=true"),
+    );
     await page.getByRole("button", { name: /Known exploited \(KEV\)/ }).click();
+    await filtered;
     if (kev.total === 0) {
       await expect(page.getByText(/No findings match these filters/i)).toBeVisible();
       return;
@@ -88,7 +92,8 @@ test.describe("vulnerabilities", () => {
     }
   });
 
-  test("false-positive feedback is verified, and an unsupported claim changes nothing", async ({ page }) => {
+  test("false-positive feedback is verified, and an unsupported claim changes nothing", async ({ page }, testInfo) => {
+    const analyst = `e2e-${testInfo.project.name}`;
     const api = await apiGet<VulnList>(page, "/api/vulnerabilities?applicability=confirmed_applicability&limit=100");
     test.skip(api.items.length === 0, "no confirmed findings in this fixture");
     const target = api.items[0];
@@ -100,7 +105,7 @@ test.describe("vulnerabilities", () => {
     // A false positive without a reason cannot be submitted.
     await expect(dialog.getByRole("button", { name: /Submit feedback/i })).toBeDisabled();
     await dialog.getByRole("radio", { name: /Vendor patch already installed/i }).check();
-    await dialog.getByLabel(/Your name/i).fill("e2e-analyst");
+    await dialog.getByLabel(/Your name/i).fill(analyst);
 
     const [response] = await Promise.all([
       page.waitForResponse((r) => r.url().endsWith("/feedback") && r.request().method() === "POST"),
@@ -124,17 +129,18 @@ test.describe("vulnerabilities", () => {
     await page.reload();
     await page.getByRole("button", { name: target.cve }).first().click();
     await page.getByRole("dialog").getByRole("button", { name: /Review history/i }).click();
-    await expect(page.getByRole("dialog").getByText(/e2e-analyst/)).toBeVisible();
+    // History may contain reviews from earlier runs of this project: match ours.
+    await expect(page.getByRole("dialog").getByText(analyst, { exact: true }).first()).toBeVisible();
   });
 
-  test("confirming a finding records a review without rewriting the verdict", async ({ page }) => {
+  test("confirming a finding records a review without rewriting the verdict", async ({ page }, testInfo) => {
     const api = await apiGet<VulnList>(page, "/api/vulnerabilities?limit=1");
     const target = api.items[0];
     await page.goto("/vulnerabilities?q=" + encodeURIComponent(target.cve));
     await page.getByRole("button", { name: target.cve }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("button", { name: /Confirm finding/i }).click();
-    await dialog.getByLabel(/Your name/i).fill("e2e-confirmer");
+    await dialog.getByLabel(/Your name/i).fill(`e2e-confirmer-${testInfo.project.name}`);
     await dialog.getByRole("button", { name: /Submit feedback/i }).click();
     await expect(dialog.getByText(/Feedback recorded/i)).toBeVisible();
     await expect(dialog.getByText(/does not assert inapplicability/i)).toBeVisible();

@@ -222,7 +222,7 @@ describe("overview improvement indicator", () => {
       ["/api/overview", { ...overviewFixture, improvements_available: 2, reviewed_findings: 1 }],
     ]);
     render(<Overview />);
-    expect(await screen.findByText(/2 detection improvement\(s\) available for review/i)).toBeInTheDocument();
+    expect(await screen.findByText(/2 detection improvements available for review/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Review proposals/i })).toHaveAttribute("href", "/settings?tab=improvement");
   });
 });

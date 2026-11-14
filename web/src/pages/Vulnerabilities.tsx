@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 import { api, type Applicability, type Severity } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { navigate, useLocation } from "../lib/router";
-import { pct, pluralize, relativeTime, riskTone, severityLabel, SEVERITY_ORDER } from "../lib/format";
+import { applicabilityLabel, pct, pluralize, relativeTime, riskTone, severityLabel, SEVERITY_ORDER } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -223,7 +223,7 @@ export default function Vulnerabilities() {
                     active ? "border-accent bg-accent-soft font-medium text-accent" : "border-border text-muted hover:bg-surface-2",
                   )}
                 >
-                  {app === "confirmed_applicability" ? "Confirmed" : app === "needs_investigation" ? "Needs investigation" : app.charAt(0).toUpperCase() + app.slice(1)}
+                  {applicabilityLabel[app]}
                 </button>
               );
             })}
@@ -282,7 +282,7 @@ export default function Vulnerabilities() {
                     </Td>
                     <Td>
                       <span className="mono text-xs">{v.asset}</span>
-                      <div className="text-xs text-muted">first seen {relativeTime(v.first_seen)}</div>
+                      <div className="whitespace-nowrap text-xs text-muted">first seen {relativeTime(v.first_seen)}</div>
                     </Td>
                     <Td>
                       <span className="text-sm">{v.product}</span>

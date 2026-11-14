@@ -88,8 +88,12 @@ func (e *Engine) Quality(ctx context.Context, stats FindingStats) (QualityMetric
 		}
 	}
 	if q.Reviewed < 5 {
+		noun := "findings"
+		if q.Reviewed == 1 {
+			noun = "finding"
+		}
 		q.Notes = append(q.Notes, fmt.Sprintf(
-			"%d reviewed finding(s): the false-positive rate is anecdotal until at least 5 are reviewed", q.Reviewed))
+			"%d reviewed %s: the false-positive rate is anecdotal until at least 5 are reviewed", q.Reviewed, noun))
 	}
 	if q.VerificationInconclusive > 0 {
 		q.Notes = append(q.Notes,

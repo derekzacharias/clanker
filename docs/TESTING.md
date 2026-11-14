@@ -156,6 +156,25 @@ workflow subset)**, **33 jsdom unit tests**, **93 Go tests**.
 - **Fix:** the rejection reason is sticky until a successful unlock.
 - **Regression:** `auth.spec.ts` "the token dialog appears and rejects a wrong token".
 
+### B-013 — Three competing "New Scan" buttons and broken identifier wrapping (Low, visual)
+
+- The sidebar, the top bar and the Overview header all showed a primary
+  "New Scan" action on desktop; CVE identifiers hyphen-wrapped mid-string in the
+  findings table (`CVE-2023-` / `48795`); the applicability chip rendered
+  `validated_behavior` raw.
+- **Fix:** one primary action per breakpoint (sidebar ≥ lg, top bar below it);
+  the Overview header keeps only its contextual "Review findings"; CVE cells and
+  relative times are `whitespace-nowrap`; the chip uses the shared label map.
+- **Files:** `src/components/AppShell.tsx`, `src/pages/Overview.tsx`,
+  `src/pages/Vulnerabilities.tsx`, `src/pages/AssetDetail.tsx`
+
+### B-014 — "1 finding(s)" copy (Low, content)
+
+- Pluralisation was hand-written in three places (`finding(s)`, `improvement(s)`).
+- **Fix:** shared `pluralize()` helper in the UI and proper plural in the Go
+  quality note.
+- **Files:** `src/lib/format.ts` consumers, `internal/vuln/improve/quality.go`
+
 ### B-012 — Test harness dropped recent database commits (Medium, harness)
 
 - Copying `intel.db` without its `-wal` file silently lost feedback, proposals and
@@ -186,3 +205,9 @@ itself — both now covered by `null-safety.spec`/unit fixtures and `auth.spec.t
 4. Prefer role-based locators (`getByRole`, `getByLabel`) over CSS.
 5. If a test mutates state, provision what it needs through the API (see
    `ensurePendingProposal`) instead of depending on fixture ordering.
+6. Use a per-project unique marker (e.g. `testInfo.project.name`) for records you
+   then look up by text: runs share one database, so a second browser project sees
+   the first one's reviews and a strict locator will match twice.
+7. Wait for the response you expect (`page.waitForResponse`) when a click triggers
+   a refetch; asserting against the previous render is the main source of
+   cross-browser flakiness in this suite.

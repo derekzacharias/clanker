@@ -11,7 +11,7 @@ import {
 } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { Link } from "../lib/router";
-import { formatDate, relativeTime } from "../lib/format";
+import { formatDate, pluralize, relativeTime } from "../lib/format";
 import { Card, CardHeader } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -129,7 +129,7 @@ export default function Improvement() {
                     <h3 className="mt-1.5 text-sm font-semibold">{imp.title}</h3>
                     <p className="mt-0.5 line-clamp-2 max-w-3xl text-sm text-muted">{imp.problem}</p>
                     <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-                      <span>{imp.affected_findings.length} affected finding(s)</span>
+                      <span>{pluralize(imp.affected_findings.length, "affected finding")}</span>
                       {imp.evaluation ? (
                         <span className={imp.evaluation.passed ? "text-low" : "text-critical"}>
                           tests {imp.evaluation.passed ? "passed" : "failed"} · {imp.evaluation.cases.length} fixtures ·{" "}

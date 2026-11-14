@@ -227,7 +227,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               )}
             </Button>
 
-            <Button variant="primary" size="sm" className="hidden md:inline-flex" onClick={() => navigate("/scans/new")}>
+            {/* The sidebar carries the primary action from lg up; below that this
+                is the only visible entry point. */}
+            <Button variant="primary" size="sm" className="md:inline-flex lg:hidden" onClick={() => navigate("/scans/new")}>
               <Plus className="h-4 w-4" aria-hidden="true" />
               New Scan
             </Button>
