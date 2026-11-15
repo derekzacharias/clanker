@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
@@ -796,7 +797,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReportExport(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	format := r.URL.Query().Get("format")
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" {
 		format = "json"
 	}
@@ -810,9 +811,33 @@ func (s *Server) handleReportExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "report_corrupt", "stored report is unreadable")
 		return
 	}
-	ext := map[string]string{"json": "json", "markdown": "md", "md": "md", "sarif": "sarif", "html": "html"}[strings.ToLower(format)]
+
+	// Software inventory exports answer a different question than the findings
+	// report: what is installed on this host, in the format an asset register or
+	// an SBOM consumer expects.
+	switch format {
+	case "csv", "inventory", "software":
+		body, err := report.SoftwareInventoryCSV([]model.Report{rep})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "export_error", err.Error())
+			return
+		}
+		writeAttachment(w, "text/csv; charset=utf-8", "clanker-guard-"+id+"-software.csv", body)
+		return
+	case "cyclonedx", "cdx", "sbom":
+		body, err := sbom.ExportCycloneDX(rep.Inventory.Packages, rep.Inventory.Asset, rep.Metadata.ToolVersion, exportTimestamp(rep))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "export_error", err.Error())
+			return
+		}
+		writeAttachment(w, "application/vnd.cyclonedx+json; charset=utf-8", "clanker-guard-"+id+".cdx.json", body)
+		return
+	}
+
+	ext := map[string]string{"json": "json", "markdown": "md", "md": "md", "sarif": "sarif", "html": "html"}[format]
 	if ext == "" {
-		writeError(w, http.StatusBadRequest, "invalid_format", "format must be json, markdown, sarif or html")
+		writeError(w, http.StatusBadRequest, "invalid_format",
+			"format must be json, markdown, sarif, html, csv (software inventory) or cyclonedx (SBOM)")
 		return
 	}
 	w.Header().Set("Content-Type", contentTypeFor(ext))
@@ -820,6 +845,125 @@ func (s *Server) handleReportExport(w http.ResponseWriter, r *http.Request) {
 	if err := report.Render(w, rep, format); err != nil {
 		s.log.Error("render report", "id", id, "format", format, "err", err)
 	}
+}
+
+// handleSoftwareExport is the environment-wide software asset list: every host
+// that has a stored assessment, newest report each, one row per package.
+// Without ?host= it answers "what software is in my environment" in one file.
+func (s *Server) handleSoftwareExport(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "csv"
+	}
+	host := strings.TrimSpace(r.URL.Query().Get("host"))
+
+	runs, err := s.store.ListRuns(ctx, 500)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "cache_error", err.Error())
+		return
+	}
+	// Newest report per host: an asset list must not repeat a package once per
+	// scan, or the register grows every day.
+	seen := map[string]bool{}
+	reports := []model.Report{}
+	for _, run := range runs {
+		if seen[run.Host] {
+			continue
+		}
+		if host != "" && !strings.EqualFold(run.Host, host) {
+			continue
+		}
+		seen[run.Host] = true
+		payload, err := s.store.ReportByID(ctx, run.ID)
+		if err != nil {
+			continue
+		}
+		var rep model.Report
+		if err := json.Unmarshal(payload, &rep); err != nil {
+			continue
+		}
+		reports = append(reports, rep)
+	}
+	if len(reports) == 0 {
+		if host != "" {
+			writeError(w, http.StatusNotFound, "no_inventory", fmt.Sprintf("no stored assessment for host %q", host))
+			return
+		}
+		writeError(w, http.StatusNotFound, "no_inventory", "no stored assessments yet; run a scan first")
+		return
+	}
+
+	switch format {
+	case "csv", "inventory", "software":
+		body, err := report.SoftwareInventoryCSV(reports)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "export_error", err.Error())
+			return
+		}
+		name := "clanker-guard-software-inventory.csv"
+		if host != "" {
+			name = "clanker-guard-software-" + sanitizeFilename(host) + ".csv"
+		}
+		writeAttachment(w, "text/csv; charset=utf-8", name, body)
+	case "cyclonedx", "cdx", "sbom":
+		// A CycloneDX document describes one host; asking for several would mean
+		// inventing a merged component tree.
+		if len(reports) != 1 {
+			writeError(w, http.StatusBadRequest, "host_required",
+				"a CycloneDX SBOM describes one host: pass ?host=<name>, or export per report")
+			return
+		}
+		rep := reports[0]
+		body, err := sbom.ExportCycloneDX(rep.Inventory.Packages, rep.Inventory.Asset, rep.Metadata.ToolVersion, exportTimestamp(rep))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "export_error", err.Error())
+			return
+		}
+		writeAttachment(w, "application/vnd.cyclonedx+json; charset=utf-8",
+			"clanker-guard-software-"+sanitizeFilename(firstNonEmpty(rep.Inventory.Asset.Hostname, rep.Metadata.Host))+".cdx.json", body)
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_format", "format must be csv or cyclonedx")
+	}
+}
+
+// exportTimestamp is when the inventory was collected, falling back to the end of
+// the scan so an exported SBOM carries a real timestamp instead of "now".
+func exportTimestamp(rep model.Report) time.Time {
+	if !rep.Inventory.CollectedAt.IsZero() {
+		return rep.Inventory.CollectedAt
+	}
+	if rep.Metadata.FinishedAt != nil {
+		return *rep.Metadata.FinishedAt
+	}
+	if !rep.Metadata.StartedAt.IsZero() {
+		return rep.Metadata.StartedAt
+	}
+	return time.Now().UTC()
+}
+
+func writeAttachment(w http.ResponseWriter, contentType, name string, body []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// sanitizeFilename keeps a hostname usable as a download name.
+func sanitizeFilename(s string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		default:
+			return '-'
+		}
+	}, s)
+	if cleaned == "" {
+		return "inventory"
+	}
+	return cleaned
 }
 
 func contentTypeFor(ext string) string {
@@ -902,23 +1046,55 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	})
 
 	version := s.opts.ToolVersion
+	// The install command is generated for *this* server: an endpoint that pastes
+	// it enrolls straight back here, which is what makes "install and report" one
+	// step instead of two.
+	serverURL := requestBaseURL(r)
+	enrollToken, tokenErr := s.fleet.EnrollToken(r.Context())
+	if tokenErr != nil {
+		s.log.Warn("read enrollment token", "err", tokenErr)
+	}
 	install := map[string]any{
 		"published": s.opts.ReleaseBase != "",
 		"version":   version,
 		"base_url":  s.opts.ReleaseBase,
 	}
 	if s.opts.ReleaseBase != "" {
-		install["commands"] = map[string]string{
-			"linux":   fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- --version %s", strings.TrimRight(s.opts.ReleaseBase, "/"), version),
-			"macos":   fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- --version %s", strings.TrimRight(s.opts.ReleaseBase, "/"), version),
-			"windows": fmt.Sprintf("iwr %s/install-agent.ps1 -UseBasicParsing | iex", strings.TrimRight(s.opts.ReleaseBase, "/")),
+		base := strings.TrimRight(s.opts.ReleaseBase, "/")
+		enrolled := serverURL != "" && enrollToken != ""
+		args := "--version " + version
+		winArgs := fmt.Sprintf("-Version %s", version)
+		if enrolled {
+			args += fmt.Sprintf(" --server %s --enroll-token %s", serverURL, enrollToken)
+			winArgs += fmt.Sprintf(` -Server "%s" -EnrollToken "%s"`, serverURL, enrollToken)
 		}
+		shell := func(shellExtra, winExtra string) map[string]string {
+			return map[string]string{
+				"linux": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
+				"macos": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
+				// The Windows script takes its parameters as arguments and cannot be
+				// piped into iex with them, so save it and run it explicitly.
+				"windows": fmt.Sprintf(
+					`iwr %s/install-agent.ps1 -OutFile "$env:TEMP\install-agent.ps1" -UseBasicParsing; `+
+						`& "$env:TEMP\install-agent.ps1" %s%s`, base, winArgs, winExtra),
+			}
+		}
+		// Default: the installer enrolls, scans once and installs a background service,
+		// so the endpoint is reachable with no follow-up work. The one-off variant is
+		// still offered for an endpoint that must not run a service.
+		install["commands"] = shell("", "")
+		oneoffShell, oneoffWin := " --no-service", " -NoService"
+		if !enrolled {
+			oneoffShell, oneoffWin = "", ""
+		}
+		install["oneoff_commands"] = shell(oneoffShell, oneoffWin)
+		install["keeps_available"] = enrolled
 	} else {
 		// Never show a fake release URL: tell the user exactly how to publish.
 		install["build_steps"] = []string{
 			"./scripts/build-agent-release.sh " + version,
-			"publish dist/v" + version + " as a release (installers + SHA256SUMS are generated)",
-			"restart: CLANKER_GUARD_RELEASE_BASE=https://<your-host>/v" + version + " clanker vuln serve",
+			"publish dist/v" + version + " as a GitHub release tagged v" + version + " (installers + SHA256SUMS are generated)",
+			"restart: CLANKER_GUARD_RELEASE_BASE=https://github.com/<owner>/<repo>/releases/download/v" + version + " clanker vuln serve",
 		}
 	}
 	local := map[string]any{
@@ -928,10 +1104,37 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if hv, ok := ds.Hosts[hostname]; ok {
 		local["last_scan"] = hv.FinishedAt.UTC().Format(time.RFC3339)
 	}
+	// The fleet view: what is enrolled, what each endpoint is doing right now, and
+	// the bootstrap secret that lets another endpoint join.
+	enrolled := []map[string]any{}
+	if list, err := s.fleet.List(r.Context()); err == nil {
+		for _, a := range list {
+			task, _ := s.fleet.LatestTask(r.Context(), a.ID)
+			view := agentView(a, s.opts.Now(), s.presence.online(a.ID), task != nil && task.Status == fleet.TaskRunning)
+			// The latest queued/finished scan request, so the operator can see
+			// whether the endpoint has picked the work up yet.
+			if task != nil {
+				view["task"] = task
+			}
+			enrolled = append(enrolled, view)
+		}
+	} else {
+		s.log.Warn("list agents", "err", err)
+	}
+	fleetView := map[string]any{
+		"server_url":       serverURL,
+		"enroll_token":     enrollToken,
+		"reachable_window": fleet.ReachableWindow.String(),
+		"enrolled":         enrolled,
+		"count":            len(enrolled),
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"local": local, "endpoints": endpoints, "install": install,
-		"managed_mode": false,
-		"managed_note": "This build has no agent-to-server channel: no check-in, no remote commands, no telemetry.",
+		"fleet":        fleetView,
+		"managed_mode": true,
+		"managed_note": "Endpoints enroll with a per-agent token and report findings and status to this server only. " +
+			"There is no remote command channel: the server cannot ask an agent to run anything, and nothing is sent to a third party.",
 	})
 }
 
@@ -953,6 +1156,14 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"cache_path":      s.opts.CachePath,
 		"tool_version":    s.opts.ToolVersion,
 		"token_required":  s.opts.Token != "",
+		// password_required mirrors whether `clanker vuln auth set-password` has
+		// been run; the Settings screen shows which sign-in methods exist.
+		"password_required": s.auth != nil,
+		"auth": map[string]any{
+			"required":    s.authRequired(),
+			"session_ttl": s.opts.SessionTTL.String(),
+			"auth_file":   s.authFilePath(),
+		},
 		"capabilities": map[string]bool{
 			"local_scan": true, "network_scan": false, "sbom_scan": false, "llm": false,
 		},

@@ -1,7 +1,7 @@
 import * as Tabs from "@radix-ui/react-tabs";
-import { Check, ClipboardCopy, Loader2, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
-import { api, ApiError, getToken, setToken, type FeedResponse } from "../lib/api";
+import { Check, Loader2, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { api, ApiError, getToken, setToken, type EnrolledAgent, type FeedResponse } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { useQueryParam } from "../lib/router";
 import Improvement from "./Improvement";
@@ -10,6 +10,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { CopyButton } from "../components/ui/CopyButton";
 import { Banner, ErrorState, LoadingBlock } from "../components/ui/Feedback";
 import { Field, Input, Select } from "../components/ui/Field";
 import { Switch } from "../components/ui/Switch";
@@ -223,6 +224,14 @@ function IntelligenceTab() {
 
 function AgentsTab() {
   const { data, error, loading, reload } = useAsync(() => api.agents());
+  const { push } = useToast();
+  // The enrollment token can be copied from here instead of re-running enroll.
+  const enrollRef = useRef<HTMLElement | null>(null);
+  // Default: install so the endpoint stays reachable. An installer that scans once
+  // and exits leaves the endpoint offline the moment it returns.
+  const [keepAvailable, setKeepAvailable] = useState(true);
+  const wantWatch = keepAvailable && Boolean(data?.install.keeps_available);
+  const commands = wantWatch ? data?.install.commands : data?.install.oneoff_commands ?? data?.install.commands;
   if (loading && !data) return <LoadingBlock label="Loading agent status" />;
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
   if (!data) return null;
@@ -247,15 +256,44 @@ function AgentsTab() {
       <Card>
         <CardHeader
           title="Install the agent on other endpoints"
-          description="Copy-and-paste installers verify a published SHA-256 before installing. No service or scheduled task is created."
+          description="The command enrolls the endpoint here, scans it once, reports the findings and installs a background service so it stays reachable. Installers verify a published SHA-256 first."
         />
         <CardBody className="space-y-3">
           {data.install.published ? (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <InstallCommand title="Linux" command={data.install.commands?.linux ?? ""} />
-              <InstallCommand title="macOS" command={data.install.commands?.macos ?? ""} />
-              <InstallCommand title="Windows (PowerShell)" command={data.install.commands?.windows ?? ""} />
-            </div>
+            <>
+              {data.install.keeps_available ? (
+                <ToggleRow
+                  id="keep-available"
+                  checked={keepAvailable}
+                  onChange={setKeepAvailable}
+                  label="Keep this endpoint available"
+                  hint={
+                    keepAvailable
+                      ? "The installer adds a background service, so the dashboard can scan this endpoint at any time."
+                      : "Adds --no-service: enrolls and scans once, then exits. The endpoint shows offline until you start the service yourself."
+                  }
+                />
+              ) : null}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <InstallCommand title="Linux" command={commands?.linux ?? ""} />
+                <InstallCommand title="macOS" command={commands?.macos ?? ""} />
+                <InstallCommand title="Windows (PowerShell)" command={commands?.windows ?? ""} />
+              </div>
+              {wantWatch ? (
+                <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-muted">
+                  <p className="font-medium text-fg">Nothing else to do after the install</p>
+                  <p className="mt-1">
+                    The installer enrolls the endpoint, runs one assessment and installs a background service
+                    (systemd user unit on Linux, LaunchAgent on macOS, logon task on Windows). The endpoint is online
+                    from then on — no unit files to write, no commands to schedule.
+                  </p>
+                  <p className="mt-1">
+                    Remove it at any time with <span className="mono">clanker-guard-agent uninstall --yes</span>, which
+                    stops and deletes the service too.
+                  </p>
+                </div>
+              ) : null}
+            </>
           ) : (
             <>
               <Banner tone="warn" title="No agent artifacts have been published yet">
@@ -274,14 +312,162 @@ function AgentsTab() {
             </>
           )}
           <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-muted">
-            <p className="font-medium text-fg">What the agent collects</p>
+            <p className="font-medium text-fg">What the agent sends</p>
             <p className="mt-1">
-              Package-manager metadata, OS release information and listening package metadata. No files, credentials or
-              documents. Advisory lookups go to api.osv.dev only. Uninstall with{" "}
-              <span className="mono">clanker-guard-agent uninstall --yes</span>.
+              Package-manager metadata, OS release information and listening package metadata, plus the assessment it
+              derives from them. It sends findings and its own status (what stage it is running) to{" "}
+              <span className="mono">{data.fleet?.server_url || "this dashboard"}</span> and nowhere else; advisory
+              lookups go to api.osv.dev. It never uploads files, credentials or documents, and the server cannot ask it to
+              run anything. Uninstall with <span className="mono">clanker-guard-agent uninstall --yes</span>.
             </p>
           </div>
           <p className="text-xs text-muted">{data.managed_note}</p>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Enrolled endpoints"
+          description="Agents that hold a per-agent token for this server, and what they are doing."
+          actions={
+            <Button
+              size="sm"
+              onClick={async () => {
+                try {
+                  await api.rotateEnrollToken();
+                  push("Enrollment token rotated — existing agents keep working");
+                  reload();
+                } catch (err) {
+                  push(err instanceof Error ? err.message : "Could not rotate the token");
+                }
+              }}
+            >
+              Rotate enroll token
+            </Button>
+          }
+        />
+        {(data.fleet?.enrolled ?? []).length === 0 ? (
+          <CardBody>
+            <p className="text-sm text-muted">
+              No endpoints enrolled yet. Paste an install command above on the endpoint you want to assess; it enrolls,
+              scans and reports back on its own.
+            </p>
+          </CardBody>
+        ) : (
+          <TableWrap>
+            <Table caption="Enrolled endpoints">
+              <thead>
+                <tr>
+                  <Th>Host</Th>
+                  <Th>Status</Th>
+                  <Th>Activity</Th>
+                  <Th>Last seen</Th>
+                  <Th className="text-right">Findings</Th>
+                  <Th>Version</Th>
+                  <Th />
+                </tr>
+              </thead>
+              <tbody>
+                {(data.fleet?.enrolled ?? []).map((agent) => (
+                  <tr key={agent.id}>
+                    <Td>
+                      <span className="mono text-xs">{agent.host}</span>
+                      {agent.os ? <span className="block text-xs text-subtle">{agent.os}</span> : null}
+                    </Td>
+                    <Td>{agentStatus(agent)}</Td>
+                    <Td>
+                      <span className="text-xs text-muted">
+                        {agent.revoked
+                          ? "removed by operator"
+                          : agent.state === "scanning" || agent.state === "reporting"
+                            ? [agent.phase, `${agent.percent}%`].filter(Boolean).join(" · ")
+                            : agent.watching
+                              ? "watching for work"
+                              : agent.message || agent.state}
+                      </span>
+                    </Td>
+                    <Td>
+                      <span className="text-xs text-muted">{agent.last_seen ? relativeSeconds(agent.seconds_since_seen) : "never"}</span>
+                    </Td>
+                    <Td className="text-right mono text-xs">{agent.findings}</Td>
+                    <Td className="mono text-xs">{agent.version || "—"}</Td>
+                    <Td className="text-right">
+                      {agent.task?.status === "queued" ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={async () => {
+                            try {
+                              await api.cancelAgentScan(agent.id);
+                              push(`Queued scan for ${agent.host} cancelled`);
+                              reload();
+                            } catch (err) {
+                              push(err instanceof Error ? err.message : "Could not cancel the request");
+                            }
+                          }}
+                        >
+                          Cancel request
+                        </Button>
+                      ) : null}
+                      {agent.revoked ? null : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={async () => {
+                            try {
+                              await api.revokeAgent(agent.id);
+                              push(`${agent.host} revoked`);
+                              reload();
+                            } catch (err) {
+                              push(err instanceof Error ? err.message : "Could not revoke the endpoint");
+                            }
+                          }}
+                        >
+                          Revoke
+                        </Button>
+                      )}
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          </TableWrap>
+        )}
+        <CardBody className="pt-0">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+            <span>Enrollment token:</span>
+            <span ref={enrollRef} className="mono break-all text-fg">
+              {data.fleet?.enroll_token}
+            </span>
+            <CopyButton
+              value={data.fleet?.enroll_token ?? ""}
+              label="Copy enrollment token"
+              selectRef={enrollRef}
+            />
+            <span className="w-full text-subtle">
+              Rotating it only affects new enrollments; revoke an endpoint to cut off its own token.
+            </span>
+            {(data.fleet?.enrolled ?? []).some((a) => !a.watching && !a.revoked) ? (
+              <div className="mt-2 w-full rounded-md border border-border bg-surface-2 p-2">
+                <p className="text-xs text-muted">
+                  Endpoints shown as <span className="font-medium text-fg">offline</span> are unreachable: no agent is
+                  listening for work there, so a scan requested from New scan waits until one is. Start the watcher on
+                  those hosts:
+                </p>
+                <div className="mt-1.5 flex items-center gap-2">
+                  <span className="mono text-xs text-fg">clanker-guard-agent service install</span>
+                  <CopyButton
+                    value="clanker-guard-agent service install"
+                    label="Copy the command that starts the background service"
+                  />
+                </div>
+                <p className="mt-1 text-xs text-subtle">
+                  One command: it writes and enables the platform's service definition, so the endpoint stays available
+                  across logout and reboot.
+                </p>
+              </div>
+            ) : null}
+          </div>
         </CardBody>
       </Card>
 
@@ -340,7 +526,14 @@ function AccessTab() {
           <Row
             label="Authentication"
             value={
-              data.token_required ? (
+              data.password_required && data.token_required ? (
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <Badge className="border-low/30 bg-low-soft text-low">password sign-in</Badge>
+                  <Badge className="border-border bg-surface-2 text-muted">+ API token</Badge>
+                </span>
+              ) : data.password_required ? (
+                <Badge className="border-low/30 bg-low-soft text-low">password sign-in</Badge>
+              ) : data.token_required ? (
                 <Badge className="border-low/30 bg-low-soft text-low">token required</Badge>
               ) : (
                 <Badge className="border-border bg-surface-2 text-muted">loopback only</Badge>
@@ -348,11 +541,27 @@ function AccessTab() {
             }
           />
           <p className="text-xs text-muted">
-            The server binds to 127.0.0.1 by default. Binding to any other address requires
-            <span className="mono"> CLANKER_GUARD_TOKEN</span>, which this interface sends as the
-            <span className="mono"> X-Guard-Token</span> header.
+            The server binds to 127.0.0.1 by default. Binding to any other address requires a credential.
+            {data.password_required && data.auth ? (
+              <>
+                {" "}
+                Sign-in sessions last <span className="mono">{data.auth.session_ttl}</span> and are stored in the 0600 file{" "}
+                <span className="mono">{data.auth.auth_file}</span>. Change the password on the host with{" "}
+                <span className="mono">clanker vuln auth set-password</span>.
+              </>
+            ) : (
+              <>
+                {" "}
+                Create a dashboard password with <span className="mono">clanker vuln auth set-password</span> to sign in
+                from a browser instead of pasting <span className="mono">CLANKER_GUARD_TOKEN</span>.
+              </>
+            )}
           </p>
-          <Field label="API token" htmlFor="api-token" hint="Stored in this browser only. Leave empty for a loopback server.">
+          <Field
+            label="API token"
+            htmlFor="api-token"
+            hint="Only needed without a password sign-in: scripts and the endpoint agent send it as X-Guard-Token. Stored in this browser only."
+          >
             <div className="flex gap-2">
               <Input
                 id="api-token"
@@ -431,32 +640,31 @@ function FeedTable({ feeds }: { feeds: FeedResponse["feeds"] }) {
 }
 
 function InstallCommand({ title, command }: { title: string; command: string }) {
-  const [copied, setCopied] = useState(false);
+  // "manual" means every clipboard path failed; the text is selected instead so
+  // the operator finishes with Ctrl+C instead of wondering why nothing happened.
+  const [outcome, setOutcome] = useState<"copied" | "manual" | null>(null);
+  const codeRef = useRef<HTMLElement | null>(null);
+
   return (
     <div className="rounded-md border border-border">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
         <span className="text-xs font-semibold">{title}</span>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(command);
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1500);
-            } catch {
-              /* clipboard blocked */
-            }
-          }}
-          aria-label={`Copy ${title} install command`}
-        >
-          {copied ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : <ClipboardCopy className="h-3.5 w-3.5" aria-hidden="true" />}
-          {copied ? "Copied" : "Copy"}
-        </Button>
+        <CopyButton
+          value={command}
+          label={`Copy ${title} install command`}
+          selectRef={codeRef}
+          onOutcome={setOutcome}
+        />
       </div>
       <pre className="scroll-x p-3 text-[0.6875rem] leading-relaxed">
-        <code>{command}</code>
+        <code ref={codeRef}>{command}</code>
       </pre>
+      <p role="status" aria-live="polite" className="px-3 pb-2 text-xs text-muted">
+        {outcome === "copied" ? "Copied to the clipboard." : null}
+        {outcome === "manual"
+          ? "This browser blocks clipboard access over plain HTTP. The command is selected — press Ctrl+C (⌘C)."
+          : null}
+      </p>
     </div>
   );
 }
@@ -505,3 +713,29 @@ function Count({ label, value }: { label: string; value: number }) {
   );
 }
 
+
+/**
+ * agentStatus is the one thing an operator scans for: is this endpoint reporting,
+ * and if not, why. Revoked and stalled agents are visually distinct from healthy
+ * ones rather than all rendering the same grey badge.
+ */
+function agentStatus(agent: EnrolledAgent) {
+  if (agent.revoked) return <Badge className="border-critical/30 bg-critical-soft text-critical">revoked</Badge>;
+  if (agent.state === "error")
+    return <Badge className="border-critical/30 bg-critical-soft text-critical">error</Badge>;
+  if (agent.state === "scanning" || agent.state === "reporting")
+    return <Badge className="border-accent/40 bg-accent-soft text-accent">{agent.state}</Badge>;
+  // "Online" means reachable: the agent is holding a request and can be asked to
+  // scan right now. An endpoint with no watcher is unreachable and says so.
+  if (agent.online) return <Badge className="border-low/30 bg-low-soft text-low">online</Badge>;
+  return <Badge className="border-border bg-surface-2 text-muted">offline</Badge>;
+}
+
+/** relativeSeconds renders the server's seconds_since_seen without clock math in the browser. */
+function relativeSeconds(seconds?: number): string {
+  if (seconds === undefined || Number.isNaN(seconds)) return "unknown";
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}

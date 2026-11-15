@@ -2,7 +2,12 @@ import { test, expect } from "@playwright/test";
 import { apiGet, trackIssues, expectNoIssues } from "./helpers";
 
 type Settings = { policy: { fail_on: string; fail_on_kev: boolean }; offline_default: boolean; cache_path: string; token_required: boolean };
-type Agents = { install: { published: boolean; commands?: Record<string, string>; build_steps?: string[] }; endpoints: unknown[]; managed_note: string };
+type Agents = {
+  install: { published: boolean; commands?: Record<string, string>; build_steps?: string[] };
+  endpoints: unknown[];
+  fleet: { count: number; enrolled: { host: string; state: string; findings: number }[] };
+  managed_note: string;
+};
 
 test.describe("settings", () => {
   test("all four tabs render their content", async ({ page }) => {
@@ -50,6 +55,9 @@ test.describe("settings", () => {
   test("intelligence shows freshness and never fabricates a clean feed", async ({ page }) => {
     await page.goto("/settings?tab=intelligence");
     const rows = page.getByRole("row");
+    // The shell resolves the auth model before mounting pages, so wait for the
+    // table: sampling the count straight after navigation samples an empty main.
+    await expect(rows.first()).toBeVisible();
     expect(await rows.count()).toBeGreaterThan(1);
     const body = await page.locator("main").innerText();
     // Either real timestamps or an explicit "no intelligence" statement.
@@ -61,12 +69,40 @@ test.describe("settings", () => {
     await page.goto("/settings?tab=agents");
     if (api.install.published) {
       await expect(page.getByText(/curl -fsSL/).first()).toBeVisible();
+      // The command must enroll the endpoint with this server and make it report,
+      // not merely install a binary.
+      await expect(page.getByText(/--enroll-token/).first()).toBeVisible();
+      // Copying is a real action here, not a decorative button.
+      await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+      const copy = page.getByRole("button", { name: "Copy Linux install command" });
+      await copy.click();
+      await expect(copy).toHaveText("Copied");
+      const copied = await page.evaluate(() => navigator.clipboard.readText());
+      expect(copied).toContain("install-agent.sh");
+      expect(copied).toContain("--enroll-token");
     } else {
       await expect(page.getByText(/No agent artifacts have been published yet/i)).toBeVisible();
       await expect(page.getByText(/curl -fsSL https:\/\/github.com/)).toHaveCount(0);
       await expect(page.getByText(/build-agent-release\.sh/).first()).toBeVisible();
     }
-    await expect(page.getByText(/no agent-to-server channel/i)).toBeVisible();
+    // What is claimed about data flow must match what the agent actually does.
+    await expect(page.getByText(/no remote command channel/i)).toBeVisible();
+    await expect(page.getByText(/nothing is sent to a third party/i).first()).toBeVisible();
+    await expect(page.getByText(/no agent-to-server channel/i)).toHaveCount(0);
+  });
+
+  test("enrolled endpoints show what each agent is doing", async ({ page }) => {
+    const api = await apiGet<Agents>(page, "/api/agents");
+    await page.goto("/settings?tab=agents");
+    if (api.fleet.count === 0) {
+      await expect(page.getByText(/No endpoints enrolled yet/i)).toBeVisible();
+      return;
+    }
+    const table = page.getByRole("table", { name: /Enrolled endpoints/i });
+    await expect(table).toBeVisible();
+    for (const agent of api.fleet.enrolled) {
+      await expect(table.getByText(agent.host).first()).toBeVisible();
+    }
   });
 
   test("access tab reports token enforcement and the cache path", async ({ page }) => {

@@ -138,10 +138,12 @@ func TestMetaAdvertisesCapabilitiesHonestly(t *testing.T) {
 	if rec := doJSON(t, srv.Handler(), "GET", "/api/meta", nil, &meta); rec.Code != 200 {
 		t.Fatalf("status %d", rec.Code)
 	}
-	if meta.Capabilities["llm"] || meta.Capabilities["agent_push"] {
+	if meta.Capabilities["llm"] {
 		t.Fatalf("unimplemented capabilities must not be advertised as available: %+v", meta.Capabilities)
 	}
-	for _, cap := range []string{"local_scan", "network_scan", "sbom_scan"} {
+	// agent_push is implemented (agents enroll and upload reports), so it must be
+	// advertised; when it was only a placeholder this assertion was the reverse.
+	for _, cap := range []string{"local_scan", "network_scan", "sbom_scan", "agent_push"} {
 		if !meta.Capabilities[cap] {
 			t.Fatalf("%s is implemented and should be advertised: %+v", cap, meta.Capabilities)
 		}
@@ -554,5 +556,290 @@ func TestFeedsEndpoint(t *testing.T) {
 	}
 	if len(resp.Feeds) == 0 || resp.Counts.KEV != 1 {
 		t.Fatalf("feed status wrong: %+v", resp)
+	}
+}
+
+// TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured pins the contract
+// the Settings → Agents screen relies on: with a release base configured, the
+// commands must be copy-pasteable for every platform, and the Windows script
+// must actually receive -Version (a plain `| iex` would drop it and fail).
+func TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured(t *testing.T) {
+	const base = "https://github.com/derekzacharias/clanker-guard-agent/releases/download/v0.1.0"
+	srv, err := New(Options{
+		CachePath:   filepath.Join(t.TempDir(), "intel.db"),
+		ToolVersion: "0.1.0",
+		ReleaseBase: base,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	var out struct {
+		Install struct {
+			Published      bool              `json:"published"`
+			Version        string            `json:"version"`
+			BaseURL        string            `json:"base_url"`
+			Commands       map[string]string `json:"commands"`
+			OneoffCommands map[string]string `json:"oneoff_commands"`
+			KeepsAvailable bool              `json:"keeps_available"`
+			BuildSteps     []string          `json:"build_steps"`
+		} `json:"install"`
+		Fleet struct {
+			ServerURL   string `json:"server_url"`
+			EnrollToken string `json:"enroll_token"`
+		} `json:"fleet"`
+	}
+	if rec := doJSON(t, srv.Handler(), "GET", "/api/agents", nil, &out); rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	inst := out.Install
+	if !inst.Published || inst.Version != "0.1.0" || inst.BaseURL != base {
+		t.Fatalf("install block = %+v", inst)
+	}
+	// The command must also make the endpoint report back here: version, server
+	// URL and the enrollment token, or "install" is only half the job.
+	// The default command enrolls and installs the background service (no extra
+	// flag), so an install from the dashboard leaves the endpoint reachable.
+	want := "curl -fsSL " + base + "/install-agent.sh | bash -s -- --version 0.1.0 --server http://example.com --enroll-token " +
+		out.Fleet.EnrollToken
+	if inst.Commands["linux"] != want || inst.Commands["macos"] != want {
+		t.Fatalf("linux/macos commands = %q / %q, want %q", inst.Commands["linux"], inst.Commands["macos"], want)
+	}
+	if out.Fleet.EnrollToken == "" || out.Fleet.ServerURL != "http://example.com" {
+		t.Fatalf("fleet block = %+v", out.Fleet)
+	}
+	win := inst.Commands["windows"]
+	for _, needle := range []string{base + "/install-agent.ps1", "-Version 0.1.0", "install-agent.ps1", "-Server", "-EnrollToken", out.Fleet.EnrollToken} {
+		if !strings.Contains(win, needle) {
+			t.Fatalf("windows command %q is missing %q", win, needle)
+		}
+	}
+	if strings.Contains(win, "| iex") {
+		t.Fatalf("windows command pipes into iex, which cannot pass -Version: %q", win)
+	}
+	if !inst.KeepsAvailable {
+		t.Fatal("an enrolled install should advertise that it keeps the endpoint available")
+	}
+	if !strings.Contains(inst.OneoffCommands["linux"], "--no-service") || strings.Contains(inst.OneoffCommands["linux"], "--watch") {
+		t.Fatalf("one-off command = %q", inst.OneoffCommands["linux"])
+	}
+	if len(inst.BuildSteps) != 0 {
+		t.Fatalf("build_steps must be empty when a release host exists: %v", inst.BuildSteps)
+	}
+}
+
+// TestAgentInstallShowsHowToPublishWithoutAReleaseHost keeps the honest empty
+// state: no fabricated URL, and the exact build/publish steps instead.
+func TestAgentInstallShowsHowToPublishWithoutAReleaseHost(t *testing.T) {
+	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	var out struct {
+		Install struct {
+			Published  bool              `json:"published"`
+			Commands   map[string]string `json:"commands"`
+			BuildSteps []string          `json:"build_steps"`
+		} `json:"install"`
+	}
+	if rec := doJSON(t, srv.Handler(), "GET", "/api/agents", nil, &out); rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if out.Install.Published || len(out.Install.Commands) != 0 {
+		t.Fatalf("no release host, but install block claims %+v", out.Install)
+	}
+	if len(out.Install.BuildSteps) != 3 || !strings.Contains(out.Install.BuildSteps[0], "build-agent-release.sh 0.1.0") {
+		t.Fatalf("build_steps = %v", out.Install.BuildSteps)
+	}
+}
+
+// --- software asset inventory exports ---------------------------------------
+
+// TestReportExportSoftwareInventory covers the "what is installed on this host"
+// export: CSV for asset registers and CycloneDX for SBOM consumers.
+func TestReportExportSoftwareInventory(t *testing.T) {
+	srv, cachePath := newTestServer(t)
+	seedRun(t, cachePath, fixtureRoot(t))
+	h := srv.Handler()
+
+	runs, err := srv.store.ListRuns(t.Context(), 10)
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("seeded server has no stored report: %v", err)
+	}
+	id := runs[0].ID
+
+	// The stored report tells us how many packages the export must contain.
+	var rep struct {
+		Inventory struct {
+			Packages []struct {
+				Name string `json:"name"`
+			} `json:"packages"`
+		} `json:"inventory"`
+	}
+	if rec := doJSON(t, h, "GET", "/api/reports/"+id, nil, &rep); rec.Code != 200 {
+		t.Fatalf("report = %d", rec.Code)
+	}
+	wantRows := len(rep.Inventory.Packages)
+	if wantRows == 0 {
+		t.Fatal("seeded report has no packages to export")
+	}
+
+	// CSV: one row per installed package plus the header.
+	rec := request(t, h, "GET", "/api/reports/"+id+"/export?format=csv", "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("csv export = %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Fatalf("content-type = %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "-software.csv") {
+		t.Fatalf("content-disposition = %q", cd)
+	}
+	lines := strings.Split(strings.TrimSpace(rec.Body.String()), "\n")
+	if len(lines) != wantRows+1 {
+		t.Fatalf("csv has %d lines, want %d packages + header", len(lines), wantRows)
+	}
+	if !strings.HasPrefix(lines[0], "host,os,os_version,") {
+		t.Fatalf("csv header = %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "known_findings,max_severity") {
+		t.Fatalf("csv header is missing the derived assessment columns: %q", lines[0])
+	}
+	// The seeded endpoint is Ubuntu with an openssl advisory: that package must
+	// carry the derived finding count rather than a bare row.
+	if !strings.Contains(rec.Body.String(), "openssl") {
+		t.Fatal("csv does not contain the seeded openssl package")
+	}
+
+	// CycloneDX: a valid 1.5 document with one component per package.
+	rec = request(t, h, "GET", "/api/reports/"+id+"/export?format=cyclonedx", "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("cyclonedx export = %d: %s", rec.Code, rec.Body.String())
+	}
+	var cdx struct {
+		BOMFormat   string `json:"bomFormat"`
+		SpecVersion string `json:"specVersion"`
+		Metadata    struct {
+			Component struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"component"`
+		} `json:"metadata"`
+		Components []struct {
+			Type    string `json:"type"`
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			PURL    string `json:"purl"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cdx); err != nil {
+		t.Fatalf("cyclonedx is not valid JSON: %v", err)
+	}
+	if cdx.BOMFormat != "CycloneDX" || cdx.SpecVersion != "1.5" {
+		t.Fatalf("bom = %q %q", cdx.BOMFormat, cdx.SpecVersion)
+	}
+	if len(cdx.Components) != wantRows {
+		t.Fatalf("components = %d, want %d", len(cdx.Components), wantRows)
+	}
+	if cdx.Metadata.Component.Name == "" {
+		t.Fatal("SBOM metadata.component does not name the host")
+	}
+
+	// An unknown format explains what is available instead of guessing.
+	rec = request(t, h, "GET", "/api/reports/"+id+"/export?format=xlsx", "", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown format = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "cyclonedx") || !strings.Contains(rec.Body.String(), "csv") {
+		t.Fatalf("error does not advertise the inventory formats: %s", rec.Body.String())
+	}
+}
+
+// TestSoftwareExportIsTheEnvironmentWideAssetList covers the fleet export: every
+// host with a stored assessment, newest report only.
+func TestSoftwareExportIsTheEnvironmentWideAssetList(t *testing.T) {
+	srv, cachePath := newTestServer(t)
+	seedRun(t, cachePath, fixtureRoot(t))
+	h := srv.Handler()
+
+	runs, err := srv.store.ListRuns(t.Context(), 10)
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("seeded server has no stored report: %v", err)
+	}
+	host := runs[0].Host
+
+	rec := request(t, h, "GET", "/api/software/export?format=csv", "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("fleet csv = %d: %s", rec.Code, rec.Body.String())
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "software-inventory.csv") {
+		t.Fatalf("content-disposition = %q", cd)
+	}
+	lines := strings.Split(strings.TrimSpace(rec.Body.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected a header and at least one package row, got %d lines", len(lines))
+	}
+	if !strings.Contains(lines[1], host) || !strings.Contains(lines[1], "SCAN-") {
+		t.Fatalf("row does not carry its host and report: %q", lines[1])
+	}
+
+	// One host can be exported on its own, and then as an SBOM.
+	rec = request(t, h, "GET", "/api/software/export?format=csv&host="+host, "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("single-host csv = %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = request(t, h, "GET", "/api/software/export?format=cyclonedx&host="+host, "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("single-host cyclonedx = %d: %s", rec.Code, rec.Body.String())
+	}
+	var cdx struct {
+		BOMFormat string `json:"bomFormat"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cdx); err != nil || cdx.BOMFormat != "CycloneDX" {
+		t.Fatalf("single-host SBOM = %v (%v)", cdx, err)
+	}
+
+	// A merged SBOM across hosts would have to invent a component tree, so it is
+	// refused with guidance instead.
+	if len(runs) > 1 {
+		if rec := request(t, h, "GET", "/api/software/export?format=cyclonedx", "", nil); rec.Code != http.StatusBadRequest {
+			t.Fatalf("multi-host cyclonedx = %d, want 400", rec.Code)
+		}
+	}
+
+	rec = request(t, h, "GET", "/api/software/export?format=csv&host=no-such-host", "", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown host = %d, want 404", rec.Code)
+	}
+	rec = request(t, h, "GET", "/api/software/export?format=xlsx", "", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown fleet format = %d, want 400", rec.Code)
+	}
+}
+
+func TestSoftwareExportWithoutAnyAssessment(t *testing.T) {
+	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	rec := request(t, srv.Handler(), "GET", "/api/software/export?format=csv", "", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("empty cache = %d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "run a scan first") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestSoftwareExportRequiresDashboardAuth(t *testing.T) {
+	clk := newClock()
+	srv, _ := newAuthedServer(t, clk)
+	rec := request(t, srv.Handler(), "GET", "/api/software/export?format=csv", "", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous fleet export = %d, want 401", rec.Code)
 	}
 }

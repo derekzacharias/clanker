@@ -1,6 +1,6 @@
-import { AlertTriangle, CheckCircle2, Laptop, Loader2, Network, Package, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Laptop, Loader2, MonitorSmartphone, Network, Package, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api, ApiError, downloadReportExport, type Job } from "../lib/api";
+import { api, ApiError, downloadReportExport, type EnrolledAgent, type Job } from "../lib/api";
 import { navigate } from "../lib/router";
 import { formatDate } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
@@ -9,10 +9,11 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Banner, ErrorState } from "../components/ui/Feedback";
 import { Field, Input, Select } from "../components/ui/Field";
+import { CopyButton } from "../components/ui/CopyButton";
 import { Switch } from "../components/ui/Switch";
 import { cn } from "../lib/cn";
 
-type Kind = "local" | "network" | "sbom";
+type Kind = "local" | "network" | "sbom" | "agents";
 type SbomSource = "document" | "image";
 
 const SCOPE_TEMPLATE = `name: my-scope
@@ -50,6 +51,12 @@ export default function NewScan() {
   const [sbomPath, setSbomPath] = useState("");
   const [imageRef, setImageRef] = useState("");
   const [job, setJob] = useState<Job | null>(null);
+  // Endpoint Scan: the agents already installed elsewhere. Work is queued here and
+  // pulled by the agent, so this page never opens a connection to an endpoint.
+  const [agents, setAgents] = useState<EnrolledAgent[] | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
+  const [queued, setQueued] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
@@ -67,16 +74,48 @@ export default function NewScan() {
     return () => window.clearInterval(timer);
   }, [job]);
 
+  useEffect(() => {
+    if (kind !== "agents" || agents !== null) return;
+    let cancelled = false;
+    api
+      .agents()
+      .then((res) => {
+        if (!cancelled) setAgents(res.fleet?.enrolled ?? []);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setAgentError(err instanceof Error ? err.message : "Could not load the enrolled endpoints.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, agents]);
+
   const canStart = useMemo(() => {
     if (starting) return false;
     if (kind === "local") return true;
     if (kind === "network") return authorized && scopeYaml.trim().length > 0;
+    if (kind === "agents") return selectedAgents.length > 0;
     return sbomSource === "document" ? sbomPath.trim().length > 0 : imageRef.trim().length > 0;
-  }, [kind, starting, authorized, scopeYaml, sbomSource, sbomPath, imageRef]);
+  }, [kind, starting, authorized, scopeYaml, sbomSource, sbomPath, imageRef, selectedAgents]);
 
   async function start() {
     setStarting(true);
     setError(null);
+    if (kind === "agents") {
+      try {
+        const accepted: string[] = [];
+        for (const id of selectedAgents) {
+          await api.queueAgentScan(id);
+          accepted.push(id);
+        }
+        setQueued(accepted);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : String(err));
+      } finally {
+        setStarting(false);
+      }
+      return;
+    }
     try {
       const body: Parameters<typeof api.startScan>[0] = {
         kind,
@@ -116,6 +155,10 @@ export default function NewScan() {
     }
   }
 
+  if (queued) {
+    return <QueuedScans ids={queued} onNew={() => { setQueued(null); setSelectedAgents([]); setStep(1); }} />;
+  }
+
   if (job) {
     return <ScanProgress job={job} onCancel={cancel} error={error} />;
   }
@@ -149,12 +192,12 @@ export default function NewScan() {
       </ol>
 
       {step === 1 ? (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" role="group" aria-label="Scan type">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" role="group" aria-label="Scan type">
           <TypeCard
             selected={kind === "local"}
             onSelect={() => setKind("local")}
             icon={<Laptop className="h-5 w-5" />}
-            title="Local Endpoint"
+            title="Local System"
             description="Inventory installed software and the operating system on this machine."
             badge="No privileges needed"
           />
@@ -173,6 +216,14 @@ export default function NewScan() {
             title="Software / Container"
             description="Assess dependency manifests, SBOMs or supported container images."
             badge="CycloneDX · SPDX · manifests"
+          />
+          <TypeCard
+            selected={kind === "agents"}
+            onSelect={() => setKind("agents")}
+            icon={<MonitorSmartphone className="h-5 w-5" />}
+            title="Endpoint Scan"
+            description="Ask enrolled agents on other machines to assess themselves."
+            badge="Agent pull · no inbound connection"
           />
         </div>
       ) : null}
@@ -344,14 +395,104 @@ export default function NewScan() {
         </Card>
       ) : null}
 
+      {step === 2 && kind === "agents" ? (
+        <Card>
+          <CardHeader
+            title="Choose endpoints to scan"
+            description="Enrolled agents. Each pulls the request at its next check-in, so no inbound connection is opened to the endpoint."
+          />
+          <CardBody className="space-y-3">
+            {agentError ? <ErrorState message={agentError} /> : null}
+            {agents === null && !agentError ? (
+              <p role="status" className="text-sm text-muted">
+                Loading enrolled endpoints…
+              </p>
+            ) : null}
+            {agents && agents.length === 0 ? (
+              <Banner tone="warn" title="No endpoints are enrolled yet">
+                Install the agent on an endpoint first — Settings → Agents has a copy-and-paste command that enrolls it and
+                reports back. Until then there is nothing to scan from here.
+              </Banner>
+            ) : null}
+            {agents && agents.length > 0 ? (
+              <ul className="space-y-2">
+                {agents.map((agent) => {
+                  const checked = selectedAgents.includes(agent.id);
+                  return (
+                    <li
+                      key={agent.id}
+                      className={cn(
+                        "rounded-md border p-3",
+                        agent.revoked ? "border-border opacity-60" : "border-border-strong",
+                      )}
+                    >
+                      <label className="flex items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={checked}
+                          disabled={agent.revoked}
+                          onChange={(e) =>
+                            setSelectedAgents((cur) =>
+                              e.target.checked ? [...cur, agent.id] : cur.filter((x) => x !== agent.id),
+                            )
+                          }
+                          aria-describedby={`agent-${agent.id}-state`}
+                        />
+                        <span>
+                          <span className="mono text-sm">{agent.host}</span>
+                          {agent.os ? <span className="ml-2 text-xs text-muted">{agent.os}</span> : null}
+                          <span id={`agent-${agent.id}-state`} className="mt-0.5 block text-xs text-muted">
+                            {agent.revoked
+                              ? "revoked — cannot be asked to scan"
+                              : agent.online
+                                ? `online — the scan starts immediately${agent.findings ? ` · ${agent.findings} findings` : ""}`
+                                : "offline (unreachable) — the scan is queued until it reconnects"}
+                          </span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+            <Banner tone="info" title="How this works">
+              An endpoint that is <span className="font-medium">online</span> is holding a claim request
+              (<span className="mono">clanker-guard-agent watch</span>), so the scan starts the moment you confirm it. One
+              that is <span className="font-medium">offline</span> is unreachable; the request waits and runs as soon as it
+              reconnects. The server never connects to the endpoint itself.
+            </Banner>
+          </CardBody>
+        </Card>
+      ) : null}
+
       {step === 3 ? (
         <Card>
           <CardHeader title="Review" description="Confirm what will run." />
           <CardBody className="space-y-3 text-sm">
             <Row
               label="Scan type"
-              value={kind === "local" ? "Local endpoint" : kind === "network" ? "Network assessment" : "Software / container"}
+              value={
+                kind === "local"
+                  ? "Local system"
+                  : kind === "network"
+                    ? "Network assessment"
+                    : kind === "sbom"
+                      ? "Software / container"
+                      : "Endpoint scan"
+              }
             />
+            {kind === "agents" ? (
+              <Row
+                label="Endpoints"
+                value={
+                  (agents ?? [])
+                    .filter((a) => selectedAgents.includes(a.id))
+                    .map((a) => a.host)
+                    .join(", ") || "none selected"
+                }
+              />
+            ) : null}
             {kind === "network" ? (
               <>
                 <Row label="Authorised by" value={scopeYaml.match(/authorized_by:\s*(.+)/)?.[1]?.trim() || "not set"} />
@@ -631,4 +772,119 @@ function stageLabel(name: string): string {
     default:
       return name;
   }
+}
+
+/**
+ * QueuedScans shows what the server was asked for and whether each endpoint has
+ * picked it up. Work is pull-based, so "queued" can last as long as the agent is
+ * offline; the panel says that instead of showing a progress bar that never moves.
+ */
+function QueuedScans({ ids, onNew }: { ids: string[]; onNew: () => void }) {
+  const [agents, setAgents] = useState<EnrolledAgent[] | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await api.agents();
+        if (!cancelled) setAgents(res.fleet?.enrolled ?? []);
+      } catch {
+        /* keep showing the last known state */
+      }
+    };
+    void load();
+    const timer = window.setInterval(load, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const rows = ids
+    .map((id) => (agents ?? []).find((a) => a.id === id))
+    .filter((a): a is EnrolledAgent => Boolean(a));
+  const pending = rows.some((a) => !a.task || a.task.status === "queued" || a.task.status === "running");
+
+  return (
+    <div className="mx-auto max-w-2xl space-y-4">
+      <PageHeader
+        title="Endpoint scan queued"
+        description="Scans start as soon as the request reaches a reachable endpoint; it uploads the report itself."
+      />
+      <Card>
+        <CardBody className="space-y-3">
+          {rows.length === 0 ? (
+            <p className="text-sm text-muted">Waiting for the endpoint state…</p>
+          ) : (
+            <ul className="space-y-2 text-sm">
+              {rows.map((agent) => {
+                const status = agent.task?.status ?? "queued";
+                const tone =
+                  status === "done"
+                    ? "border-low/30 bg-low-soft text-low"
+                    : status === "failed"
+                      ? "border-critical/30 bg-critical-soft text-critical"
+                      : "border-accent/40 bg-accent-soft text-accent";
+                return (
+                  <li key={agent.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+                    <span>
+                      <span className="mono text-sm">{agent.host}</span>
+                      <span className="ml-2 text-xs text-muted">
+                        {status === "queued" && !agent.online
+                          ? "endpoint unreachable — queued until it reconnects"
+                          : status === "queued"
+                            ? "dispatched — starting now"
+                            : status === "running"
+                              ? `scanning${agent.phase ? ` · ${agent.phase}` : ""}`
+                              : status === "done"
+                                ? `report ${agent.task?.report_id ?? "received"}`
+                                : agent.task?.note || "scan failed"}
+                      </span>
+                    </span>
+                    <span className="flex items-center gap-2">
+                      {status === "queued" && !agent.watching ? (
+                        <CopyButton value="clanker-guard-agent watch" label="Copy the command that makes this endpoint reachable" />
+                      ) : null}
+                      {status === "queued" ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={cancelling === agent.id}
+                          onClick={async () => {
+                            setCancelling(agent.id);
+                            try {
+                              await api.cancelAgentScan(agent.id);
+                            } catch {
+                              /* nothing queued any more: the list refresh shows it */
+                            } finally {
+                              setCancelling(null);
+                            }
+                          }}
+                        >
+                          Cancel request
+                        </Button>
+                      ) : null}
+                      <Badge className={tone}>{status}</Badge>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <p className="text-xs text-muted">
+            {pending
+              ? "A reachable endpoint starts the scan immediately. An unreachable one has no agent listening for work: run `clanker-guard-agent watch` on it (copy the command above) and the request starts the moment it connects."
+              : "Finished. The reports are in Reports and the findings are in Vulnerabilities."}
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => navigate("/settings?tab=agents")}>Agent status</Button>
+            <Button variant="primary" onClick={onNew}>
+              New scan
+            </Button>
+          </div>
+        </CardBody>
+      </Card>
+    </div>
+  );
 }

@@ -7,22 +7,39 @@
 #   --version VERSION   release version to install (required unless CLANKER_GUARD_VERSION)
 #   --base-url URL      release base URL (default: CLANKER_GUARD_BASE_URL or GitHub releases)
 #   --bin-dir DIR       install directory (default: $HOME/.local/bin, or /usr/local/bin when writable)
+#   --server URL        Clanker Guard server to report to (enrolls the endpoint)
+#   --enroll-token T    enrollment token from Settings → Agents (needed for --server)
+#   --no-scan           install and enroll, but do not run the first assessment
+#   --watch             keep watching in the foreground instead of installing a
+#                       background service (containers, debugging)
+#   --no-service        do not install the background service; the endpoint will
+#                       only be reachable while you run `watch` yourself
 #   --scan              run a local assessment immediately after installing
 #   --yes               non-interactive (accepted for scripted use; this installer never prompts)
 #
 # Security properties:
 #   * Never executes an unverified download: the artifact is checked against the
 #     published SHA-256 before it is moved into place.
-#   * No service, no scheduled task, no auto-update, no telemetry.
+#   * With --server, the endpoint enrolls and reports its findings and status to
+#     that server only, and installs a background service so the dashboard can
+#     ask it for scans (--no-service opts out). Without --server nothing is
+#     uploaded anywhere and no service is installed.
+#   * The service is removed by: clanker-guard-agent uninstall --yes
 #   * Uninstall with: clanker-guard-agent uninstall --yes
 set -euo pipefail
 
-REPO="bgdnvk/clanker"
+REPO="derekzacharias/clanker-guard-agent"
 DEFAULT_BASE="https://github.com/${REPO}/releases/download"
 VERSION="${CLANKER_GUARD_VERSION:-}"
 BASE_URL="${CLANKER_GUARD_BASE_URL:-$DEFAULT_BASE}"
 BIN_DIR="${CLANKER_GUARD_BIN_DIR:-}"
 RUN_SCAN=0
+REPORT_SCAN=0
+SERVER=""
+ENROLL_TOKEN=""
+NO_SCAN=0
+WATCH=0
+SERVICE=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,9 +47,14 @@ while [ $# -gt 0 ]; do
     --base-url) BASE_URL="${2:?--base-url needs a value}"; shift 2 ;;
     --bin-dir) BIN_DIR="${2:?--bin-dir needs a value}"; shift 2 ;;
     --scan) RUN_SCAN=1; shift ;;
+    --server) SERVER="${2:?--server needs a value}"; shift 2 ;;
+    --enroll-token) ENROLL_TOKEN="${2:?--enroll-token needs a value}"; shift 2 ;;
+    --no-scan) NO_SCAN=1; shift ;;
+    --watch) WATCH=1; shift ;;
+    --no-service) SERVICE=0; shift ;;
     --yes) shift ;;
     -h|--help)
-      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 3 ;;
   esac
@@ -73,6 +95,16 @@ mkdir -p "$BIN_DIR"
 
 TMPDIR_GUARD="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_GUARD"' EXIT
+
+agent_config_path() {
+  # Mirrors internal/vuln/agent.ConfigPath so `service install` watches the same
+  # file `enroll` just wrote.
+  if [ -n "${CLANKER_GUARD_AGENT_CONFIG:-}" ]; then
+    printf '%s' "$CLANKER_GUARD_AGENT_CONFIG"
+    return
+  fi
+  printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/clanker-guard/agent.json"
+}
 
 fetch() {
   local url="$1" dest="$2"
@@ -133,14 +165,69 @@ case ":$PATH:" in
   *) echo "note: $BIN_DIR is not on your PATH; add it with: export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 
+if [ -n "$SERVER" ]; then
+  if [ -z "$ENROLL_TOKEN" ]; then
+    echo "error: --server needs --enroll-token (Settings → Agents shows both)" >&2
+    exit 3
+  fi
+  echo
+  echo "enrolling with ${SERVER}"
+  echo "  findings and status will be sent to that server only; nothing to a third party"
+  "$BIN_DIR/clanker-guard-agent" enroll --server "$SERVER" --enroll-token "$ENROLL_TOKEN" || {
+    echo "error: enrollment failed; the agent is installed but not reporting" >&2
+    exit 4
+  }
+  REPORT_SCAN=1
+fi
+
 echo
-echo "Next steps (nothing runs automatically):"
+echo "Next steps:"
 echo "  clanker-guard-agent scan --local --format json --output findings.json"
 echo "  clanker-guard-agent feeds update --with-osv   # enables offline scans"
-echo "  clanker-guard-agent uninstall --yes           # remove binary and cache"
+echo "  clanker-guard-agent status                    # enrollment + server"
+echo "  clanker-guard-agent uninstall --yes           # remove binary, config and cache"
 
-if [ "$RUN_SCAN" = "1" ]; then
+if [ "$RUN_SCAN" = "1" ] || { [ "$REPORT_SCAN" = "1" ] && [ "$NO_SCAN" = "0" ]; }; then
   echo
-  echo "running: clanker-guard-agent scan --local"
-  exec "$BIN_DIR/clanker-guard-agent" scan --local
+  if [ "$REPORT_SCAN" = "1" ]; then
+    echo "running: clanker-guard-agent scan --local   (reports to ${SERVER})"
+  else
+    echo "running: clanker-guard-agent scan --local"
+  fi
+  # Keep the scan's exit code for the no-watch path, but do not let findings (2)
+  # or reduced coverage (4) look like an install failure when we continue below.
+  set +e
+  "$BIN_DIR/clanker-guard-agent" scan --local
+  SCAN_CODE=$?
+  set -e
+  if [ "$WATCH" = "0" ]; then
+    exit "$SCAN_CODE"
+  fi
+fi
+
+if [ "$WATCH" = "1" ]; then
+  if [ "$REPORT_SCAN" = "0" ]; then
+    echo "error: --watch needs --server and --enroll-token (the agent must be enrolled to receive scans)" >&2
+    exit 3
+  fi
+  echo
+  echo "staying available: clanker-guard-agent watch (foreground)"
+  exec "$BIN_DIR/clanker-guard-agent" watch
+fi
+
+if [ "$SERVICE" = "1" ] && [ "$REPORT_SCAN" = "1" ]; then
+  # Installing the service is what makes the endpoint stay reachable; asking an
+  # operator to write a unit file is exactly the kind of work this avoids.
+  echo
+  echo "installing the background service"
+  if "$BIN_DIR/clanker-guard-agent" service install --config "$(agent_config_path)"; then
+    echo "  the endpoint will report as online while the service runs"
+  else
+    echo "  warning: could not install a service on this system" >&2
+    echo "  the endpoint stays offline until you run: $BIN_DIR/clanker-guard-agent watch" >&2
+  fi
+else
+  echo
+  echo "note: no service installed (--no-service); this endpoint is reachable only while" >&2
+  echo "      you run: $BIN_DIR/clanker-guard-agent watch" >&2
 fi

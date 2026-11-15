@@ -27,7 +27,7 @@ describe("New scan workflow", () => {
     mockApi([]);
     render(<NewScan />);
     expect(screen.getByRole("heading", { name: /New scan/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Local Endpoint/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Local System/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Network Assessment/i })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: /Software \/ Container/i })).toBeInTheDocument();
   });

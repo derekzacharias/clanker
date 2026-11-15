@@ -83,10 +83,11 @@ column with words.
 | **Assets** | Which endpoints are assessed and how bad is each? | filter by OS / finding / scan age; stale badge; links to detail |
 | **Asset detail** | What is on this host and what applies to it? | findings, packages (progressively disclosed), coverage, skipped checks, scan history |
 | **Vulnerabilities** | What should I fix, and how sure are we? | filters (severity, applicability, KEV, fix availability, asset, text), sort by remediation priority; evidence panel with confidence, reasons to raise/lower, references |
-| **New scan** | How do I run an assessment? | three steps, local only in this build; network/SBOM are visible but blocked with an explanation |
+| **New scan** | How do I run an assessment? | three steps and four types: **Local System**, Network (scope + authorisation), Software/Container, and **Endpoint Scan** (dispatches to an enrolled agent at once when it is online; a request for an unreachable endpoint stays queued and is shown as such) |
 | **Scans** | What ran, what is running, what failed? | live stage + percent from the server, cancel, report links, history |
-| **Reports** | What did the assessment conclude? | stored reports, JSON/Markdown/SARIF/HTML export, evidence preserved |
+| **Reports** | What did the assessment conclude? | stored reports, JSON/Markdown/SARIF/HTML export, evidence preserved; **software inventory** export (CSV asset list + CycloneDX SBOM) per host, and one environment-wide CSV across every assessed host |
 | **Settings** | Policy, intelligence, agents, access | tabs; feed freshness + update; agent install commands only when artifacts are published |
+| **Sign in** (`/login`) | Who are you, and how do I stay signed in? | username + password form when a dashboard password exists; falls back to the token form on token-only servers; states the session length; one error line, no user/password distinction |
 
 **Ask Guard** is a supporting side panel, not the primary workflow. It is
 deterministic: answers come from the stored report via `scan.Ask`, citations
@@ -128,8 +129,18 @@ Design rules enforced by the API (and its tests):
 * findings are addressed by a stable id derived from host + package + version +
   CVE, so links survive re-scans;
 * scan progress percentages come from server stages, not a timer;
-* the server refuses to bind a non-loopback address without
-  `CLANKER_GUARD_TOKEN`, and the UI sends it as `X-Guard-Token`.
+* the server refuses to bind a non-loopback address without a credential (a
+  password set with `clanker vuln auth set-password`, or `CLANKER_GUARD_TOKEN`),
+  and the UI sends the token as `X-Guard-Token`;
+* copy controls must work on the deployment people actually run — plain HTTP on
+  a LAN address is not a secure context, so `navigator.clipboard` is undefined
+  there. `lib/clipboard.ts` falls back to `execCommand`, and if that is blocked
+  too it selects the text and says so, instead of failing silently;
+* a password deployment signs in on `/login` and keeps an HttpOnly,
+  `SameSite=Strict` session cookie; the shell probes `/api/auth/session` before
+  painting data, so an unauthenticated visitor is redirected instead of seeing a
+  screen of 401s, and a cookie-authenticated mutation without `Origin` /
+  `Sec-Fetch-Site` is refused (CSRF);
 
 ---
 
@@ -144,6 +155,9 @@ Design rules enforced by the API (and its tests):
 | Stale intelligence | top-of-page warning with the last sync per source |
 | Failed scan | what failed, what completed, and a retry action |
 | API unreachable | recoverable error with retry; the message names `clanker vuln serve` |
+| Session expired | redirect to `/login?next=<page>`; no token dialog, no partial screen |
+| Wrong password | one generic line (never "no such user"), password field cleared, username kept |
+| Rate limited | explains the wait instead of pretending the password was wrong |
 | Incomplete assessment | scan errors surfaced on the asset and report pages |
 
 ---
@@ -169,12 +183,18 @@ Design rules enforced by the API (and its tests):
 ## 7. Tests
 
 ```bash
-cd web && npm test          # 19 tests, jsdom
+cd web && npm test          # 43 tests, jsdom
 npm run build               # tsc --noEmit + vite build
 ```
 
 Covered workflows:
 
+* **Sign in** — password form posts JSON with `credentials: same-origin`, continues
+  to `?next=` (same-origin only, `//host` rejected), clears the legacy token;
+  401 keeps the page and shows one generic line; 429 explains the wait; the token
+  form appears when no password is configured; an open loopback server renders
+  "No sign-in required"; the shell redirects to `/login` instead of painting data
+  and a mid-session 401 lands on `/login` rather than the token dialog.
 * **Overview** — renders real metrics/priority/coverage; stale-feed warning;
   first-run empty state shows no metrics; API failure surfaces a retry;
   unresolved findings are explained as not actionable.
@@ -220,7 +240,9 @@ single line when proposals are waiting. Details: [IMPROVEMENT.md](IMPROVEMENT.md
    deterministic.
 3. **No virtualization.** Tables cap at 100–300 rows per view with filters and a
    “showing X of Y” notice; large fleets need pagination UI next.
-4. **No managed agent channel.** The agent page shows real local state and
-   installers; there is no check-in or push (the API says `managed_mode: false`).
-5. **Single-user, token-only auth.** No user accounts, roles or SSO: the server
-   is a local tool that can be exposed with a shared token.
+4. **No server-initiated commands.** Agents enroll, check in and upload reports;
+   the server still cannot ask an endpoint to *do* anything. There is no rescan
+   scheduling or offline report queue yet, so an endpoint that is down simply
+   shows as offline.
+5. **Single operator account.** One password (or token); no roles, no SSO, no
+   per-user audit trail beyond the login log.

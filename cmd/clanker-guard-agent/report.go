@@ -1,0 +1,202 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/bgdnvk/clanker/internal/vuln/agent"
+	"github.com/bgdnvk/clanker/internal/vuln/report"
+	"github.com/bgdnvk/clanker/internal/vuln/scan"
+)
+
+// cmdEnroll exchanges the dashboard's enrollment token for this endpoint's own
+// credential and stores it. Nothing is sent anywhere until this succeeds.
+func cmdEnroll(args []string) int {
+	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	server := fs.String("server", "", "Clanker Guard server URL, e.g. https://guard.example:8787")
+	token := fs.String("enroll-token", "", "enrollment token shown in Settings → Agents")
+	host := fs.String("host", "", "hostname to enroll as (default: this host's name)")
+	configPath := fs.String("config", "", "config file (default: user config dir/clanker-guard/agent.json)")
+	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	if strings.TrimSpace(*server) == "" || strings.TrimSpace(*token) == "" {
+		fmt.Fprintln(os.Stderr, "error: --server and --enroll-token are required")
+		return 3
+	}
+	hostname := strings.TrimSpace(*host)
+	if hostname == "" {
+		if h, err := os.Hostname(); err == nil {
+			hostname = h
+		} else {
+			hostname = "unknown"
+		}
+	}
+	client := agent.New(*server, "")
+	if client.PlainHTTP() {
+		fmt.Fprintln(os.Stderr, "warning: this server URL is not HTTPS; the agent token will cross the network in clear text")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cfg, err := client.Enroll(ctx, strings.TrimSpace(*token), hostname, osName(), version)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+		return 4
+	}
+	if *configPath == "" {
+		*configPath = agent.ConfigPath()
+	}
+	if err := agent.SaveConfig(*configPath, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+		return 4
+	}
+	fmt.Fprintf(os.Stderr, "enrolled as %s (%s)\n  server: %s\n  config: %s\n",
+		cfg.AgentID, cfg.Host, cfg.Server, *configPath)
+	return 0
+}
+
+// cmdStatus shows the local enrollment state of this endpoint.
+func cmdStatus(args []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", "", "config file (default: user config dir/clanker-guard/agent.json)")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	path := *configPath
+	if path == "" {
+		path = agent.ConfigPath()
+	}
+	cfg, err := agent.LoadConfig(path)
+	if errors.Is(err, agent.ErrNotEnrolled) {
+		if *asJSON {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"enrolled": false, "config": path})
+		} else {
+			fmt.Fprintf(os.Stderr, "not enrolled (%s does not exist)\n", path)
+			fmt.Fprintln(os.Stderr, "this agent runs fully offline; to report to a dashboard:")
+			fmt.Fprintln(os.Stderr, "  clanker-guard-agent enroll --server URL --enroll-token TOKEN")
+		}
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+		return 4
+	}
+	if *asJSON {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"enrolled": true, "server": cfg.Server, "agent_id": cfg.AgentID,
+			"host": cfg.Host, "enrolled_at": cfg.EnrolledAt, "config": path,
+		})
+		return 0
+	}
+	fmt.Fprintf(os.Stdout, "enrolled:  %s\tserver: %s\nhost: %s\tversion: %s\nconfig: %s\n",
+		cfg.AgentID, cfg.Server, cfg.Host, version, path)
+	return 0
+}
+
+// reporting is the scan-side helper: it announces what the endpoint is doing
+// while the assessment runs and uploads the finished report.
+type reporting struct {
+	cfg      agent.Config
+	reporter *agent.Reporter
+	warned   bool
+}
+
+// startReporting loads the enrollment. A missing config is not an error: the
+// agent stays local-only, which is the default posture.
+func startReporting(configPath string, disabled bool) (*reporting, error) {
+	if disabled {
+		return nil, nil
+	}
+	cfg, err := agent.LoadConfig(configPath)
+	if errors.Is(err, agent.ErrNotEnrolled) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &reporting{cfg: cfg, reporter: agent.NewReporter(agent.New(cfg.Server, cfg.Token))}, nil
+}
+
+// progress is wired into scan.Options.Progress.
+func (r *reporting) progress(st scan.Stage) {
+	if r == nil {
+		return
+	}
+	err := r.reporter.Send(context.Background(), agent.Status{
+		State: agentStateScanning, Phase: st.Name, Percent: st.Percent,
+		Message: st.Detail, Version: version, OS: osName(),
+	}, false)
+	r.note(err)
+}
+
+// upload sends the finished report and leaves the endpoint marked idle.
+func (r *reporting) upload(ctx context.Context, res scan.Result, stderr io.Writer) string {
+	if r == nil {
+		return ""
+	}
+	if err := r.reporter.Send(ctx, agent.Status{
+		State: agentStateReporting, Phase: "upload", Percent: 99,
+		Message: "uploading report", Findings: len(res.Report.Findings), Version: version, OS: osName(),
+	}, true); err != nil {
+		r.note(err)
+		fmt.Fprintf(stderr, "warning: could not report status to %s: %v\n", r.cfg.Server, err)
+		return ""
+	}
+	payload, err := report.MarshalJSON(res.Report)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: could not encode the report: %v\n", err)
+		return ""
+	}
+	ack, err := r.reporter.Client.Report(ctx, payload)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: report was not accepted by %s: %v\n", r.cfg.Server, err)
+		return ""
+	}
+	fmt.Fprintf(stderr, "reported to %s: %s (%d findings)\n", r.cfg.Server, ack.RunID, ack.Findings)
+	// The server marks the endpoint idle when it accepts a report; a final status
+	// keeps the dashboard truthful even if the report was deduplicated.
+	_ = r.reporter.Send(ctx, agent.Status{
+		State: agentStateIdle, Phase: "idle", Percent: 100,
+		Message: fmt.Sprintf("idle; last report %s", ack.RunID), Findings: ack.Findings,
+		Version: version, OS: osName(),
+	}, true)
+	return ack.RunID
+}
+
+func (r *reporting) note(err error) {
+	if r == nil || err == nil || r.warned {
+		return
+	}
+	r.warned = true
+	fmt.Fprintf(os.Stderr, "warning: status updates are not reaching %s: %v\n", r.cfg.Server, err)
+}
+
+func osName() string {
+	if v, err := os.ReadFile("/etc/os-release"); err == nil {
+		for _, line := range strings.Split(string(v), "\n") {
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
+			}
+		}
+	}
+	return runtime.GOOS
+}
+
+// Agent-reported states are the server's closed set; named here so the CLI and
+// the API cannot drift.
+const (
+	agentStateScanning  = "scanning"
+	agentStateReporting = "reporting"
+	agentStateIdle      = "idle"
+)

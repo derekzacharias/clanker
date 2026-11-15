@@ -1,6 +1,7 @@
 import { AppShell } from "./components/AppShell";
 import { ToastProvider } from "./components/ui/Toast";
 import { matchRoute, usePathname } from "./lib/router";
+import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Assets from "./pages/Assets";
 import AssetDetail from "./pages/AssetDetail";
@@ -38,6 +39,16 @@ function Routes() {
 }
 
 export default function App() {
+  const pathname = usePathname();
+  // The sign-in screen renders outside the shell: it has no navigation, and it
+  // must be reachable before a session exists.
+  if (pathname === "/login") {
+    return (
+      <ToastProvider>
+        <Login />
+      </ToastProvider>
+    );
+  }
   return (
     <ToastProvider>
       <AppShell>

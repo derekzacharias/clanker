@@ -2,6 +2,7 @@ import {
   FileBarChart2,
   KeyRound,
   LayoutDashboard,
+  LogOut,
   Menu,
   Moon,
   Plus,
@@ -22,7 +23,7 @@ import { Button } from "./ui/Button";
 import { AskGuard } from "./AskGuard";
 import { AuthGate } from "./AuthGate";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { ApiError, api, getToken, setToken } from "../lib/api";
+import { ApiError, api, getToken, setToken, type AuthSession } from "../lib/api";
 
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -42,6 +43,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authReason, setAuthReason] = useState<"required" | "rejected" | "manual">("required");
   const [authVersion, setAuthVersion] = useState(0);
+  const [session, setSession] = useState<AuthSession | null>(null);
+  // Pages only mount once the auth model is known: an unauthenticated deep link
+  // must redirect before it fires a request that would 401.
+  const [sessionReady, setSessionReady] = useState(false);
 
   useEffect(() => {
     applyTheme(theme);
@@ -51,10 +56,61 @@ export function AppShell({ children }: { children: ReactNode }) {
     setMobileNav(false);
   }, [pathname]);
 
-  // Detect "token required" up front and react to any 401 from a data call.
+  // Resolve the authentication model before painting data: a password-protected
+  // server redirects to /login, a token-only server keeps the unlock dialog, and
+  // a loopback server with no credential renders as before.
   useEffect(() => {
     let cancelled = false;
-    const onUnauthorized = () => {
+    const here = window.location.pathname + window.location.search;
+    (async () => {
+      try {
+        const s = await api.session();
+        if (cancelled) return;
+        setSession(s);
+        setSessionReady(true);
+        if (s.required && !s.authenticated) {
+          if (s.methods.password) {
+            navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
+            return;
+          }
+          setAuthNeeded(true);
+          return;
+        }
+        setAuthNeeded(false);
+      } catch {
+        // A server built before password sign-in answers /api/auth/session with
+        // the SPA shell rather than JSON; fall back to the token probe so those
+        // deployments keep their unlock dialog.
+        if (cancelled) return;
+        setSessionReady(true);
+        try {
+          await api.meta();
+          if (!cancelled) {
+            setSession(null);
+            setAuthNeeded(false);
+          }
+        } catch (err) {
+          if (!cancelled && err instanceof ApiError && err.status === 401) {
+            setAuthReason("rejected");
+            setAuthNeeded(true);
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authVersion]);
+
+  // React to any 401 from a data call: ask the server which credential it wants
+  // before choosing a UI. A password deployment redirects to /login; a
+  // token-only one opens the dialog. Probing here (rather than re-running the
+  // effect above) is what keeps a 401 from re-triggering itself.
+  useEffect(() => {
+    let probing = false;
+    const onUnauthorized = async () => {
+      if (probing) return;
+      probing = true;
       // A rejected token must not stay in place: leaving it stored means every
       // retry fails silently with the same 401.
       const hadToken = Boolean(getToken());
@@ -62,26 +118,36 @@ export function AppShell({ children }: { children: ReactNode }) {
       // Later unauthenticated retries must not overwrite the explanation: once a
       // token was rejected, that is what the user needs to see.
       setAuthReason((current) => (hadToken || current === "rejected" ? "rejected" : "required"));
+      try {
+        const s = await api.session();
+        setSession(s);
+        if (s.required && !s.authenticated && s.methods.password) {
+          const here = window.location.pathname + window.location.search;
+          navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
+          return;
+        }
+      } catch {
+        // Older server without the session endpoint: the token dialog is the
+        // only way in.
+      } finally {
+        probing = false;
+      }
       setAuthNeeded(true);
     };
     window.addEventListener("guard:unauthorized", onUnauthorized);
-    // Probe an authenticated endpoint: a 401 means the server wants a token.
-    api
-      .meta()
-      .then(() => {
-        if (!cancelled) setAuthNeeded(false);
-      })
-      .catch((err: unknown) => {
-        // ApiError 401 already dispatched the event; other failures are shown by
-        // the pages themselves.
-        if (!cancelled && !(err instanceof ApiError && err.status === 401)) return;
-      });
-    return () => {
-      cancelled = true;
-      window.removeEventListener("guard:unauthorized", onUnauthorized);
-    };
-  }, [authVersion]);
+    return () => window.removeEventListener("guard:unauthorized", onUnauthorized);
+  }, []);
 
+  async function signOut() {
+    try {
+      await api.logout();
+    } catch {
+      // The cookie may already be gone; clearing local state is still correct.
+    }
+    setToken("");
+    setSession(null);
+    navigate("/login", { replace: true });
+  }
 
 
   function submitSearch(e: React.FormEvent) {
@@ -200,18 +266,32 @@ export function AppShell({ children }: { children: ReactNode }) {
               Ask Guard
             </Button>
 
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setAuthReason("manual");
-                setAuthNeeded(true);
-              }}
-              aria-label="API token"
-              title="API token"
-            >
-              <KeyRound className="h-4 w-4" aria-hidden="true" />
-            </Button>
+            {/* A password session shows who is signed in and offers sign-out;
+                a token-authenticated browser keeps the key button so the token
+                can be replaced or cleared. */}
+            {session?.authenticated && session.username ? (
+              <div className="flex items-center gap-1">
+                <span className="hidden max-w-32 truncate text-xs text-muted sm:inline" title={session.username}>
+                  {session.username}
+                </span>
+                <Button variant="ghost" size="sm" onClick={signOut} aria-label="Sign out" title="Sign out">
+                  <LogOut className="h-4 w-4" aria-hidden="true" />
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setAuthReason("manual");
+                  setAuthNeeded(true);
+                }}
+                aria-label="API token"
+                title="API token"
+              >
+                <KeyRound className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            )}
 
             <Button
               variant="ghost"
@@ -237,11 +317,25 @@ export function AppShell({ children }: { children: ReactNode }) {
         </header>
 
         <main id="main" className="mx-auto w-full max-w-[100rem] px-3 py-5 sm:px-5">
-          {/* keyed so pages refetch after unlocking; isolated so one bad screen
-              cannot blank the whole application */}
-          <ErrorBoundary resetKey={pathname + ":" + authVersion}>
-            <div key={authVersion}>{children}</div>
-          </ErrorBoundary>
+          {/* Nothing renders until the auth model is known, and a
+              password-protected server must not paint data before the redirect
+              to /login lands. Token-only servers keep rendering the pages so
+              their 401 drives the unlock dialog, exactly as before. */}
+          {!sessionReady ? (
+            <p role="status" className="py-10 text-sm text-muted">
+              Checking access…
+            </p>
+          ) : session?.required && !session.authenticated && session.methods?.password ? (
+            <p role="status" className="py-10 text-sm text-muted">
+              Sign-in required — taking you to the sign-in page…
+            </p>
+          ) : (
+            /* keyed so pages refetch after unlocking; isolated so one bad screen
+               cannot blank the whole application */
+            <ErrorBoundary resetKey={pathname + ":" + authVersion}>
+              <div key={authVersion}>{children}</div>
+            </ErrorBoundary>
+          )}
         </main>
       </div>
 

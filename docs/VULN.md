@@ -14,7 +14,7 @@ clanker vuln report --format markdown           # re-render the last assessment
 clanker vuln ask "what should I patch first?"   # grounded, deterministic answers
 ```
 
-Standalone agent (no cloud, no service, no privileges):
+Standalone agent (no cloud, no privileges; enrolling it installs a background service):
 
 ```bash
 clanker-guard-agent scan --local --format json --output findings.json
@@ -225,11 +225,43 @@ browser data, documents, environment variables, process arguments, network
 traffic.
 
 Network destinations contacted: `api.osv.dev` (scan, unless `--offline`),
-`www.cisa.gov` and `epss.cyentia.com` (`feeds update`). Nothing else. No
-telemetry, no uploads.
+`www.cisa.gov` and `epss.cyentia.com` (`feeds update`), and — only when the agent
+was enrolled with `enroll --server` — the Clanker Guard server you named, which
+receives the finished report and the agent's status. There is no third-party
+telemetry, no remote command channel and no auto-update: the server can accept a
+report, it cannot ask the endpoint to do anything.
 
-Installation: no service, no scheduled task, no auto-update. Artifacts are
-installed only after SHA-256 verification. Removal:
+### Software asset exports
+
+A findings report answers "what can hurt me". The inventory exports answer "what
+is installed", which is where an asset register, CMDB import or licence review
+starts:
+
+```bash
+# one host, from a stored report
+clanker vuln serve ...   # then: GET /api/reports/<id>/export?format=csv
+                         #       GET /api/reports/<id>/export?format=cyclonedx
+
+# the whole environment (newest report per host), no auth bypass needed
+GET /api/software/export?format=csv
+GET /api/software/export?format=cyclonedx&host=<host>
+```
+
+CSV columns: `host, os, os_version, kernel, arch, ecosystem, manager, package,
+version, release, vendor, origin, purl, source, privileges_required,
+known_findings, max_severity, report_id, scanned_at`. `known_findings` and
+`max_severity` are derived from the same report by matching
+package+version+ecosystem — they show exposure, they are not an applicability
+verdict. CycloneDX is 1.5, one component per package, serial number derived from
+the content so repeated exports diff cleanly.
+
+Installation: enrolling installs a background service (systemd user unit /
+LaunchAgent / logon task) so the endpoint stays reachable; `--no-service` opts out
+and nothing is installed beyond the binary. There is no auto-update. Artifacts are
+installed only after SHA-256 verification. Published builds live at
+`github.com/derekzacharias/clanker-guard-agent/releases`; the dashboard shows the
+matching commands when `CLANKER_GUARD_RELEASE_BASE` points at a release
+directory. Removal:
 
 ```bash
 clanker-guard-agent uninstall --yes     # removes binary + cache
@@ -499,8 +531,15 @@ Not implemented yet — reported explicitly rather than approximated:
 4. **LLM-assisted investigation (Phase 4)** — `ask` is deterministic today; the
    Clanker agent workers (discovery/inventory/CVE/validation/risk/remediation/
    reporting) are not wired into `internal/agent`.
-5. **Managed endpoint communications (Phase 5)** — no agent-to-server channel, no
-   mutual TLS, no scheduling. Deliberately opt-in only.
+5. **Managed endpoint communications (Phase 5)** — shipped in the minimal form:
+   per-agent enrollment, status check-ins, report upload and **on-demand scans**
+   (`New scan → Endpoint Scan`). `clanker-guard-agent watch` holds a claim request
+   open, so an available endpoint starts immediately and its presence doubles as
+   the reachability signal the dashboard shows; a request for an unreachable
+   endpoint is queued, can be withdrawn, and runs when it returns. Not yet: mutual
+   TLS, arbitrary server-initiated commands, rescan scheduling, offline report
+   buffering, and a timeout that reclaims a task left `running` by a killed agent.
+   `install-agent.sh --watch` enrolls and keeps the endpoint available in one step.
 6. **SBOM ingestion** — shipped (CycloneDX/SPDX/Syft + five manifest formats);
    CycloneDX 1.5 export shipped. Not yet: CycloneDX XML/protobuf, SPDX export.
 7. **Container image inventory** — shipped via `docker save` for dpkg/apk images;

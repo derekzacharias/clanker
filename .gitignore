@@ -46,6 +46,9 @@ clanker.exe
 # Logs
 *.log
 
+# Local runtime state (serve log, CLANKER_GUARD_TOKEN used by the local server)
+/run/
+
 # Temporary files
 tmp/
 temp/

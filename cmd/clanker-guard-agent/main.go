@@ -18,9 +18,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bgdnvk/clanker/internal/vuln/agent"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
+	"github.com/bgdnvk/clanker/internal/vuln/service"
 )
 
 // version is injected at build time with -ldflags "-X main.version=...".
@@ -44,6 +46,14 @@ func run(args []string) int {
 		return cmdInventory(args[1:])
 	case "ask":
 		return cmdAsk(args[1:])
+	case "enroll":
+		return cmdEnroll(args[1:])
+	case "status":
+		return cmdStatus(args[1:])
+	case "watch":
+		return cmdWatch(args[1:])
+	case "service":
+		return cmdService(args[1:])
 	case "uninstall":
 		return cmdUninstall(args[1:])
 	case "version", "--version", "-v":
@@ -71,8 +81,16 @@ Usage:
   clanker-guard-agent inventory [--format json|markdown]
   clanker-guard-agent feeds update [--with-osv] | feeds status
   clanker-guard-agent ask "question"
+  clanker-guard-agent enroll --server URL --enroll-token TOKEN [--host NAME]
+  clanker-guard-agent status [--json]
+  clanker-guard-agent watch [--hold 25s] [--once]
+  clanker-guard-agent service install|uninstall|status
   clanker-guard-agent uninstall [--yes]
   clanker-guard-agent version
+
+Once enrolled, scan reports its status while it runs and uploads the finished
+report to that server. Without enrollment the agent never opens a connection
+except to api.osv.dev for advisory lookups.
 
 Exit codes: 0 clean, 2 findings above policy, 3 configuration error,
 4 incomplete assessment (reduced coverage).
@@ -96,6 +114,8 @@ func cmdScan(args []string) int {
 		quiet       = fs.Bool("quiet", false, "suppress the human summary")
 		notAffected = fs.Bool("include-not-affected", false, "include not-affected records")
 		criticality = fs.Float64("asset-criticality", 0, "asset criticality 0..1")
+		noReport    = fs.Bool("no-report", false, "do not upload the report even if enrolled")
+		configPath  = fs.String("config", "", "agent enrollment config path")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 3
@@ -104,6 +124,17 @@ func cmdScan(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: only endpoint assessment (--local) is implemented in this build")
 		return 3
 	}
+	// Enrolled agents announce what they are doing while the scan runs; an
+	// unenrolled agent stays local (startReporting returns nil).
+	rep, err := startReporting(*configPath, *noReport)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: ignoring unusable agent config: "+err.Error())
+	}
+	progress := func(scan.Stage) {}
+	if rep != nil {
+		progress = rep.progress
+	}
+
 	res, err := scan.Run(context.Background(), scan.Options{
 		CachePath:          *cachePath,
 		Offline:            *offline,
@@ -116,6 +147,7 @@ func cmdScan(args []string) int {
 		Policy:             model.Policy{FailOnSeverity: *failOn, FailOnKEV: *failOnKEV},
 		ToolVersion:        version,
 		AssetCriticality:   *criticality,
+		Progress:           progress,
 		Stdout:             os.Stdout,
 		Stderr:             os.Stderr,
 	})
@@ -125,6 +157,11 @@ func cmdScan(args []string) int {
 	}
 	if !*quiet {
 		printSummary(res)
+	}
+	// A failed report must not change the assessment result: the findings are the
+	// product, the upload is telemetry.
+	if rep != nil {
+		_ = rep.upload(context.Background(), res, os.Stderr)
 	}
 	return res.ExitCode
 }
@@ -241,12 +278,25 @@ func cmdUninstall(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 3
 	}
+	// Stop the service first: removing the binary underneath a running unit leaves
+	// the supervisor restarting a file that no longer exists.
+	if exePath, err := os.Executable(); err == nil {
+		if _, err := service.New(exePath, agent.ConfigPath()).Uninstall(context.Background()); err == nil {
+			fmt.Fprintln(os.Stderr, "removed the background service")
+		}
+	}
 	cacheDir := filepath.Dir(scan.DefaultCachePath())
+	agentConfig := agent.ConfigPath()
 	exe, _ := os.Executable()
 	if !*yes {
-		fmt.Fprintf(os.Stderr, "This will remove:\n  - %s\n  - %s (unless --keep-cache)\nRe-run with --yes to confirm.\n",
-			exe, cacheDir)
+		fmt.Fprintf(os.Stderr, "This will remove:\n  - %s\n  - %s (unless --keep-cache)\n  - %s (agent enrollment)\nRe-run with --yes to confirm.\n",
+			exe, cacheDir, agentConfig)
 		return 3
+	}
+	if err := agent.RemoveConfig(agentConfig); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not remove agent config: "+err.Error())
+	} else {
+		fmt.Fprintf(os.Stderr, "removed %s\n", agentConfig)
 	}
 	if !*keepCache {
 		if err := os.RemoveAll(cacheDir); err != nil {

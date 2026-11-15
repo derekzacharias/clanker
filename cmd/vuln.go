@@ -1,18 +1,24 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/bgdnvk/clanker/internal/vuln/api"
+	"github.com/bgdnvk/clanker/internal/vuln/auth"
 	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/inventory"
@@ -54,6 +60,7 @@ what was and was not covered.`,
 		newVulnScopeCmd(),
 		newVulnAgentCmd(),
 		newVulnServeCmd(),
+		newVulnAuthCmd(),
 		newVulnSBOMCmd(),
 		newVulnFeedbackCmd(),
 		newVulnImproveCmd(),
@@ -324,8 +331,11 @@ func newVulnFeedsCmd() *cobra.Command {
 	common.register(update)
 
 	status := &cobra.Command{
-		Use:   "status",
-		Short: "Show intelligence cache freshness",
+		Use: "status",
+		// A rejected credential is a one-line problem, not a flag mistake.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Show intelligence cache freshness",
 		RunE: func(c *cobra.Command, _ []string) error {
 			return scan.FeedStatus(context.Background(), common.path(), os.Stdout)
 		},
@@ -490,14 +500,23 @@ func agentInstallHelp() string {
     curl -fsSL <release-base>/install-agent.sh | bash -s -- --version <version>
 
   Windows (PowerShell)
-    iwr <release-base>/install-agent.ps1 -UseBasicParsing | iex
+    iwr <release-base>/install-agent.ps1 -OutFile $env:TEMP\install-agent.ps1 -UseBasicParsing;
+    & $env:TEMP\install-agent.ps1 -Version <version>
+
+  Enroll while installing (Settings -> Agents shows the real command)
+    ... --server <dashboard-url> --enroll-token <token>
+    The endpoint then scans itself once and reports findings and status to that
+    server only. --no-scan installs and enrolls without the first assessment.
 
   Offline / manual
     1. download clanker-guard-agent_<os>_<arch> and its .sha256 from the release
     2. verify: sha256sum -c clanker-guard-agent_<os>_<arch>.sha256
     3. install to a directory on PATH, then run: clanker-guard-agent scan --local
 
-The agent installs no service and no scheduled task by default. Uninstall:
+With --server/--enroll-token the installer also installs a background service
+(systemd user unit, LaunchAgent or logon task) so the endpoint stays reachable for
+dashboard-requested scans; --no-service skips it. Without --server nothing is
+uploaded and no service is installed. Uninstall:
     clanker-guard-agent uninstall --yes
 
 Note: this build does not publish release artifacts yet; build them with
@@ -511,16 +530,26 @@ func newVulnServeCmd() *cobra.Command {
 		listen      string
 		webDir      string
 		releaseBase string
+		authFile    string
+		sessionTTL  time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the Clanker Guard web interface and JSON API",
 		Long: `Serve the Clanker Guard web UI and API.
 
-Binds to loopback by default. Binding to any other address requires a token
-(CLANKER_GUARD_TOKEN), which the UI sends as the X-Guard-Token header, because
-the API can start scans.
+Binds to loopback by default. Binding to any other address requires a
+credential, which the UI sends as the X-Guard-Token header (or, after sign-in,
+as a session cookie), because the API can start scans.
 
+Two ways in:
+
+  clanker vuln auth set-password   browser sign-in, stays signed in for --session-ttl
+                                   (default 30 days) across server restarts
+  CLANKER_GUARD_TOKEN              shared secret for scripts and the agent
+                                   (X-Guard-Token header)
+
+Either one satisfies the non-loopback guard; both may be configured at once.
 The web assets are served from --web-dir (default web/dist). Build them once:
 
   cd web && npm install && npm run build`,
@@ -534,6 +563,8 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 				ToolVersion: Version,
 				Token:       os.Getenv("CLANKER_GUARD_TOKEN"),
 				ReleaseBase: releaseBase,
+				AuthPath:    authFile,
+				SessionTTL:  sessionTTL,
 			})
 			if err != nil {
 				return err
@@ -542,17 +573,273 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 			fmt.Fprintf(os.Stderr, "clanker vuln serve → http://%s\n", listen)
 			fmt.Fprintf(os.Stderr, "  cache:   %s\n", common.path())
 			fmt.Fprintf(os.Stderr, "  web dir: %s\n", valueOrDash(webDir))
-			if os.Getenv("CLANKER_GUARD_TOKEN") != "" {
+			// Report the real authentication mode instead of a single boolean: a
+			// password-protected server and a token-protected one behave differently
+			// in the browser.
+			if st, err := auth.Load(authFile); err == nil {
+				fmt.Fprintf(os.Stderr, "  auth:    password for %q (sessions last %s) — %s\n",
+					st.Username(), sessionTTL, st.Path())
+				if os.Getenv("CLANKER_GUARD_TOKEN") != "" {
+					fmt.Fprintln(os.Stderr, "           X-Guard-Token also accepted")
+				}
+			} else if os.Getenv("CLANKER_GUARD_TOKEN") != "" {
 				fmt.Fprintln(os.Stderr, "  auth:    X-Guard-Token required (CLANKER_GUARD_TOKEN is set)")
+				fmt.Fprintf(os.Stderr, "           no dashboard password yet: clanker vuln auth set-password\n")
+			}
+			// Say which installer host the Agents tab will advertise, so a wrong or
+			// missing release base is visible at startup instead of on a 404.
+			if releaseBase != "" {
+				fmt.Fprintf(os.Stderr, "  agent:   installers from %s\n", releaseBase)
+			} else {
+				fmt.Fprintln(os.Stderr, "  agent:   no release base configured (Agents tab shows how to publish)")
 			}
 			return srv.Listen(listen)
 		},
 	}
-	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8787", "address to listen on (non-loopback requires CLANKER_GUARD_TOKEN)")
+	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8787", "address to listen on (non-loopback requires CLANKER_GUARD_TOKEN or a password)")
 	cmd.Flags().StringVar(&webDir, "web-dir", "web/dist", "directory containing the built web UI")
 	cmd.Flags().StringVar(&releaseBase, "release-base", "", "published agent artifact base URL (or CLANKER_GUARD_RELEASE_BASE)")
+	cmd.Flags().StringVar(&authFile, "auth-file", auth.DefaultPath(), "password credential file (empty disables password sign-in)")
+	cmd.Flags().DurationVar(&sessionTTL, "session-ttl", auth.DefaultSessionTTL, "how long a browser sign-in stays valid")
 	common.register(cmd)
 	return cmd
+}
+
+// newVulnAuthCmd manages the dashboard password: a one-time browser sign-in
+// instead of pasting the API token into every tab.
+func newVulnAuthCmd() *cobra.Command {
+	var (
+		file      string
+		username  string
+		fromStdin bool
+		generate  bool
+		length    int
+		yes       bool
+	)
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Manage the dashboard sign-in password",
+		Long: `Manage the password the Clanker Guard web interface signs in with.
+
+The password is stored as a bcrypt hash in a 0600 file under the user config
+directory, separate from the scan cache so clearing the cache never locks you
+out. A session cookie (HttpOnly, SameSite=Strict) keeps the browser signed in
+for --session-ttl, default 30 days, and survives a server restart.
+
+The X-Guard-Token header keeps working for scripts and the endpoint agent.
+Changing the password signs out every existing browser session.`,
+	}
+
+	setPassword := &cobra.Command{
+		Use: "set-password",
+		// A rejected credential is a one-line problem, not a flag mistake.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Create or change the password used by the web interface",
+		Long: `Set the dashboard password.
+
+With no flags the password is prompted for twice without echoing. Use
+--generate to have a strong one generated and printed once, or --password-stdin
+to read it from a pipe so it never enters shell history:
+
+  clanker vuln auth set-password --generate
+  printf '%s' "$PW" | clanker vuln auth set-password --password-stdin`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			path := authFileOrDefault(file)
+			// Keep the account name already in use unless one was given.
+			user := strings.TrimSpace(username)
+			if user == "" {
+				if existing, err := auth.Load(path); err == nil {
+					user = existing.Username()
+				} else {
+					user = "admin"
+				}
+			}
+			password, err := resolvePassword(fromStdin, generate, length)
+			if err != nil {
+				return configError(err.Error())
+			}
+			if err := auth.ValidateCredentials(user, password); err != nil {
+				return configError(err.Error())
+			}
+			st, err := auth.Write(path, user, password)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("password set for %q\n  file: %s\n", st.Username(), st.Path())
+			if generate {
+				fmt.Printf("  password: %s\n", password)
+				fmt.Fprintln(os.Stderr, "store it in a password manager now — it is not saved in plain text anywhere.")
+			}
+			fmt.Fprintln(os.Stderr, "restart `clanker vuln serve` to apply it; every existing session is signed out.")
+			return nil
+		},
+	}
+	setPassword.Flags().StringVar(&file, "file", "", "credential file (default: user config dir/clanker-guard/auth.json)")
+	setPassword.Flags().StringVar(&username, "username", "", "account name (default: keep the existing one, or \"admin\")")
+	setPassword.Flags().BoolVar(&fromStdin, "password-stdin", false, "read the password from stdin instead of prompting")
+	setPassword.Flags().BoolVar(&generate, "generate", false, "generate a strong password and print it once")
+	setPassword.Flags().IntVar(&length, "length", 24, "length of the generated password")
+
+	status := &cobra.Command{
+		Use:   "status",
+		Short: "Show whether a dashboard password is configured",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			path := authFileOrDefault(file)
+			st, err := auth.Load(path)
+			if errors.Is(err, auth.ErrNotConfigured) {
+				fmt.Printf("no dashboard password configured (%s does not exist)\n", path)
+				fmt.Println("the web UI needs CLANKER_GUARD_TOKEN instead; create a password with:")
+				fmt.Println("  clanker vuln auth set-password")
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			fmt.Printf("user:     %s\n", st.Username())
+			fmt.Printf("file:     %s\n", st.Path())
+			fmt.Printf("updated:  %s\n", st.UpdatedAt().Format(time.RFC3339))
+			if mode, insecure := st.InsecurePerms(); insecure {
+				fmt.Fprintf(os.Stderr, "warning: %s has mode %s; run: chmod 600 %s\n", st.Path(), mode, st.Path())
+			}
+			return nil
+		},
+	}
+	status.Flags().StringVar(&file, "file", "", "credential file (default: user config dir/clanker-guard/auth.json)")
+
+	clear := &cobra.Command{
+		Use: "clear",
+		// A rejected credential is a one-line problem, not a flag mistake.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Remove the dashboard password (sign-in becomes token-only again)",
+		Args:          cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			path := authFileOrDefault(file)
+			if !yes {
+				if !term.IsTerminal(int(os.Stdin.Fd())) {
+					return configError("refusing to delete a credential without confirmation: pass --yes")
+				}
+				fmt.Fprintf(os.Stderr, "delete %s? [y/N] ", path)
+				answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+				if err != nil {
+					return err
+				}
+				switch strings.ToLower(strings.TrimSpace(answer)) {
+				case "y", "yes":
+				default:
+					fmt.Fprintln(os.Stderr, "cancelled")
+					return nil
+				}
+			}
+			if err := auth.Remove(path); err != nil {
+				return err
+			}
+			fmt.Printf("removed %s\n", path)
+			fmt.Fprintln(os.Stderr, "restart `clanker vuln serve`; browsers must use X-Guard-Token again.")
+			return nil
+		},
+	}
+	clear.Flags().StringVar(&file, "file", "", "credential file (default: user config dir/clanker-guard/auth.json)")
+	clear.Flags().BoolVar(&yes, "yes", false, "delete without prompting")
+
+	cmd.AddCommand(setPassword, status, clear)
+	return cmd
+}
+
+func authFileOrDefault(file string) string {
+	if strings.TrimSpace(file) != "" {
+		return file
+	}
+	return auth.DefaultPath()
+}
+
+// resolvePassword implements the three ways to supply a password, in the order
+// that avoids leaking it: generated, piped, or prompted without echo.
+func resolvePassword(fromStdin, generate bool, length int) (string, error) {
+	switch {
+	case generate:
+		return randomPassword(length)
+	case fromStdin:
+		raw, err := io.ReadAll(io.LimitReader(os.Stdin, auth.MaxPasswordBytes*4))
+		if err != nil {
+			return "", fmt.Errorf("read password from stdin: %w", err)
+		}
+		// Only the trailing newline is stripped: spaces are legitimate
+		// characters in a password.
+		return strings.TrimRight(string(raw), "\r\n"), nil
+	default:
+		return promptPasswordTwice()
+	}
+}
+
+func promptPasswordTwice() (string, error) {
+	// One reader for both prompts: a piped "pw\npw\n" can arrive in a single
+	// buffer, and a second reader would lose the second line.
+	reader := bufio.NewReader(os.Stdin)
+	first, err := promptPassword(reader, "New password: ")
+	if err != nil {
+		return "", err
+	}
+	if first == "" {
+		return "", errors.New("password must not be empty")
+	}
+	second, err := promptPassword(reader, "Repeat password: ")
+	if err != nil {
+		return "", err
+	}
+	if first != second {
+		return "", errors.New("passwords do not match")
+	}
+	return first, nil
+}
+
+// promptPassword reads a secret without echoing it when stdin is a terminal.
+func promptPassword(reader *bufio.Reader, label string) (string, error) {
+	fmt.Fprint(os.Stderr, label)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		secret, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+		return string(secret), nil
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// passwordAlphabet omits look-alike characters (l/I/1, O/0) so a generated
+// password survives being typed from a printed note.
+const passwordAlphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+func randomPassword(length int) (string, error) {
+	if length <= 0 {
+		length = 24
+	}
+	if length < auth.MinPasswordLength {
+		length = auth.MinPasswordLength
+	}
+	if length > auth.MaxPasswordBytes {
+		length = auth.MaxPasswordBytes
+	}
+	max := big.NewInt(int64(len(passwordAlphabet)))
+	out := make([]byte, length)
+	for i := range out {
+		// crypto/rand.Int avoids the modulo bias that taking a byte % len would
+		// introduce, which would make some positions more likely.
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", fmt.Errorf("generate password: %w", err)
+		}
+		out[i] = passwordAlphabet[n.Int64()]
+	}
+	return string(out), nil
 }
 
 func valueOrDash(s string) string {

@@ -3,6 +3,10 @@ import { defineConfig, devices } from "@playwright/test";
 const PORT = Number(process.env.E2E_PORT ?? 8789);
 const TOKEN = process.env.CLANKER_GUARD_TOKEN ?? "e2e-token";
 const BASE_URL = `http://127.0.0.1:${PORT}`;
+// A second server runs in password mode so the sign-in screen is exercised in a
+// real browser, not only in jsdom.
+const AUTH_PORT = Number(process.env.E2E_AUTH_PORT ?? 8791);
+const AUTH_PASSWORD = process.env.E2E_PASSWORD ?? "e2e-dashboard-password";
 
 /**
  * E2E configuration.
@@ -38,13 +42,29 @@ export default defineConfig({
     { name: "firefox", use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
     { name: "webkit", use: { ...devices["Desktop Safari"], viewport: { width: 1440, height: 900 } } },
   ],
-  webServer: {
-    command: "bash e2e/start-server.sh",
-    url: `${BASE_URL}/api/health`,
-    reuseExistingServer: false,
-    timeout: 60_000,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { CLANKER_GUARD_TOKEN: TOKEN, E2E_PORT: String(PORT) },
-  },
+  webServer: [
+    {
+      command: "bash e2e/start-server.sh",
+      url: `${BASE_URL}/api/health`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { CLANKER_GUARD_TOKEN: TOKEN, E2E_PORT: String(PORT) },
+    },
+    {
+      command: "bash e2e/start-server.sh",
+      url: `http://127.0.0.1:${AUTH_PORT}/api/health`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        CLANKER_GUARD_TOKEN: "",
+        E2E_MODE: "password",
+        E2E_PASSWORD: AUTH_PASSWORD,
+        E2E_PORT: String(AUTH_PORT),
+      },
+    },
+  ],
 });

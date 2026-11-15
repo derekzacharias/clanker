@@ -1,5 +1,5 @@
 import { Download, FileBarChart2 } from "lucide-react";
-import { api, downloadReportExport } from "../lib/api";
+import { api, downloadReportExport, downloadSoftwareInventory } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { navigate } from "../lib/router";
 import { formatDate } from "../lib/format";
@@ -21,6 +21,25 @@ export default function Reports() {
       <PageHeader
         title="Reports"
         description="Stored assessments. Every export preserves evidence, confidence, sources and stated limitations."
+        actions={
+          <>
+            {/* The asset register, not the findings report: one row per installed
+                package per host, newest assessment each. */}
+            <Button
+              onClick={async () => {
+                try {
+                  const name = await downloadSoftwareInventory({ format: "csv" });
+                  push(`Downloaded ${name}`);
+                } catch (err) {
+                  push(err instanceof Error ? err.message : String(err), "error");
+                }
+              }}
+            >
+              <Download className="h-4 w-4" aria-hidden="true" />
+              Software inventory (all hosts)
+            </Button>
+          </>
+        }
       />
 
       {loading && !data ? <LoadingBlock label="Loading reports" /> : null}

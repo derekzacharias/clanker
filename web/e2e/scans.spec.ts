@@ -9,14 +9,36 @@ async function jobs(page: Page): Promise<Job[]> {
 }
 
 test.describe("scan workflow", () => {
-  test("offers all three assessment types", async ({ page }) => {
+  test("offers all four assessment types", async ({ page }) => {
     await page.goto("/scans/new");
     await expect(page.getByRole("heading", { name: /New scan/i })).toBeVisible();
-    for (const label of [/Local Endpoint/i, /Network Assessment/i, /Software \/ Container/i]) {
+    for (const label of [/Local System/i, /Network Assessment/i, /Software \/ Container/i, /Endpoint Scan/i]) {
       await expect(page.getByRole("button", { name: label })).toBeVisible();
     }
-    await page.getByRole("button", { name: /Local Endpoint/i }).click();
+    await page.getByRole("button", { name: /Local System/i }).click();
     await expect(page.getByRole("button", { name: /^Continue$/ })).toBeEnabled();
+  });
+
+  test("endpoint scan queues work for an enrolled agent instead of pretending to start", async ({ page }) => {
+    await page.goto("/scans/new");
+    await page.getByRole("button", { name: /Endpoint Scan/i }).click();
+    await page.getByRole("button", { name: /^Continue$/ }).click();
+
+    // The snapshot may have no enrolled endpoints (fresh machine): say so, don't fail.
+    const empty = page.getByText(/No endpoints are enrolled yet/i);
+    if (await empty.isVisible().catch(() => false)) return;
+
+    const firstAgent = page.getByRole("checkbox").first();
+    await firstAgent.check();
+    await page.getByRole("button", { name: /^Continue$/ }).click();
+    await expect(page.getByText(/Endpoint scan/i)).toBeVisible();
+    await page.getByRole("button", { name: /Start Scan/i }).click();
+
+    await expect(page.getByRole("heading", { name: /Endpoint scan queued/i })).toBeVisible();
+    // A reachable endpoint starts immediately; an unreachable one is queued, and
+    // the page says which instead of showing a progress bar that never moves.
+    await expect(page.getByText(/A reachable endpoint starts the scan immediately/i)).toBeVisible();
+    await expect(page.getByRole("button", { name: /^New scan$/ })).toBeVisible();
   });
 
   test("starts a real scan, reports server-side progress and links the report", async ({ page }) => {

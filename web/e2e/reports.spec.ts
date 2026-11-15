@@ -93,6 +93,76 @@ test.describe("reports", () => {
     await expect(page).toHaveURL(/\/reports$/);
   });
 
+  test("software inventory exports are a usable asset list and a valid SBOM", async ({ page }) => {
+    const api = await apiGet<{ items: Run[] }>(page, "/api/reports");
+    test.skip(api.items.length === 0, "no stored reports");
+    const id = api.items[0].id;
+
+    const report = await apiGet<{ inventory: { packages: { name: string; version: string }[] } }>(page, `/api/reports/${id}`);
+    const expected = report.inventory.packages.length;
+
+    await page.goto(`/reports/${id}`);
+
+    // CSV: the "what is installed" list an asset register imports.
+    const [csv] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "software (csv)", exact: true }).click(),
+    ]);
+    expect(csv.suggestedFilename()).toMatch(/-software\.csv$/);
+    const csvStream = await csv.createReadStream();
+    let csvBody = "";
+    for await (const chunk of csvStream) csvBody += chunk.toString();
+    const lines = csvBody.trim().split("\n");
+    expect(lines[0]).toMatch(/^host,os,os_version,/);
+    expect(lines[0]).toContain("known_findings,max_severity");
+    expect(lines.length).toBe(expected + 1);
+    for (const pkg of report.inventory.packages.slice(0, 5)) {
+      expect(csvBody).toContain(pkg.name);
+    }
+
+    // CycloneDX: a real SBOM a scanner can consume.
+    const [cdx] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "cyclonedx", exact: true }).click(),
+    ]);
+    expect(cdx.suggestedFilename()).toMatch(/\.cdx\.json$/);
+    const cdxStream = await cdx.createReadStream();
+    let cdxBody = "";
+    for await (const chunk of cdxStream) cdxBody += chunk.toString();
+    const bom = JSON.parse(cdxBody) as { bomFormat: string; specVersion: string; components: unknown[] };
+    expect(bom.bomFormat).toBe("CycloneDX");
+    expect(bom.specVersion).toBe("1.5");
+    expect(bom.components.length).toBe(expected);
+    await expect(page).toHaveURL(new RegExp(`/reports/${id}$`));
+  });
+
+  test("the reports page exports the whole environment as a software asset list", async ({ page }) => {
+    // The APIRequestContext has no localStorage, so the token goes in the header
+    // exactly as the agent and scripts would send it.
+    const token = process.env.CLANKER_GUARD_TOKEN ?? "e2e-token";
+    const res = await page.request.get("/api/software/export?format=csv", {
+      headers: { "X-Guard-Token": token },
+    });
+    if (res.status() === 404) test.skip(true, "no stored reports");
+    expect(res.status()).toBe(200);
+    const body = await res.text();
+    const lines = body.trim().split("\n");
+    expect(lines[0]).toMatch(/^host,/);
+    // Every host with a stored assessment appears, and rows carry their report id.
+    const runs = await apiGet<{ items: Run[] }>(page, "/api/reports");
+    for (const host of [...new Set(runs.items.map((r) => r.host))]) {
+      expect(body).toContain(host);
+    }
+
+    await page.goto("/reports");
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: /Software inventory \(all hosts\)/ }).click(),
+    ]);
+    expect(download.suggestedFilename()).toBe("clanker-guard-software-inventory.csv");
+    await expect(page).toHaveURL(/\/reports$/);
+  });
+
   test("unknown report id shows a recoverable error", async ({ page }) => {
     await page.goto("/reports/SCAN-does-not-exist");
     await expect(page.getByRole("alert")).toContainText(/no stored assessment/i);

@@ -57,10 +57,40 @@ See [docs/IMPROVEMENT.md](docs/IMPROVEMENT.md).
 
 A React/TypeScript UI over the same local data: security overview, asset
 inventory, vulnerability triage with evidence and confidence, guided scanning
-with real progress, reports with JSON/Markdown/SARIF/HTML export, endpoint agent
+with real progress, reports with JSON/Markdown/SARIF/HTML export, a software asset
+inventory export (CSV for an asset register, CycloneDX SBOM for tooling), endpoint agent
 installers, and a deterministic "Ask Guard" panel. See
 [docs/UI.md](docs/UI.md) for the design system, accessibility notes and the API
 contract. Build the assets once with `cd web && npm ci && npm run build`.
+
+#### Signing in
+
+Binding beyond localhost needs a credential. Create a dashboard password once and
+sign in from the browser instead of pasting a token into every tab:
+
+```bash
+clanker vuln auth set-password --generate   # prints the password once
+clanker vuln auth status                    # user, file, last change
+CLANKER_GUARD_TOKEN=... clanker vuln serve --listen 0.0.0.0:8787 --web-dir web/dist
+```
+
+The password is bcrypt-hashed in a 0600 file under the user config directory
+(`~/.config/clanker-guard/auth.json`, override with `--auth-file` or
+`CLANKER_GUARD_AUTH_FILE`), deliberately outside the scan cache so clearing the
+cache never locks you out. Signing in sets an HttpOnly, `SameSite=Strict` session
+cookie that lasts `--session-ttl` (default 30 days) and survives a server restart.
+Changing the password rotates the signing key, so every existing session ends.
+
+The `X-Guard-Token` header keeps working for scripts, exports and the endpoint
+agent, and a deployment with only `CLANKER_GUARD_TOKEN` still shows the token form
+on `/login`. State-changing cookie requests must come from the dashboard itself
+(`Origin`/`Sec-Fetch-Site`), and password guessing is rate limited per source
+address (10 failures / 15 minutes).
+
+Over plain HTTP on a trusted LAN the cookie is `HttpOnly` + `SameSite=Strict` but
+not `Secure` (there is no TLS to demand). Serve the dashboard behind TLS — or
+through a proxy that sets `X-Forwarded-Proto: https` — and the `Secure` flag is
+added automatically.
 
 ## Vulnerability assessment (Clanker Guard)
 
@@ -77,8 +107,50 @@ clanker vuln ask "what should I patch first?"
 ```
 
 A standalone endpoint agent (`clanker-guard-agent`) runs the same assessment with
-no cloud dependency, no service and no privileges. See
-[docs/VULN.md](docs/VULN.md) for architecture, accuracy rules, coverage limits,
+no cloud dependency and no privileges; enrolling it in a dashboard installs a
+background service so the endpoint stays reachable. Release builds and the verified
+installers are published at
+[github.com/derekzacharias/clanker-guard-agent](https://github.com/derekzacharias/clanker-guard-agent/releases):
+
+```bash
+# Linux / macOS — verifies the published SHA-256, enrolls, scans and reports back
+# (paste the command from Settings → Agents: it carries --server and the
+# enrollment token for your dashboard)
+curl -fsSL https://github.com/derekzacharias/clanker-guard-agent/releases/download/v0.1.4/install-agent.sh \
+  | bash -s -- --version 0.1.4 --server http://<dashboard>:8787 --enroll-token <token> --watch
+
+# Windows (PowerShell)
+iwr https://github.com/derekzacharias/clanker-guard-agent/releases/download/v0.1.0/install-agent.ps1 `
+  -OutFile "$env:TEMP\install-agent.ps1" -UseBasicParsing
+& "$env:TEMP\install-agent.ps1" -Version 0.1.0 -Server "http://<dashboard>:8787" -EnrollToken "<token>"
+```
+
+An installed endpoint enrolls once (exchanging the enrollment token for its own
+credential), runs one assessment, and uploads the findings plus its progress. The
+dashboard then shows the endpoint under Settings → Agents with what it is doing,
+how many findings it reported, and a revoke action. Nothing is sent anywhere
+else, and the server cannot send it commands beyond "run a scan now".
+
+The installer adds a background service (systemd user unit, LaunchAgent or a logon
+task) so nothing has to be scheduled by hand; `--no-service` skips that, and
+`clanker-guard-agent uninstall --yes` stops and removes the service too. `--watch` (or running `clanker-guard-agent watch` later) leaves the
+endpoint available for dashboard-requested scans (New scan → **Endpoint Scan**): the
+agent holds a request open, so a scan starts the moment it is requested and the
+dashboard can tell online (reachable) from offline (unreachable) — while the server
+still never connects to the endpoint. A request for an endpoint with no watcher is
+queued and can be withdrawn from the dashboard.
+Point the dashboard at the same host to show these commands in Settings → Agents:
+
+```bash
+# the dashboard advertises cmd.Version as the agent version, so stamp it to match
+# the published tag when building (a default build reports "dev")
+go build -ldflags "-X github.com/bgdnvk/clanker/cmd.Version=0.1.0" -o bin/clanker .
+
+CLANKER_GUARD_RELEASE_BASE=https://github.com/derekzacharias/clanker-guard-agent/releases/download/v0.1.0 \
+  clanker vuln serve --listen 127.0.0.1:8787 --web-dir web/dist
+```
+
+See [docs/VULN.md](docs/VULN.md) for architecture, accuracy rules, coverage limits,
 the confidence model and the roadmap.
 
 ## Install

@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/vuln/auth"
+	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
@@ -33,6 +36,13 @@ type Options struct {
 	ToolVersion string
 	// Token, when set, is required on every /api request (X-Guard-Token).
 	Token string
+	// AuthPath is the credential file for password sign-in. An empty path
+	// disables password auth entirely (token-only or unauthenticated).
+	AuthPath string
+	// Auth overrides AuthPath (tests). When nil, AuthPath is loaded.
+	Auth *auth.Store
+	// SessionTTL is how long a sign-in lasts. Defaults to auth.DefaultSessionTTL.
+	SessionTTL time.Duration
 	// ReleaseBase is the published artifact base URL. When empty the UI is told
 	// that no artifacts are published yet instead of being shown fake commands.
 	ReleaseBase string
@@ -53,6 +63,13 @@ type Server struct {
 	mux     *http.ServeMux
 	log     *slog.Logger
 	started time.Time
+	auth    *auth.Store
+	logins  *loginLimiter
+	fleet   *fleet.Store
+	// enrollLimiter throttles enrollment-token guessing per source address.
+	enrollLimiter *loginLimiter
+	// presence tracks agents holding an open claim request (reachability).
+	presence *presence
 }
 
 // New opens the store and returns a ready server.
@@ -69,6 +86,21 @@ func New(opts Options) (*Server, error) {
 	if opts.RunScan == nil {
 		opts.RunScan = scan.Run
 	}
+	if opts.SessionTTL <= 0 {
+		opts.SessionTTL = auth.DefaultSessionTTL
+	}
+	// A missing credential file is the normal token-only/loopback case, not an
+	// error: password sign-in is simply switched off.
+	if opts.Auth == nil && opts.AuthPath != "" {
+		st, err := auth.Load(opts.AuthPath)
+		switch {
+		case errors.Is(err, auth.ErrNotConfigured):
+		case err != nil:
+			return nil, fmt.Errorf("load password credentials: %w", err)
+		default:
+			opts.Auth = st
+		}
+	}
 	store, err := intel.OpenStore(opts.CachePath)
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
@@ -79,13 +111,31 @@ func New(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("initialise improvement engine: %w", err)
 	}
 	s := &Server{
-		opts:    opts,
-		store:   store,
-		improve: improveEngine,
-		jobs:    newJobManager(),
-		mux:     http.NewServeMux(),
-		log:     opts.Logger,
-		started: opts.Now(),
+		opts:          opts,
+		store:         store,
+		improve:       improveEngine,
+		jobs:          newJobManager(),
+		mux:           http.NewServeMux(),
+		log:           opts.Logger,
+		started:       opts.Now(),
+		auth:          opts.Auth,
+		logins:        newLoginLimiter(loginMaxFailures, loginLimitWindow),
+		enrollLimiter: newLoginLimiter(agentEnrollFailures, loginLimitWindow),
+		presence:      newPresence(),
+	}
+	// The fleet registry lives in the same SQLite file as scan history, so an
+	// ingested report and the endpoint that sent it commit against one writer.
+	fleetStore, err := fleet.New(store.DB())
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("initialise fleet registry: %w", err)
+	}
+	s.fleet = fleetStore
+	if s.auth != nil {
+		if mode, insecure := s.auth.InsecurePerms(); insecure {
+			s.log.Warn("credential file is readable by other accounts; run: chmod 600",
+				"path", s.auth.Path(), "mode", mode.String())
+		}
 	}
 	s.routes()
 	return s, nil
@@ -107,8 +157,8 @@ func (s *Server) Listen(addr string) error {
 		return err
 	}
 	if host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
-		if s.opts.Token == "" {
-			return fmt.Errorf("refusing to listen on %s without authentication: set CLANKER_GUARD_TOKEN (the UI sends it as X-Guard-Token)", addr)
+		if !s.authRequired() {
+			return fmt.Errorf("refusing to listen on %s without authentication: set CLANKER_GUARD_TOKEN or create a password with `clanker vuln auth set-password`", addr)
 		}
 	}
 	srv := &http.Server{
@@ -122,6 +172,9 @@ func (s *Server) Listen(addr string) error {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/auth/session", s.handleAuthSession)
+	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("GET /api/meta", s.handleMeta)
 
 	s.mux.HandleFunc("GET /api/overview", s.handleOverview)
@@ -138,10 +191,24 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/reports", s.handleReports)
 	s.mux.HandleFunc("GET /api/reports/{id}", s.handleReport)
 	s.mux.HandleFunc("GET /api/reports/{id}/export", s.handleReportExport)
+	s.mux.HandleFunc("GET /api/software/export", s.handleSoftwareExport)
 
 	s.mux.HandleFunc("GET /api/feeds", s.handleFeeds)
 	s.mux.HandleFunc("POST /api/feeds/update", s.handleFeedUpdate)
+
+	// Endpoint fleet: agents authenticate with their own bearer token (checked in
+	// the handler), the operator manages them through the dashboard session.
+	s.mux.HandleFunc("POST /api/agents/enroll", s.handleAgentEnroll)
+	s.mux.HandleFunc("POST /api/agents/checkin", s.handleAgentCheckin)
+	s.mux.HandleFunc("POST /api/agents/report", s.handleAgentReport)
 	s.mux.HandleFunc("GET /api/agents", s.handleAgents)
+	s.mux.HandleFunc("POST /api/agents/{id}/revoke", s.handleAgentRevoke)
+	s.mux.HandleFunc("POST /api/agents/{id}/scan", s.handleAgentQueueScan)
+	s.mux.HandleFunc("POST /api/agents/{id}/scan/cancel", s.handleAgentCancelScan)
+	s.mux.HandleFunc("POST /api/agents/tasks/claim", s.handleAgentClaimTask)
+	s.mux.HandleFunc("POST /api/agents/tasks/complete", s.handleAgentCompleteTask)
+	s.mux.HandleFunc("GET /api/agents/{id}/events", s.handleAgentEvents)
+	s.mux.HandleFunc("POST /api/agents/enroll-token/rotate", s.handleEnrollTokenRotate)
 	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 	s.mux.HandleFunc("POST /api/ask", s.handleAsk)
@@ -167,12 +234,20 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 
-		// Liveness is unauthenticated on purpose: the UI probes it to detect
-		// "token required" before it has a token. It exposes no data.
-		needsAuth := strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/health"
-		if needsAuth && s.opts.Token != "" {
-			if r.Header.Get("X-Guard-Token") != s.opts.Token {
-				writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid X-Guard-Token")
+		// Liveness and the sign-in endpoints are unauthenticated on purpose: the
+		// login page has to reach them before a session exists. None of them
+		// exposes assessment data.
+		needsAuth := strings.HasPrefix(r.URL.Path, "/api/") && !publicAPIPaths[r.URL.Path]
+		if needsAuth && s.authRequired() {
+			method, _ := s.authenticate(r)
+			switch {
+			case method == authNone:
+				s.log.Warn("unauthenticated api request", "method", r.Method, "path", r.URL.Path, "remote", clientIP(r))
+				writeError(w, http.StatusUnauthorized, "unauthorized", "sign in or send a valid X-Guard-Token")
+				return
+			case method == authViaCookie && !cookieMutationAllowed(r):
+				s.log.Warn("cross-site state change refused", "method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"))
+				writeError(w, http.StatusForbidden, "cross_site_request", "state-changing requests must come from the dashboard itself")
 				return
 			}
 		}
@@ -240,7 +315,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			"network_scan": true,
 			"sbom_scan":    true,
 			"llm":          false,
-			"agent_push":   false,
+			"agent_push":   true,
 		},
 		"release": map[string]any{
 			"published": s.opts.ReleaseBase != "",

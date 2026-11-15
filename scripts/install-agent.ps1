@@ -2,19 +2,25 @@
 #
 #   iwr <base-url>/install-agent.ps1 -UseBasicParsing | iex
 #   # or, with parameters:
-#   .\install-agent.ps1 -Version 0.1.0 -BaseUrl https://github.com/bgdnvk/clanker/releases/download
+#   .\install-agent.ps1 -Version 0.1.0 -BaseUrl https://github.com/derekzacharias/clanker-guard-agent/releases/download
 #
 # Security properties:
 #   * The artifact is verified against its published SHA-256 before it is used.
-#   * No service, no scheduled task, no auto-update, no telemetry.
+#   * With -Server the agent enrolls, reports only to that server, and installs a
+#     background task so the dashboard can ask it for scans (-NoService opts out).
 #   * Uninstall with: clanker-guard-agent uninstall --yes
 
 [CmdletBinding()]
 param(
     [string]$Version = $env:CLANKER_GUARD_VERSION,
-    [string]$BaseUrl = $(if ($env:CLANKER_GUARD_BASE_URL) { $env:CLANKER_GUARD_BASE_URL } else { "https://github.com/bgdnvk/clanker/releases/download" }),
+    [string]$BaseUrl = $(if ($env:CLANKER_GUARD_BASE_URL) { $env:CLANKER_GUARD_BASE_URL } else { "https://github.com/derekzacharias/clanker-guard-agent/releases/download" }),
     [string]$BinDir = $(if ($env:CLANKER_GUARD_BIN_DIR) { $env:CLANKER_GUARD_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "clanker-guard\bin" }),
+    [string]$Server = $env:CLANKER_GUARD_SERVER,
+    [string]$EnrollToken = $env:CLANKER_GUARD_ENROLL_TOKEN,
     [switch]$Scan,
+    [switch]$NoScan,
+    [switch]$Watch,
+    [switch]$NoService,
     [switch]$AddToPath
 )
 
@@ -87,15 +93,50 @@ try {
         Write-Host "note: $BinDir is not on your PATH by default; pass -AddToPath to add it"
     }
 
+    $report = $false
+    if ($Server) {
+        if (-not $EnrollToken) {
+            throw "-Server needs -EnrollToken (Settings -> Agents shows both)"
+        }
+        Write-Host ""
+        Write-Host "enrolling with $Server"
+        Write-Host "  findings and status will be sent to that server only; nothing to a third party"
+        & $dest enroll --server $Server --enroll-token $EnrollToken
+        if ($LASTEXITCODE -ne 0) {
+            throw "enrollment failed; the agent is installed but not reporting"
+        }
+        $report = $true
+    }
+
     Write-Host ""
-    Write-Host "Next steps (nothing runs automatically):"
+    Write-Host "Next steps:"
     Write-Host "  clanker-guard-agent scan --local --format json --output findings.json"
     Write-Host "  clanker-guard-agent feeds update --with-osv"
+    Write-Host "  clanker-guard-agent status"
     Write-Host "  clanker-guard-agent uninstall --yes"
 
-    if ($Scan) {
+    if (($Scan -or ($report -and -not $NoScan))) {
         Write-Host ""
         & $dest scan --local
+    }
+
+    if ($Watch) {
+        if (-not $report) {
+            throw "-Watch needs -Server and -EnrollToken (the agent must be enrolled to receive scans)"
+        }
+        Write-Host ""
+        Write-Host "staying available: clanker-guard-agent watch (foreground)"
+        & $dest watch
+    } elseif ($report -and -not $NoService) {
+        Write-Host ""
+        Write-Host "installing the background service (scheduled task at logon)"
+        & $dest service install
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "could not install a service; this endpoint stays offline until you run: $dest watch"
+        }
+    } elseif ($report) {
+        Write-Host ""
+        Write-Warning "no service installed (-NoService); this endpoint is reachable only while you run: $dest watch"
     }
 } finally {
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue

@@ -18,7 +18,7 @@ npm run test:e2e:report        # last HTML report
 | Runner | `@playwright/test` (installed into `web/`), `@axe-core/playwright` for accessibility |
 | Server | `e2e/start-server.sh` boots `clanker vuln serve` on `127.0.0.1:8789` with `--web-dir dist` |
 | Data | A **snapshot** of the scanner cache taken with SQLite `VACUUM INTO`, so tests may create feedback, approvals and scans freely and the developer's real cache is never touched |
-| Auth | The token is injected as `localStorage` in `storageState`, and the auth spec deliberately runs without it |
+| Auth | Two modes, both exercised: the token injected as `localStorage` in `storageState`, and a dashboard password (`clanker vuln auth set-password` against a temp `--auth-file`) for the sign-in flow. The auth spec deliberately runs without either |
 | Isolation | `workers: 1` because the suite mutates one database (feedback, proposals, scans) |
 | Failures | trace + video + screenshot retained under `web/.e2e/artifacts` (git-ignored) |
 | Projects | Chromium (full suite), Firefox and WebKit (workflow subset) |
@@ -199,6 +199,20 @@ itself — both now covered by `null-safety.spec`/unit fixtures and `auth.spec.t
 - Email/PDF reporting, SSO, and multi-user concurrency (single-operator app).
 
 ## 5. Adding a test
+
+0. Password sign-in has no Playwright spec yet; it is covered by Go tests
+   (`internal/vuln/auth`, `internal/vuln/api/auth_test.go`: cookie hardening,
+   expiry, CSRF, rate limit, restart survival) and jsdom tests
+   (`web/src/test/login.test.tsx`). Verify a real deployment by hand:
+
+   ```bash
+   clanker vuln auth set-password --generate     # note the printed password
+   CLANKER_GUARD_TOKEN=... clanker vuln serve --listen 0.0.0.0:8787 --web-dir web/dist
+   # open http://<host>:8787/ → redirected to /login → sign in → reload stays signed in
+   # DevTools → Application → Cookies: guard_session is HttpOnly + SameSite=Strict
+   # wrong password 10× → 429 with Retry-After; `clanker vuln auth set-password`
+   # again → restart → the old browser session is rejected (key rotated)
+   ```
 
 1. Put UI specs in `web/e2e/*.spec.ts` (vitest only collects `src/**/*.test.tsx`).
 2. Use `trackIssues(page)` + `expectNoIssues(issues)` in every navigation test.

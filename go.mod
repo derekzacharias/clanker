@@ -27,6 +27,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.26.5
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/go-github/v56 v56.0.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/mark3labs/mcp-go v0.46.0
 	github.com/spf13/cobra v1.8.0
@@ -58,6 +59,7 @@ require (
 	golang.org/x/crypto v0.52.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0
+	golang.org/x/term v0.43.0
 	golang.org/x/text v0.37.0
 	google.golang.org/api v0.271.0
 	google.golang.org/genai v1.19.0
@@ -109,7 +111,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
 	github.com/googleapis/gax-go/v2 v2.18.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

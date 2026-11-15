@@ -1,5 +1,5 @@
 import { ArrowLeft, Download } from "lucide-react";
-import { api, downloadReportExport } from "../lib/api";
+import { api, downloadReportExport, type ReportExportFormat } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { Link } from "../lib/router";
 import { formatDate, num, pct, relativeTime, riskTone, severityLabel } from "../lib/format";
@@ -28,13 +28,19 @@ interface ReportFinding {
   source: string;
 }
 
-const FORMATS_EXPORT = ["json", "markdown", "sarif", "html"] as const;
+const FORMATS_EXPORT: ReportExportFormat[] = ["json", "markdown", "sarif", "html"];
+// Separate group: these answer "what software is on this host", not "what is wrong
+// with it". CSV imports into an asset register, CycloneDX into SBOM tooling.
+const INVENTORY_EXPORTS: { format: ReportExportFormat; label: string; title: string }[] = [
+  { format: "csv", label: "software (csv)", title: "Installed software as a CSV asset list" },
+  { format: "cyclonedx", label: "cyclonedx", title: "Installed software as a CycloneDX 1.5 SBOM" },
+];
 
 export default function ReportView({ id }: { id: string }) {
   const { data, error, loading, reload } = useAsync(() => api.report(id), [id]);
   const { push } = useToast();
 
-  async function download(format: (typeof FORMATS_EXPORT)[number]) {
+  async function download(format: ReportExportFormat) {
     try {
       const name = await downloadReportExport(id, format);
       push(`Downloaded ${name}`);
@@ -75,6 +81,18 @@ export default function ReportView({ id }: { id: string }) {
               >
                 <Download className="h-3.5 w-3.5" aria-hidden="true" />
                 {f}
+              </button>
+            ))}
+            {INVENTORY_EXPORTS.map(({ format, label, title }) => (
+              <button
+                key={format}
+                type="button"
+                onClick={() => void download(format)}
+                title={title}
+                className="inline-flex h-8 items-center gap-1 rounded-md border border-accent/40 bg-accent-soft px-2.5 text-[0.8125rem] text-accent hover:bg-accent-soft/70"
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                {label}
               </button>
             ))}
           </>

@@ -468,6 +468,39 @@ export interface FeedResponse {
   counts: { advisories: number; kev: number; epss: number };
 }
 
+export interface AgentTask {
+  id: string;
+  agent_id: string;
+  kind: string;
+  status: "queued" | "running" | "done" | "failed";
+  requested_at: string;
+  started_at?: string;
+  finished_at?: string;
+  note?: string;
+  report_id?: string;
+}
+
+export interface EnrolledAgent {
+  id: string;
+  host: string;
+  os: string;
+  version: string;
+  state: "enrolled" | "idle" | "scanning" | "reporting" | "error";
+  phase: string;
+  percent: number;
+  message: string;
+  findings: number;
+  last_report_id: string;
+  enrolled_at: string;
+  last_seen?: string;
+  seconds_since_seen?: number;
+  online: boolean;
+  /** True while the agent holds a claim request, i.e. it can accept work now. */
+  watching: boolean;
+  revoked: boolean;
+  task?: AgentTask;
+}
+
 export interface AgentsResponse {
   local: { host: string; version: string; cache_path: string; platform: string; installed: boolean; last_scan?: string };
   endpoints: {
@@ -484,7 +517,16 @@ export interface AgentsResponse {
     version: string;
     base_url: string;
     commands?: Record<string, string>;
+    oneoff_commands?: Record<string, string>;
+    keeps_available?: boolean;
     build_steps?: string[];
+  };
+  fleet: {
+    server_url: string;
+    enroll_token: string;
+    reachable_window: string;
+    count: number;
+    enrolled: EnrolledAgent[];
   };
   managed_mode: boolean;
   managed_note: string;
@@ -497,7 +539,23 @@ export interface Settings {
   cache_path: string;
   tool_version: string;
   token_required: boolean;
+  password_required?: boolean;
+  auth?: { required: boolean; session_ttl: string; auth_file: string };
   capabilities: Record<string, boolean>;
+}
+
+/**
+ * Result of GET /api/auth/session. `required` is false for a loopback server
+ * with no credential configured, which is the one case the UI renders without
+ * asking for anything.
+ */
+export interface AuthSession {
+  authenticated: boolean;
+  required: boolean;
+  username?: string;
+  expires_at?: string;
+  session_ttl?: string;
+  methods: { password: boolean; token: boolean };
 }
 
 export interface AskResponse {
@@ -544,11 +602,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   let res: Response;
   try {
-    res = await fetch(path, { ...init, headers });
+    // same-origin: the session cookie is scoped to this origin and must travel
+    // with the request. Credentials are never attached to another origin.
+    res = await fetch(path, { ...init, headers, credentials: "same-origin" });
   } catch (err) {
     throw new ApiError(0, "network_error", "Cannot reach the Clanker Guard API. Is `clanker vuln serve` running?");
   }
-  if (res.status === 401) {
+  // 401 on the auth endpoints is an ordinary answer (no session yet, wrong
+  // password), not "your credential was rejected": dispatching the recovery
+  // event for those would re-enter the probe that produced them.
+  if (res.status === 401 && !path.startsWith("/api/auth/")) {
     window.dispatchEvent(new CustomEvent("guard:unauthorized"));
   }
   if (!res.ok) {
@@ -590,7 +653,7 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   if (token) headers.set("X-Guard-Token", token);
   let res: Response;
   try {
-    res = await fetch(path, { headers });
+    res = await fetch(path, { headers, credentials: "same-origin" });
   } catch {
     throw new ApiError(0, "network_error", "Cannot reach the Clanker Guard API.");
   }
@@ -621,12 +684,34 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   return filename;
 }
 
-export async function downloadReportExport(
-  id: string,
-  format: "json" | "markdown" | "sarif" | "html",
-): Promise<string> {
+export type ReportExportFormat = "json" | "markdown" | "sarif" | "html" | "csv" | "cyclonedx";
+
+export async function downloadReportExport(id: string, format: ReportExportFormat): Promise<string> {
   const ext = format === "markdown" ? "md" : format;
-  return downloadFile(`/api/reports/${encodeURIComponent(id)}/export?format=${format}`, `clanker-guard-${id}.${ext}`);
+  // The inventory exports carry their own names: a CSV of installed software is
+  // not "the report".
+  const fallback =
+    format === "csv"
+      ? `clanker-guard-${id}-software.csv`
+      : format === "cyclonedx"
+        ? `clanker-guard-${id}.cdx.json`
+        : `clanker-guard-${id}.${ext}`;
+  return downloadFile(`/api/reports/${encodeURIComponent(id)}/export?format=${format}`, fallback);
+}
+
+/**
+ * Environment-wide software asset list: every host with a stored assessment, one
+ * row per installed package. CSV for asset registers/CMDB imports, CycloneDX for
+ * SBOM tooling (one host at a time).
+ */
+export async function downloadSoftwareInventory(options: { format: "csv" | "cyclonedx"; host?: string }): Promise<string> {
+  const params = new URLSearchParams({ format: options.format });
+  if (options.host) params.set("host", options.host);
+  const fallback =
+    options.format === "cyclonedx"
+      ? `clanker-guard-software-${options.host ?? "inventory"}.cdx.json`
+      : "clanker-guard-software-inventory.csv";
+  return downloadFile(`/api/software/export?${params.toString()}`, fallback);
 }
 
 export async function downloadFeedbackExport(): Promise<string> {
@@ -636,6 +721,15 @@ export async function downloadFeedbackExport(): Promise<string> {
 export const api = {
   meta: () => request<Meta>("/api/meta"),
   health: () => request<{ status: string }>("/api/health"),
+  // Auth: the session probe is deliberately unauthenticated so the login screen
+  // can tell "needs sign-in" from "unreachable" before it has credentials.
+  session: () => request<AuthSession>("/api/auth/session"),
+  login: (username: string, password: string) =>
+    request<AuthSession>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () => request<{ authenticated: boolean }>("/api/auth/logout", { method: "POST" }),
   overview: () => request<Overview>("/api/overview"),
   assets: () => request<{ items: Asset[]; total: number }>("/api/assets"),
   asset: (host: string) => request<AssetDetail>(`/api/assets/${encodeURIComponent(host)}`),
@@ -677,6 +771,18 @@ export const api = {
   feeds: () => request<FeedResponse>("/api/feeds"),
   updateFeeds: () => request<Job>("/api/feeds/update", { method: "POST" }),
   agents: () => request<AgentsResponse>("/api/agents"),
+  agentEvents: (id: string) =>
+    request<{ agent: EnrolledAgent; events: { at: string; state: string; phase: string; percent: number; message: string }[] }>(
+      `/api/agents/${encodeURIComponent(id)}/events`,
+    ),
+  queueAgentScan: (id: string) =>
+    request<{ task: AgentTask; created: boolean }>(`/api/agents/${encodeURIComponent(id)}/scan`, { method: "POST" }),
+  cancelAgentScan: (id: string) =>
+    request<{ cancelled: number }>(`/api/agents/${encodeURIComponent(id)}/scan/cancel`, { method: "POST" }),
+  revokeAgent: (id: string) =>
+    request<{ revoked: string }>(`/api/agents/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
+  rotateEnrollToken: () =>
+    request<{ enroll_token: string }>("/api/agents/enroll-token/rotate", { method: "POST" }),
   settings: () => request<Settings>("/api/settings"),
   saveSettings: (body: {
     policy?: { fail_on: string; fail_on_kev: boolean };
