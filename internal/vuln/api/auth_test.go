@@ -451,3 +451,49 @@ func TestPasswordAuthenticationSatisfiesTheListenGuard(t *testing.T) {
 		t.Fatalf("password auth should satisfy the guard, got %v", err)
 	}
 }
+
+// TestClientIPBehindATrustedProxy is what makes internet exposure safe: behind the
+// TLS proxy every request arrives from one address, so rate limits and logs must see
+// the real client — but only when the peer really is the proxy, or any client could
+// forge X-Forwarded-For and escape the login limiter.
+func TestClientIPBehindATrustedProxy(t *testing.T) {
+	srv, err := New(Options{
+		CachePath:      filepath.Join(t.TempDir(), "intel.db"),
+		TrustedProxies: []string{"10.0.0.5", "172.16.0.0/12"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	mk := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest("GET", "/api/overview", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+
+	cases := []struct{ name, remote, xff, want string }{
+		{"untrusted peer ignores the header", "203.0.113.9:5555", "1.1.1.1", "203.0.113.9"},
+		{"trusted peer uses the client", "10.0.0.5:443", "198.51.100.7", "198.51.100.7"},
+		{"leftmost entries cannot be spoofed", "10.0.0.5:443", "1.2.3.4, 198.51.100.7", "198.51.100.7"},
+		{"proxy chain skips trusted hops", "10.0.0.5:443", "198.51.100.7, 172.20.0.3", "198.51.100.7"},
+		{"trusted peer without a header", "10.0.0.5:443", "", "10.0.0.5"},
+		{"garbage header falls back to the peer", "10.0.0.5:443", "not-an-ip", "10.0.0.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := srv.clientIP(mk(tc.remote, tc.xff)); got != tc.want {
+				t.Fatalf("clientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInvalidTrustedProxyIsRejected(t *testing.T) {
+	if _, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), TrustedProxies: []string{"nonsense"}}); err == nil {
+		t.Fatal("an invalid trusted-proxy entry must fail startup, not be ignored")
+	}
+}

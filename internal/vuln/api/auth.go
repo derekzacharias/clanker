@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -129,7 +130,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.opts.Now()
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if retryAfter, blocked := s.logins.blocked(ip, now); blocked {
 		// Retry-After lets a well-behaved client back off instead of hammering.
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
@@ -179,7 +180,7 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	// forced logout is not a breach, but it is still someone else acting on the
 	// user's session. Requests without a cookie (a stale tab, a script) are fine.
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" && !cookieMutationAllowed(r) {
-		s.log.Warn("cross-site logout refused", "origin", r.Header.Get("Origin"), "remote", clientIP(r))
+		s.log.Warn("cross-site logout refused", "origin", r.Header.Get("Origin"), "remote", s.clientIP(r))
 		writeError(w, http.StatusForbidden, "cross_site_request", "sign out from the dashboard itself")
 		return
 	}
@@ -260,15 +261,80 @@ func requestIsHTTPS(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-// clientIP is the address the connection came from. X-Forwarded-For is
-// deliberately ignored: without a trusted-proxy configuration any client could
-// forge it and escape the login rate limit.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP resolves the address a request came from.
+//
+// X-Forwarded-For is honoured only when the immediate peer is a configured
+// trusted proxy: otherwise any client could forge the header and escape the login
+// rate limit. The list is walked right to left so the leftmost (client-supplied)
+// entries cannot be used to impersonate someone else.
+func (s *Server) clientIP(r *http.Request) string {
+	peer := hostOnly(r.RemoteAddr)
+	ip := net.ParseIP(peer)
+	if ip == nil || !s.isTrustedProxy(ip) {
+		return peer
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if strings.TrimSpace(xff) == "" {
+		return peer
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := net.ParseIP(strings.TrimSpace(parts[i]))
+		if candidate == nil {
+			continue
+		}
+		if s.isTrustedProxy(candidate) {
+			// Another proxy in the chain; keep looking left.
+			continue
+		}
+		return candidate.String()
+	}
+	return peer
+}
+
+func (s *Server) isTrustedProxy(ip net.IP) bool {
+	for _, network := range s.trustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func hostOnly(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return r.RemoteAddr
+		return addr
 	}
 	return host
+}
+
+// parseTrustedProxies turns the configured proxy list into networks.
+func parseTrustedProxies(entries []string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, raw := range entries {
+		for _, item := range strings.Split(raw, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if !strings.Contains(item, "/") {
+				if ip := net.ParseIP(item); ip != nil {
+					bits := 32
+					if ip.To4() == nil {
+						bits = 128
+					}
+					item = fmt.Sprintf("%s/%d", ip.String(), bits)
+				}
+			}
+			_, network, err := net.ParseCIDR(item)
+			if err != nil {
+				return nil, fmt.Errorf("invalid trusted proxy %q: %w", item, err)
+			}
+			out = append(out, network)
+		}
+	}
+	return out, nil
 }
 
 // loginLimiter throttles password guessing per source address.

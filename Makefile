@@ -22,7 +22,7 @@ CLANKER_BOX_REGION ?= us-east4
 CLANKER_BOX_REPO ?= clanker
 CLANKER_BOX_IMAGE ?= $(CLANKER_BOX_REGION)-docker.pkg.dev/$(CLANKER_BOX_PROJECT)/$(CLANKER_BOX_REPO)/clanker-box:latest
 
-.PHONY: build build-all clean test test-short run install uninstall dev deps fmt vet lint docs quick ci help \
+.PHONY: build deploy-docker4 build-all clean test test-short run install uninstall dev deps fmt vet lint docs quick ci help \
 	release-clean release-build-macos release-tar-macos release-sha release release-create release-upload \
 	setup-hermes clanker-box-image clanker-box-image-push
 
@@ -35,6 +35,10 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	@go build -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
+
+# Deploy the dashboard to docker4 (builds, ships, restarts, verifies).
+deploy-docker4:
+	@bash scripts/deploy-docker4.sh $(DEPLOY_ARGS)
 
 # Clean build artifacts
 clean:

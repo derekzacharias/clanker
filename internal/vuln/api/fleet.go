@@ -56,7 +56,7 @@ func (s *Server) agentFromRequest(w http.ResponseWriter, r *http.Request) (fleet
 
 // handleAgentEnroll exchanges the shared enrollment token for a per-agent token.
 func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	now := s.opts.Now()
 	if retryAfter, blocked := s.enrollLimiter.blocked(ip, now); blocked {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
@@ -194,7 +194,7 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	if digest := strings.TrimSpace(r.Header.Get("X-Guard-Payload-SHA256")); digest != "" {
 		sum := sha256.Sum256(raw)
 		if subtle.ConstantTimeCompare([]byte(strings.ToLower(digest)), []byte(hex.EncodeToString(sum[:]))) != 1 {
-			s.log.Warn("report digest mismatch", "agent", ag.ID, "remote", clientIP(r))
+			s.log.Warn("report digest mismatch", "agent", ag.ID, "remote", s.clientIP(r))
 			writeError(w, http.StatusBadRequest, "digest_mismatch", "payload digest does not match the body")
 			return
 		}
@@ -288,7 +288,7 @@ func (s *Server) handleAgentRevoke(w http.ResponseWriter, r *http.Request) {
 		s.writeFleetError(w, err)
 		return
 	}
-	s.log.Info("agent revoked", "agent", id, "remote", clientIP(r))
+	s.log.Info("agent revoked", "agent", id, "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": id})
 }
 
@@ -334,7 +334,7 @@ func (s *Server) handleEnrollTokenRotate(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "agent_error", err.Error())
 		return
 	}
-	s.log.Info("enrollment token minted", "expires", expires.Format(time.RFC3339), "remote", clientIP(r))
+	s.log.Info("enrollment token minted", "expires", expires.Format(time.RFC3339), "remote", s.clientIP(r))
 	commands := s.enrollCommands(r, token)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enroll_token":    token,
@@ -441,7 +441,7 @@ func (s *Server) handleAgentQueueScan(w http.ResponseWriter, r *http.Request) {
 		s.presence.notify(id, task)
 	}
 	s.log.Info("agent scan queued", "agent", id, "task", task.ID, "already_pending", !created,
-		"dispatched_to_watcher", s.presence.online(id), "remote", clientIP(r))
+		"dispatched_to_watcher", s.presence.online(id), "remote", s.clientIP(r))
 	writeJSON(w, status, map[string]any{"task": task, "created": created})
 }
 
@@ -562,7 +562,7 @@ func (s *Server) handleAgentCancelScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "agent_error", err.Error())
 		return
 	}
-	s.log.Info("queued agent scan cancelled", "agent", id, "remote", clientIP(r))
+	s.log.Info("queued agent scan cancelled", "agent", id, "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": n})
 }
 

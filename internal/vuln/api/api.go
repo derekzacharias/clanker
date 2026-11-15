@@ -43,6 +43,10 @@ type Options struct {
 	Auth *auth.Store
 	// SessionTTL is how long a sign-in lasts. Defaults to auth.DefaultSessionTTL.
 	SessionTTL time.Duration
+	// TrustedProxies lists the addresses of reverse proxies (IPs or CIDRs) whose
+	// X-Forwarded-For header is trusted. Empty means "no proxy": the header is
+	// ignored and rate limits key on the real peer address.
+	TrustedProxies []string
 	// ReleaseBase is the published artifact base URL. When empty the UI is told
 	// that no artifacts are published yet instead of being shown fake commands.
 	ReleaseBase string
@@ -70,6 +74,8 @@ type Server struct {
 	enrollLimiter *loginLimiter
 	// presence tracks agents holding an open claim request (reachability).
 	presence *presence
+	// trustedProxies are the peers whose X-Forwarded-For header is believed.
+	trustedProxies []*net.IPNet
 }
 
 // New opens the store and returns a ready server.
@@ -88,6 +94,10 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.SessionTTL <= 0 {
 		opts.SessionTTL = auth.DefaultSessionTTL
+	}
+	trustedProxies, err := parseTrustedProxies(opts.TrustedProxies)
+	if err != nil {
+		return nil, err
 	}
 	// A missing credential file is the normal token-only/loopback case, not an
 	// error: password sign-in is simply switched off.
@@ -111,17 +121,18 @@ func New(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("initialise improvement engine: %w", err)
 	}
 	s := &Server{
-		opts:          opts,
-		store:         store,
-		improve:       improveEngine,
-		jobs:          newJobManager(),
-		mux:           http.NewServeMux(),
-		log:           opts.Logger,
-		started:       opts.Now(),
-		auth:          opts.Auth,
-		logins:        newLoginLimiter(loginMaxFailures, loginLimitWindow),
-		enrollLimiter: newLoginLimiter(agentEnrollFailures, loginLimitWindow),
-		presence:      newPresence(),
+		opts:           opts,
+		store:          store,
+		improve:        improveEngine,
+		jobs:           newJobManager(),
+		mux:            http.NewServeMux(),
+		log:            opts.Logger,
+		started:        opts.Now(),
+		auth:           opts.Auth,
+		logins:         newLoginLimiter(loginMaxFailures, loginLimitWindow),
+		enrollLimiter:  newLoginLimiter(agentEnrollFailures, loginLimitWindow),
+		presence:       newPresence(),
+		trustedProxies: trustedProxies,
 	}
 	// The fleet registry lives in the same SQLite file as scan history, so an
 	// ingested report and the endpoint that sent it commit against one writer.
@@ -244,7 +255,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			method, _ := s.authenticate(r)
 			switch {
 			case method == authNone:
-				s.log.Warn("unauthenticated api request", "method", r.Method, "path", r.URL.Path, "remote", clientIP(r))
+				s.log.Warn("unauthenticated api request", "method", r.Method, "path", r.URL.Path, "remote", s.clientIP(r))
 				writeError(w, http.StatusUnauthorized, "unauthorized", "sign in or send a valid X-Guard-Token")
 				return
 			case method == authViaCookie && !cookieMutationAllowed(r):

@@ -526,12 +526,13 @@ scripts/build-agent-release.sh and host them under your own release base URL.
 
 func newVulnServeCmd() *cobra.Command {
 	var (
-		common      vulnCommonFlags
-		listen      string
-		webDir      string
-		releaseBase string
-		authFile    string
-		sessionTTL  time.Duration
+		common         vulnCommonFlags
+		listen         string
+		webDir         string
+		releaseBase    string
+		authFile       string
+		sessionTTL     time.Duration
+		trustedProxies string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -558,13 +559,14 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 				releaseBase = os.Getenv("CLANKER_GUARD_RELEASE_BASE")
 			}
 			srv, err := api.New(api.Options{
-				CachePath:   common.path(),
-				WebDir:      webDir,
-				ToolVersion: Version,
-				Token:       os.Getenv("CLANKER_GUARD_TOKEN"),
-				ReleaseBase: releaseBase,
-				AuthPath:    authFile,
-				SessionTTL:  sessionTTL,
+				CachePath:      common.path(),
+				WebDir:         webDir,
+				ToolVersion:    Version,
+				Token:          os.Getenv("CLANKER_GUARD_TOKEN"),
+				ReleaseBase:    releaseBase,
+				AuthPath:       authFile,
+				SessionTTL:     sessionTTL,
+				TrustedProxies: splitList(trustedProxies),
 			})
 			if err != nil {
 				return err
@@ -601,6 +603,8 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 	cmd.Flags().StringVar(&releaseBase, "release-base", "", "published agent artifact base URL (or CLANKER_GUARD_RELEASE_BASE)")
 	cmd.Flags().StringVar(&authFile, "auth-file", auth.DefaultPath(), "password credential file (empty disables password sign-in)")
 	cmd.Flags().DurationVar(&sessionTTL, "session-ttl", auth.DefaultSessionTTL, "how long a browser sign-in stays valid")
+	cmd.Flags().StringVar(&trustedProxies, "trusted-proxies", os.Getenv("CLANKER_GUARD_TRUSTED_PROXIES"),
+		"comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted (needed behind a TLS-terminating proxy so rate limits and logs see real client addresses)")
 	common.register(cmd)
 	return cmd
 }
@@ -1291,4 +1295,19 @@ func firstNonEmptyValue(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// splitList turns a comma-separated flag value into a slice, dropping empties.
+func splitList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
