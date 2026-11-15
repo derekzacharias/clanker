@@ -1,0 +1,412 @@
+package remediate
+
+import (
+	"context"
+	"database/sql"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/bgdnvk/clanker/internal/vuln/model"
+)
+
+func newStore(t *testing.T) (*Store, *time.Time) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "intel.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	st, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	st.SetClock(func() time.Time { return now })
+	return st, &now
+}
+
+func finding(host, eco, product, version, vuln, sev string) model.Finding {
+	return model.Finding{
+		Asset: host, Ecosystem: eco, Product: product, InstalledVersion: version,
+		VulnerabilityID: vuln, Severity: sev, Affected: model.ApplicabilityConfirmed,
+		Confidence: model.ConfidenceHigh, FixedVersion: version + "-fixed",
+		Remediation: "apt-get install --only-upgrade " + product,
+	}
+}
+
+func report(host string, findings ...model.Finding) model.Report {
+	return model.Report{
+		ReportID: "SCAN-1",
+		Metadata: model.ScanMetadata{Host: host, Mode: "local"},
+		Findings: findings,
+	}
+}
+
+// TestRoutingPrecedence pins the ownership rules from the requirements: an explicit
+// asset owner wins, then the category mapping, and an unknown category goes to
+// triage rather than to an arbitrary team (never to Security by default).
+func TestRoutingPrecedence(t *testing.T) {
+	policy := DefaultPolicy()
+
+	t.Run("explicit owner wins over the mapping", func(t *testing.T) {
+		own := Ownership{Status: "owned", Team: "Payments Team"}
+		team, category, triaged := policy.Route(finding("web01", "Ubuntu:24.04", "openssl", "3.0.1", "CVE-1", "high"), own)
+		if triaged || team != "Payments Team" || category != "os_package" {
+			t.Fatalf("route = %q %q triaged=%v", team, category, triaged)
+		}
+	})
+
+	t.Run("mapping routes OS packages to infrastructure", func(t *testing.T) {
+		team, category, triaged := policy.Route(finding("web01", "Ubuntu:24.04", "openssl", "3.0.1", "CVE-1", "high"), Ownership{})
+		if triaged || team != "Infrastructure" || category != "os_package" {
+			t.Fatalf("route = %q %q triaged=%v", team, category, triaged)
+		}
+	})
+
+	t.Run("application dependencies route to development", func(t *testing.T) {
+		team, category, _ := policy.Route(finding("web01", "PyPI", "django", "4.2.0", "CVE-2", "high"), Ownership{})
+		if team != "Development" || category != "app_dependency" {
+			t.Fatalf("route = %q %q", team, category)
+		}
+	})
+
+	t.Run("container images route to platform engineering", func(t *testing.T) {
+		team, category, _ := policy.Route(finding("api", "container:debian", "zlib", "1.2", "CVE-3", "high"), Ownership{})
+		if team != "Platform Engineering" || category != "container_image" {
+			t.Fatalf("route = %q %q", team, category)
+		}
+	})
+
+	t.Run("unknown ecosystem goes to triage", func(t *testing.T) {
+		team, category, triaged := policy.Route(finding("odd", "unknown:thing", "blob", "1", "CVE-4", "high"), Ownership{})
+		if !triaged || team != "" || category != "" {
+			t.Fatalf("route = %q %q triaged=%v (must not default to a team)", team, category, triaged)
+		}
+	})
+
+	t.Run("organisations can override the mapping", func(t *testing.T) {
+		custom := DefaultPolicy()
+		custom.Teams = map[string]string{"os_package": "Linux Ops"}
+		if team, _, _ := custom.Route(finding("web01", "Debian:12", "openssl", "3", "CVE-1", "high"), Ownership{}); team != "Linux Ops" {
+			t.Fatalf("override ignored: %q", team)
+		}
+	})
+}
+
+// TestDueAtFromPolicy covers the SLA rules: severity windows, KEV acceleration and
+// internet exposure, all configurable, and no deadline invented when none is set.
+func TestDueAtFromPolicy(t *testing.T) {
+	now := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	policy := DefaultPolicy()
+
+	cases := []struct {
+		name  string
+		f     model.Finding
+		own   Ownership
+		days  int
+		sevIn string
+	}{
+		{"critical", finding("a", "Ubuntu:24.04", "p", "1", "CVE-1", "critical"), Ownership{}, 7, "critical"},
+		{"high", finding("a", "Ubuntu:24.04", "p", "1", "CVE-1", "high"), Ownership{}, 30, "high"},
+		{"medium", finding("a", "Ubuntu:24.04", "p", "1", "CVE-1", "medium"), Ownership{}, 60, "medium"},
+		{"low", finding("a", "Ubuntu:24.04", "p", "1", "CVE-1", "low"), Ownership{}, 90, "low"},
+		{"kev accelerates to critical", model.Finding{Asset: "a", VulnerabilityID: "CVE-1", Severity: "medium", CISAKEV: true}, Ownership{}, 7, "critical"},
+		{"internet exposure raises one step", finding("a", "Ubuntu:24.04", "p", "1", "CVE-1", "medium"), Ownership{Exposure: "internet"}, 30, "high"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			due, sev := policy.DueAt(now, tc.f, tc.own)
+			if due == nil {
+				t.Fatalf("no deadline computed for %s", tc.sevIn)
+			}
+			if sev != tc.sevIn {
+				t.Fatalf("effective severity = %q, want %q", sev, tc.sevIn)
+			}
+			want := now.AddDate(0, 0, tc.days)
+			if !due.Equal(want) {
+				t.Fatalf("due = %s, want %s", due, want)
+			}
+		})
+	}
+
+	t.Run("no window configured means no deadline", func(t *testing.T) {
+		custom := DefaultPolicy()
+		custom.Days = map[string]int{"critical": 0}
+		if due, _ := custom.DueAt(now, finding("a", "Ubuntu:24.04", "p", "1", "CVE-1", "critical"), Ownership{}); due != nil {
+			t.Fatalf("invented a deadline: %s", due)
+		}
+	})
+}
+
+// TestReconcileCreatesOwnedItems: a reconciled report produces one item per
+// actionable finding, routed and scheduled.
+func TestReconcileCreatesOwnedItems(t *testing.T) {
+	st, now := newStore(t)
+	if _, _, _, err := st.Reconcile(report("web01",
+		finding("web01", "Ubuntu:24.04", "openssl", "3.0.1", "CVE-1", "critical"),
+		finding("web01", "PyPI", "django", "4.2", "CVE-2", "medium"),
+	), DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	items, err := st.List(context.Background(), Filter{}, DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	byVuln := map[string]Item{}
+	for _, it := range items {
+		byVuln[it.VulnerabilityID] = it
+	}
+	os := byVuln["CVE-1"]
+	if os.Team != "Infrastructure" || os.State != StateAssigned || os.Priority != "P1" {
+		t.Fatalf("os item = %+v", os)
+	}
+	if os.DueAt == nil || !os.DueAt.Equal(now.AddDate(0, 0, 7)) {
+		t.Fatalf("critical due = %v", os.DueAt)
+	}
+	if byVuln["CVE-2"].Team != "Development" {
+		t.Fatalf("dependency item team = %q", byVuln["CVE-2"].Team)
+	}
+}
+
+// TestReconcileIsIdempotent: the same report twice creates nothing new; a later
+// report updates the existing item rather than duplicating it.
+func TestReconcileIsIdempotent(t *testing.T) {
+	st, _ := newStore(t)
+	rep := report("web01", finding("web01", "Ubuntu:24.04", "openssl", "3.0.1", "CVE-1", "high"))
+
+	created, _, _, err := st.Reconcile(rep, DefaultPolicy())
+	if err != nil || created != 1 {
+		t.Fatalf("first reconcile created=%d err=%v", created, err)
+	}
+	created, updated, _, err := st.Reconcile(rep, DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created != 0 || updated != 1 {
+		t.Fatalf("second reconcile created=%d updated=%d, want 0/1", created, updated)
+	}
+	items, _ := st.List(context.Background(), Filter{}, DefaultPolicy())
+	if len(items) != 1 {
+		t.Fatalf("duplicate items: %d", len(items))
+	}
+}
+
+// TestReconcileSkipsNotAffectedAndUnidentified: evidence that is not actionable must
+// not become work.
+func TestReconcileSkipsNotAffectedAndUnidentified(t *testing.T) {
+	st, _ := newStore(t)
+	na := finding("web01", "Ubuntu:24.04", "openssl", "3", "CVE-1", "high")
+	na.Affected = model.ApplicabilityNotAffected
+	noID := finding("web01", "Ubuntu:24.04", "zlib", "1", "", "high")
+	if _, _, _, err := st.Reconcile(report("web01", na, noID), DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := st.List(context.Background(), Filter{}, DefaultPolicy())
+	if len(items) != 0 {
+		t.Fatalf("created %d items from non-actionable evidence", len(items))
+	}
+}
+
+// TestUnassignedGoesToTriageThenAdoptsOwnership: an unknown asset waits for a human,
+// and assigning an owner adopts the waiting items instead of leaving them stranded.
+func TestUnassignedGoesToTriageThenAdoptsOwnership(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	if _, _, _, err := st.Reconcile(report("mystery", finding("mystery", "AcmeOS:1", "pkg", "1", "CVE-9", "high")), DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := st.List(ctx, Filter{}, DefaultPolicy())
+	if len(items) != 1 || items[0].State != StateAwaitingOwnership || items[0].Team != "" {
+		t.Fatalf("unknown asset did not go to triage: %+v", items)
+	}
+	if _, err := st.SetOwnership(ctx, Ownership{Asset: "mystery", Team: "Linux Ops", Owner: "dana"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.Get(items[0].ID)
+	if got.Team != "Linux Ops" || got.State != StateAssigned || got.Owner != "dana" {
+		t.Fatalf("ownership not adopted: %+v", got)
+	}
+	// The triage queue is now empty.
+	triage, _ := st.ListOwnership(ctx, true)
+	if len(triage) != 0 {
+		t.Fatalf("triage queue still has %d assets", len(triage))
+	}
+}
+
+// TestWorkflowTransitions: legal moves are allowed, invented ones are refused, and
+// nothing can be hand-marked resolved.
+func TestWorkflowTransitions(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	if _, _, _, err := st.Reconcile(report("web01", finding("web01", "Ubuntu:24.04", "openssl", "3", "CVE-1", "high")), DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := st.List(ctx, Filter{}, DefaultPolicy())
+	id := items[0].ID
+
+	next := StateInProgress
+	if _, err := st.Update(ctx, id, Patch{State: &next}); err != nil {
+		t.Fatalf("assigned -> in_progress: %v", err)
+	}
+	applied := StateApplied
+	if _, err := st.Update(ctx, id, Patch{State: &applied}); err != nil {
+		t.Fatalf("in_progress -> applied: %v", err)
+	}
+	// Skipping verification is rejected.
+	resolved := StateResolved
+	if _, err := st.Update(ctx, id, Patch{State: &resolved}); err == nil {
+		t.Fatal("hand-resolving must be refused")
+	}
+	// An impossible edge is rejected.
+	detected := StateDetected
+	if _, err := st.Update(ctx, id, Patch{State: &detected}); err == nil {
+		t.Fatal("applied -> detected must be refused")
+	}
+	// Verification is the only route to resolved.
+	item, err := st.MarkVerified(ctx, id, "SCAN-2")
+	if err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	if item.State != StateResolved {
+		t.Fatalf("state = %s", item.State)
+	}
+	if _, err := st.MarkVerified(ctx, id, "SCAN-3"); err == nil {
+		t.Fatal("resolving an already resolved item must be refused")
+	}
+}
+
+// TestReappearanceReopensAResolvedItem: a closed item is reopened by evidence, not
+// left silently resolved.
+func TestReappearanceReopensAResolvedItem(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	rep := report("web01", finding("web01", "Ubuntu:24.04", "openssl", "3", "CVE-1", "high"))
+	if _, _, _, err := st.Reconcile(rep, DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := st.List(ctx, Filter{}, DefaultPolicy())
+	// The legal path to "applied" goes through in_progress; the workflow is the
+	// contract, so the test walks it rather than skipping a state.
+	progress, applied, pending := StateInProgress, StateApplied, StatePendingVerification
+	if _, err := st.Update(ctx, items[0].ID, Patch{State: &progress}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Update(ctx, items[0].ID, Patch{State: &applied}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Update(ctx, items[0].ID, Patch{State: &pending}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MarkVerified(ctx, items[0].ID, "SCAN-2"); err != nil {
+		t.Fatal(err)
+	}
+	// Same finding shows up again in a later report.
+	later := report("web01", finding("web01", "Ubuntu:24.04", "openssl", "3", "CVE-1", "high"))
+	later.ReportID = "SCAN-3"
+	_, _, reopened, err := st.Reconcile(later, DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened != 1 {
+		t.Fatalf("reopened = %d, want 1", reopened)
+	}
+	got, _ := st.Get(items[0].ID)
+	if got.State != StateDetected {
+		t.Fatalf("state = %s, want detected", got.State)
+	}
+	if !strings.Contains(got.Notes, "reopened") {
+		t.Fatalf("reopen is not recorded: %q", got.Notes)
+	}
+}
+
+// TestFalsePositiveStaysClosed: an analyst verdict must not be undone by a rescan.
+func TestFalsePositiveStaysClosed(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	rep := report("web01", finding("web01", "Ubuntu:24.04", "openssl", "3", "CVE-1", "high"))
+	if _, _, _, err := st.Reconcile(rep, DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := st.List(ctx, Filter{}, DefaultPolicy())
+	fp := StateFalsePositive
+	if _, err := st.Update(ctx, items[0].ID, Patch{State: &fp}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, reopened, err := st.Reconcile(rep, DefaultPolicy()); err != nil || reopened != 0 {
+		t.Fatalf("reopened=%d err=%v", reopened, err)
+	}
+	if got, _ := st.Get(items[0].ID); got.State != StateFalsePositive {
+		t.Fatalf("state = %s, want false_positive", got.State)
+	}
+}
+
+// TestSummaryAndOverdue feeds the dashboard numbers from SQL.
+func TestSummaryAndOverdue(t *testing.T) {
+	st, now := newStore(t)
+	ctx := context.Background()
+	if _, _, _, err := st.Reconcile(report("web01",
+		finding("web01", "Ubuntu:24.04", "openssl", "3", "CVE-1", "critical"),
+		finding("web01", "PyPI", "django", "4", "CVE-2", "low"),
+	), DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := st.Reconcile(report("mystery", finding("mystery", "Acme:1", "x", "1", "CVE-3", "high")), DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := st.Summary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 3 || sum.Open != 3 || sum.Unassigned != 1 {
+		t.Fatalf("summary = %+v", sum)
+	}
+	if sum.ByTeam["Infrastructure"] != 1 || sum.ByTeam["Development"] != 1 || sum.ByTeam["(unassigned)"] != 1 {
+		t.Fatalf("by team = %+v", sum.ByTeam)
+	}
+	if sum.ByPriority["P1"] != 1 {
+		t.Fatalf("by priority = %+v", sum.ByPriority)
+	}
+	// Move the clock past the critical window: the item is overdue, the others are not.
+	*now = now.AddDate(0, 0, 8)
+	overdue, err := st.List(ctx, Filter{Overdue: true}, DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overdue) != 1 || overdue[0].VulnerabilityID != "CVE-1" {
+		t.Fatalf("overdue = %+v", overdue)
+	}
+	sum, _ = st.Summary(ctx)
+	if sum.Overdue != 1 {
+		t.Fatalf("summary overdue = %d", sum.Overdue)
+	}
+}
+
+// TestPolicyFromSettings: SLA windows and team overrides come from configuration,
+// and malformed configuration falls back to the documented defaults.
+func TestPolicyFromSettings(t *testing.T) {
+	policy := PolicyFromSettings(map[string]string{
+		"remediation.policy": `{"days":{"critical":1,"high":2,"medium":3,"low":4},"teams":{"os_package":"Linux Ops"}}`,
+	})
+	if policy.days()["critical"] != 1 || policy.teams()["os_package"] != "Linux Ops" {
+		t.Fatalf("policy = %+v", policy)
+	}
+	if PolicyFromSettings(map[string]string{"remediation.policy": "{not json"}).Days["critical"] != 7 {
+		t.Fatal("malformed policy must fall back to defaults")
+	}
+}
+
+// TestOwnershipValidation rejects an ownership record with no asset.
+func TestOwnershipValidation(t *testing.T) {
+	st, _ := newStore(t)
+	if _, err := st.SetOwnership(context.Background(), Ownership{Team: "x"}); err == nil {
+		t.Fatal("ownership without an asset must be refused")
+	}
+}

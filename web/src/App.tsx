@@ -11,6 +11,7 @@ import NewScan from "./pages/NewScan";
 import Reports from "./pages/Reports";
 import ReportView from "./pages/ReportView";
 import Settings from "./pages/Settings";
+import Remediation from "./pages/Remediation";
 
 function Routes() {
   const pathname = usePathname();
@@ -22,6 +23,7 @@ function Routes() {
   if (pathname === "/vulnerabilities") return <Vulnerabilities />;
   if (pathname === "/scans") return <Scans />;
   if (pathname === "/scans/new") return <NewScan />;
+  if (pathname === "/remediation") return <Remediation />;
   if (pathname === "/reports") return <Reports />;
   const report = matchRoute("/reports/:id", pathname);
   if (report) return <ReportView id={report.id} />;

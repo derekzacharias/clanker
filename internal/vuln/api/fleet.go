@@ -278,6 +278,9 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	if err := s.fleet.MarkReport(r.Context(), ag.ID, rep.ReportID, len(rep.Findings)); err != nil {
 		s.log.Warn("record agent report", "agent", ag.ID, "err", err)
 	}
+	// Route the findings into remediation work in the same request that stores them,
+	// so the work queue is never behind the history.
+	s.reconcileReport(rep)
 	s.log.Info("agent report ingested", "agent", ag.ID, "host", ag.Host, "report", rep.ReportID, "findings", len(rep.Findings))
 	// 200 even for a retry: SaveRun upserts by report id, so a network retry is
 	// idempotent and must not look like a failure to the agent.

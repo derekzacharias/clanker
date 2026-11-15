@@ -23,6 +23,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
+	"github.com/bgdnvk/clanker/internal/vuln/remediate"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
 )
 
@@ -80,6 +81,8 @@ type Server struct {
 	presence *presence
 	// trustedProxies are the peers whose X-Forwarded-For header is believed.
 	trustedProxies []*net.IPNet
+	// remediate owns asset ownership and remediation work items.
+	remediate *remediate.Store
 }
 
 // New opens the store and returns a ready server.
@@ -146,6 +149,15 @@ func New(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("initialise fleet registry: %w", err)
 	}
 	s.fleet = fleetStore
+	// Ownership and remediation work live in the same SQLite file as history, so a
+	// report, the items derived from it and the ownership they route on commit
+	// against one writer.
+	remStore, err := remediate.New(store.DB())
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("initialise remediation store: %w", err)
+	}
+	s.remediate = remStore
 	if s.auth != nil {
 		if mode, insecure := s.auth.InsecurePerms(); insecure {
 			s.log.Warn("credential file is readable by other accounts; run: chmod 600",
@@ -153,6 +165,9 @@ func New(opts Options) (*Server, error) {
 		}
 	}
 	s.routes()
+	// Existing deployments already hold assessments: route them into remediation work
+	// once, so the queue is not empty until the next scan. Idempotent by item id.
+	s.backfillRemediation()
 	return s, nil
 }
 
@@ -207,6 +222,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/reports/{id}", s.handleReport)
 	s.mux.HandleFunc("GET /api/reports/{id}/export", s.handleReportExport)
 	s.mux.HandleFunc("GET /api/software/export", s.handleSoftwareExport)
+
+	// Remediation orchestration: ownership, work items, SLA policy.
+	s.mux.HandleFunc("GET /api/ownership", s.handleOwnershipList)
+	s.mux.HandleFunc("GET /api/ownership/{host}", s.handleOwnershipGet)
+	s.mux.HandleFunc("PUT /api/ownership/{host}", s.handleOwnershipPut)
+	s.mux.HandleFunc("GET /api/remediation", s.handleRemediationList)
+	s.mux.HandleFunc("GET /api/remediation/summary", s.handleRemediationSummary)
+	s.mux.HandleFunc("GET /api/remediation/policy", s.handleRemediationPolicy)
+	s.mux.HandleFunc("PUT /api/remediation/policy", s.handleRemediationPolicy)
+	s.mux.HandleFunc("GET /api/remediation/{id}", s.handleRemediationGet)
+	s.mux.HandleFunc("PATCH /api/remediation/{id}", s.handleRemediationPatch)
+	s.mux.HandleFunc("POST /api/remediation/{id}/verify", s.handleRemediationVerify)
 
 	s.mux.HandleFunc("GET /api/feeds", s.handleFeeds)
 	s.mux.HandleFunc("POST /api/feeds/update", s.handleFeedUpdate)

@@ -649,6 +649,8 @@ func (s *Server) runScanJob(ctx context.Context, id string, cancel context.Cance
 		return
 	}
 	_ = s.store.FinishJob(ctx, id, intel.JobDone, res.Report.ReportID, "")
+	// A local assessment becomes remediation work exactly like a remote report.
+	s.reconcileReport(res.Report)
 	s.log.Info("scan job finished", "id", id, "report", res.Report.ReportID,
 		"mode", res.Report.Metadata.Mode, "findings", len(res.Report.Findings), "incomplete", res.Incomplete)
 }

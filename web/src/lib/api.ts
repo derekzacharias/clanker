@@ -771,6 +771,18 @@ export const api = {
   feeds: () => request<FeedResponse>("/api/feeds"),
   updateFeeds: () => request<Job>("/api/feeds/update", { method: "POST" }),
   agents: () => request<AgentsResponse>("/api/agents"),
+  // Remediation orchestration
+  remediationSummary: () => request<RemediationSummary>("/api/remediation/summary"),
+  remediation: (params: { team?: string; state?: string; owner?: string; asset?: string; overdue?: boolean } = {}) =>
+    request<{ items: RemediationItem[]; total: number }>(`/api/remediation${qs(params)}`),
+  ownership: (asset: string) => request<Ownership>(`/api/ownership/${encodeURIComponent(asset)}`),
+  saveOwnership: (asset: string, body: Partial<Ownership>) =>
+    request<Ownership>(`/api/ownership/${encodeURIComponent(asset)}`, { method: "PUT", body: JSON.stringify(body) }),
+  updateRemediation: (id: string, body: { team?: string; owner?: string; state?: RemediationState; notes?: string }) =>
+    request<{ item: RemediationItem }>(`/api/remediation/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   agentEvents: (id: string) =>
     request<{ agent: EnrolledAgent; events: { at: string; state: string; phase: string; percent: number; message: string }[] }>(
       `/api/agents/${encodeURIComponent(id)}/events`,
@@ -829,3 +841,80 @@ export const api = {
   ask: (question: string, host?: string) =>
     request<AskResponse>("/api/ask", { method: "POST", body: JSON.stringify({ question, host }) }),
 };
+
+// --- remediation orchestration (ownership → routing → work items) -----------
+
+export type RemediationState =
+  | "detected"
+  | "validated"
+  | "awaiting_ownership"
+  | "assigned"
+  | "awaiting_approval"
+  | "scheduled"
+  | "in_progress"
+  | "remediation_applied"
+  | "pending_verification"
+  | "resolved"
+  | "failed"
+  | "risk_accepted"
+  | "false_positive";
+
+export interface Ownership {
+  asset: string;
+  team?: string;
+  owner?: string;
+  service?: string;
+  environment?: string;
+  criticality?: string;
+  exposure?: string;
+  contact?: string;
+  mechanism?: string;
+  maintenance_window?: string;
+  source?: string;
+  status: "owned" | "triage";
+  updated_at: string;
+}
+
+export interface RemediationItem {
+  id: string;
+  asset: string;
+  finding_key: string;
+  vulnerability_id: string;
+  product: string;
+  installed_version: string;
+  ecosystem: string;
+  severity: string;
+  category: string;
+  team?: string;
+  owner?: string;
+  state: RemediationState;
+  priority: string;
+  due_at?: string;
+  fixed_version?: string;
+  remediation?: string;
+  evidence: string;
+  report_id: string;
+  notes?: string;
+  first_seen: string;
+  last_seen: string;
+  updated_at: string;
+  overdue: boolean;
+}
+
+export interface RemediationSummary {
+  summary: {
+    total: number;
+    open: number;
+    unassigned: number;
+    overdue: number;
+    triage_assets: number;
+    resolved: number;
+    by_state: Record<string, number>;
+    by_team: Record<string, number>;
+    by_priority: Record<string, number>;
+    automation_eligible: number;
+  };
+  teams: string[];
+  generated: string;
+  automation: { enabled: boolean; reason: string };
+}
