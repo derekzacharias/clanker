@@ -264,6 +264,7 @@ function AgentsTab() {
           description="The command enrolls the endpoint here, scans it once, reports the findings and installs a background service so it stays reachable. Installers verify a published SHA-256 first."
           actions={
             <Button
+              variant="primary"
               size="sm"
               disabled={minting}
               onClick={async () => {
