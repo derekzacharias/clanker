@@ -603,8 +603,13 @@ func TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured(t *testing.T) {
 	if !inst.RequiresEnrollToken || inst.MintEndpoint == "" {
 		t.Fatalf("install block should point at the mint endpoint: %+v", inst)
 	}
-	if inst.Commands["linux"] != "" {
-		t.Fatalf("no token minted yet, but a command was rendered: %q", inst.Commands["linux"])
+	// No token yet: the command is still rendered, with a visible placeholder, so an
+	// operator sees what they will paste before minting anything.
+	if !strings.Contains(inst.Commands["linux"], "<enroll-token>") {
+		t.Fatalf("command template is missing the token placeholder: %q", inst.Commands["linux"])
+	}
+	if strings.Contains(inst.Commands["linux"], "MINTED") {
+		t.Fatalf("template must not carry a real token: %q", inst.Commands["linux"])
 	}
 	minted := request(t, srv.Handler(), "POST", inst.MintEndpoint, "", nil)
 	if minted.Code != 200 {

@@ -1063,6 +1063,14 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		install["requires_enroll_token"] = true
 		install["mint_endpoint"] = "/api/agents/enroll-token"
 		install["keeps_available"] = true
+		// Always show the command, with the token as a placeholder: an operator who
+		// has not minted one yet still needs to see what they will paste.
+		install["commands"] = s.enrollCommandTemplate(r)
+		oneoff := s.enrollCommandTemplate(r)
+		oneoff["linux"] += " --no-service"
+		oneoff["macos"] += " --no-service"
+		oneoff["windows"] += " -NoService"
+		install["oneoff_commands"] = oneoff
 	} else {
 		// Never show a fake release URL: tell the user exactly how to publish.
 		install["build_steps"] = []string{

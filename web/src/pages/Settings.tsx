@@ -234,7 +234,9 @@ function AgentsTab() {
   const [minted, setMinted] = useState<{ token: string; expires: string; commands: Record<string, string>; oneoff: Record<string, string> } | null>(null);
   const [minting, setMinting] = useState(false);
   const wantWatch = keepAvailable && Boolean(data?.install.keeps_available);
-  const commands = minted ? (wantWatch ? minted.commands : minted.oneoff) : undefined;
+  // The template (with an <enroll-token> placeholder) is always available; minting a
+  // token replaces the placeholder with a real one.
+  const commands = minted ? (wantWatch ? minted.commands : minted.oneoff) : wantWatch ? data?.install.commands : data?.install.oneoff_commands ?? data?.install.commands;
   if (loading && !data) return <LoadingBlock label="Loading agent status" />;
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
   if (!data) return null;
@@ -277,18 +279,18 @@ function AgentsTab() {
                   }
                 />
               ) : null}
-              {commands ? (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <InstallCommand title="Linux" command={commands?.linux ?? ""} />
-                  <InstallCommand title="macOS" command={commands?.macos ?? ""} />
-                  <InstallCommand title="Windows (PowerShell)" command={commands?.windows ?? ""} />
-                </div>
-              ) : (
-                <Banner tone="info" title="Create a token to get the install command">
-                  Enrollment tokens are single use and expire after 24 hours, so the command is generated when you
-                  create one. Choose <span className="font-medium">New enrollment token</span> above, paste the command
-                  on the endpoint, and create a fresh token for the next endpoint.
-                </Banner>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <InstallCommand title="Linux" command={commands?.linux ?? ""} />
+                <InstallCommand title="macOS" command={commands?.macos ?? ""} />
+                <InstallCommand title="Windows (PowerShell)" command={commands?.windows ?? ""} />
+              </div>
+              {minted ? null : (
+                <p className="text-xs text-muted">
+                  The command above shows <span className="mono">&lt;enroll-token&gt;</span> until you create a token:
+                  enrollment tokens are single use and expire after 24 hours. Choose{" "}
+                  <span className="font-medium">New enrollment token</span> and the placeholder is replaced with a
+                  working token here.
+                </p>
               )}
               {wantWatch ? (
                 <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-muted">

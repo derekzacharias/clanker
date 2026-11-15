@@ -576,6 +576,12 @@ func (s *Server) handleAgentCancelScan(w http.ResponseWriter, r *http.Request) {
 // enrollCommands renders the copy-and-paste installers for this server and token.
 // extra is appended to the shell command and translated for PowerShell, so the
 // one-off variant (--no-service) stays in sync with the default.
+// enrollCommandTemplate renders the installers with a visible placeholder instead
+// of a token, so the dashboard can show the command before one is minted.
+func (s *Server) enrollCommandTemplate(r *http.Request) map[string]string {
+	return s.enrollCommands(r, "<enroll-token>")
+}
+
 func (s *Server) enrollCommands(r *http.Request, enrollToken string, extra ...string) map[string]string {
 	base := strings.TrimRight(s.opts.ReleaseBase, "/")
 	version := s.opts.ToolVersion

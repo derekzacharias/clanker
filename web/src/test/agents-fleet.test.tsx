@@ -22,15 +22,15 @@ function agentsFixture() {
       keeps_available: true,
       requires_enroll_token: true,
       mint_endpoint: "/api/agents/enroll-token",
+      commands: {
+        linux: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token <enroll-token>`,
+        macos: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token <enroll-token>`,
+        windows: "iwr ... -EnrollToken <enroll-token>",
+      },
       oneoff_commands: {
         linux: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token ENROLL-SECRET --no-service`,
         macos: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token ENROLL-SECRET --no-service`,
         windows: "iwr ... -NoService",
-      },
-      commands: {
-        linux: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token ENROLL-SECRET`,
-        macos: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token ENROLL-SECRET`,
-        windows: "iwr ... -Version 0.1.1 -Server ... -EnrollToken ...",
       },
     },
     fleet: {
@@ -174,8 +174,9 @@ describe("enrolled endpoint fleet", () => {
     render(<Settings />);
     await screen.findByRole("table", { name: /Enrolled endpoints/i });
 
-    // Tokens are single use, so the command appears only after minting one.
-    expect(screen.queryByText(/install-agent\.sh \| bash -s/)).not.toBeInTheDocument();
+    // The command is visible before minting, with a placeholder token.
+    expect(screen.getAllByText(/install-agent\.sh \| bash -s/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/<enroll-token>/).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: /New enrollment token/i }));
 
     // Linux and macOS share the same shell one-liner, so both cards match.
