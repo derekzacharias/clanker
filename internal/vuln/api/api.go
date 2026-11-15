@@ -227,6 +227,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/ownership", s.handleOwnershipList)
 	s.mux.HandleFunc("GET /api/ownership/{host}", s.handleOwnershipGet)
 	s.mux.HandleFunc("PUT /api/ownership/{host}", s.handleOwnershipPut)
+	s.mux.HandleFunc("POST /api/ownership/bulk", s.handleOwnershipBulk)
 	s.mux.HandleFunc("GET /api/remediation", s.handleRemediationList)
 	s.mux.HandleFunc("GET /api/remediation/summary", s.handleRemediationSummary)
 	s.mux.HandleFunc("GET /api/remediation/policy", s.handleRemediationPolicy)

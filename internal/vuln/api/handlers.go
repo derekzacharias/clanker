@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
+	"github.com/bgdnvk/clanker/internal/vuln/remediate"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
 	"github.com/bgdnvk/clanker/internal/vuln/sbom"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
@@ -524,6 +526,17 @@ func (s *Server) handleVulnerabilityDetail(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		writeError(w, http.StatusNotFound, "finding_not_found", "no finding with that identifier in the stored assessments")
 		return
+	}
+	// Ownership and the deadline live on the work item, not on the finding: findings are
+	// evidence and never change, while who owes the fix and when can.
+	if s.remediate != nil {
+		item, err := s.remediate.FindForFinding(r.Context(), v.Asset, v.CVE, v.Product, v.InstalledVersion)
+		switch {
+		case err == nil:
+			v.WorkItem = &remediationView{Item: *item, Overdue: item.Overdue(s.opts.Now())}
+		case !errors.Is(err, remediate.ErrNotFound):
+			s.log.Warn("look up remediation item for finding", "finding", id, "err", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, v)
 }

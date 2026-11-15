@@ -167,14 +167,18 @@ func DefaultPolicy() Policy {
 
 // DefaultTeams is the responsibility model from the requirements, used when the
 // organisation has not overridden a category.
+//
+// Every key here must be producible by Category: a mapping no finding can ever reach is
+// configuration that reads as if it were in force while doing nothing. Two keys from the
+// original requirements were dropped for exactly that reason — "app_source" (source
+// scanning is not part of this build) and "policy_exception" (an accepted risk is a
+// state, not a classification). TestDefaultTeamsAreAllReachable enforces this.
 var DefaultTeams = map[string]string{
-	"os_package":       "Infrastructure",
-	"app_dependency":   "Development",
-	"app_source":       "Development",
-	"container_image":  "Platform Engineering",
-	"infrastructure":   "DevOps",
-	"cloud_config":     "Cloud Engineering",
-	"policy_exception": "Security",
+	"os_package":      "Infrastructure",
+	"app_dependency":  "Development",
+	"container_image": "Platform Engineering",
+	"cloud_config":    "Cloud Engineering",
+	"infrastructure":  "DevOps",
 }
 
 func (p Policy) teams() map[string]string {
@@ -266,6 +270,20 @@ func Category(f model.Finding) string {
 	switch {
 	case strings.HasPrefix(eco, "container"), strings.Contains(eco, "image"):
 		return "container_image"
+	case strings.Contains(eco, "terraform"), strings.Contains(eco, "cloudformation"),
+		strings.Contains(eco, "helm"), strings.Contains(eco, "kubernetes"), strings.Contains(eco, "k8s"),
+		strings.Contains(eco, "ansible"), strings.Contains(eco, "pulumi"), strings.Contains(eco, "iac"),
+		strings.Contains(eco, "aws"), strings.Contains(eco, "azure"), strings.Contains(eco, "gcp"),
+		strings.Contains(eco, "cloud"):
+		// Configuration of infrastructure-as-code platforms, where a fix is a plan and
+		// an apply rather than a package upgrade in the owning team's release cycle.
+		return "cloud_config"
+	case strings.Contains(eco, "firmware"), strings.Contains(eco, "bios"), strings.Contains(eco, "uefi"),
+		strings.Contains(eco, "kernel"), strings.Contains(eco, "hypervisor"), strings.Contains(eco, "esxi"),
+		strings.Contains(eco, "hardware"):
+		// Below the OS package layer: firmware and hypervisor patches need a maintenance
+		// window and a restart, which is a different process from a package upgrade.
+		return "infrastructure"
 	case strings.Contains(eco, "npm"), strings.Contains(eco, "pypi"), strings.Contains(eco, "pip"),
 		strings.Contains(eco, "rubygems"), strings.Contains(eco, "gem"), strings.Contains(eco, "maven"),
 		strings.Contains(eco, "go"), strings.Contains(eco, "cargo"), strings.Contains(eco, "nuget"),

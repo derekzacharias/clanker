@@ -141,10 +141,15 @@ type vulnRow struct {
 	LastSeen         string        `json:"last_seen"`
 	Explanation      string        `json:"explanation,omitempty"`
 	Evidence         []evidenceRow `json:"evidence,omitempty"`
-	Raise            []string      `json:"confidence_increase,omitempty"`
-	Lower            []string      `json:"confidence_reduction,omitempty"`
-	RiskFactors      []riskRow     `json:"risk_factors,omitempty"`
-	References       []linkRow     `json:"references,omitempty"`
+	// WorkItem is the remediation work derived from this finding, when one exists.
+	// Attached by the detail handler only: the list endpoints stay about findings, and
+	// ownership is one lookup rather than a join across every row. (The field next to it,
+	// Remediation, is the advisory's advice text — a different thing.)
+	WorkItem    *remediationView `json:"remediation_item,omitempty"`
+	Raise       []string         `json:"confidence_increase,omitempty"`
+	Lower       []string         `json:"confidence_reduction,omitempty"`
+	RiskFactors []riskRow        `json:"risk_factors,omitempty"`
+	References  []linkRow        `json:"references,omitempty"`
 	// Analyst is the evidence-backed correction applied by a review, when one
 	// exists. The scanner verdict stays in Affected.
 	Analyst *analystView `json:"analyst,omitempty"`

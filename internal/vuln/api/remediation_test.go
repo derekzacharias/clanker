@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -228,4 +229,126 @@ func minimalReportWith(host, reportID, ecosystem, product, vuln, severity string
 		panic(err)
 	}
 	return payload
+}
+
+// Triage exists because routing must not guess. That makes bulk assignment the action
+// that clears it, so it has to be one request, refuse to run without a team, and report
+// every asset it could not store instead of dropping it.
+func TestBulkOwnershipClearsTriageAndReportsFailures(t *testing.T) {
+	srv := fleetServer(t)
+	// Three assets with an ecosystem nothing can classify: all land in triage.
+	postReport(t, srv, "odd01", "AcmeOS:1", "blob", "CVE-2026-9101", "high", "SCAN-B-1")
+	postReport(t, srv, "odd02", "AcmeOS:1", "blob", "CVE-2026-9102", "medium", "SCAN-B-2")
+
+	var before struct {
+		Items []struct {
+			Asset   string `json:"asset"`
+			Triaged bool   `json:"triaged"`
+			Open    int    `json:"open"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/ownership?triage=true", &before)
+	if len(before.Items) != 2 {
+		t.Fatalf("triage queue = %+v, want 2 assets", before.Items)
+	}
+
+	// No team means "still nobody's": it must not quietly create ownerless records.
+	rec := request(t, srv.Handler(), "POST", "/api/ownership/bulk", `{"assets":["odd01"],"team":"  "}`, dash())
+	if rec.Code != 400 {
+		t.Fatalf("bulk without a team = %d, want 400", rec.Code)
+	}
+
+	body := `{"assets":["odd01","odd02","odd02"],"team":"Development","owner":"dana","exposure":"internet"}`
+	rec = request(t, srv.Handler(), "POST", "/api/ownership/bulk", body, dash())
+	if rec.Code != 200 {
+		t.Fatalf("bulk = %d: %s", rec.Code, rec.Body.String())
+	}
+	var bulk struct {
+		Updated []string `json:"updated"`
+		Total   int      `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bulk); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The duplicate asset is assigned once, not twice.
+	if bulk.Total != 2 || len(bulk.Updated) != 2 {
+		t.Fatalf("bulk result = %+v, want 2 unique assets assigned", bulk)
+	}
+
+	// The decision propagates: items adopt the owner's team and the queue empties.
+	var list struct {
+		Items []struct {
+			Team  string `json:"team"`
+			State string `json:"state"`
+			Owner string `json:"owner"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation?asset=odd01", &list)
+	if len(list.Items) != 1 || list.Items[0].Team != "Development" || list.Items[0].Owner != "dana" {
+		t.Fatalf("item after bulk = %+v", list.Items)
+	}
+	if list.Items[0].State != "assigned" {
+		t.Fatalf("state = %q, want assigned once a team exists", list.Items[0].State)
+	}
+	var after struct {
+		Total int `json:"total"`
+	}
+	dashGet(t, srv.Handler(), "/api/ownership?triage=true", &after)
+	if after.Total != 0 {
+		t.Fatalf("triage queue after bulk = %d, want 0", after.Total)
+	}
+}
+
+// The finding detail has to answer "who owes this and by when" without the client
+// recomputing routing, and it must say nothing rather than guess when no item exists.
+func TestFindingDetailCarriesItsRemediationState(t *testing.T) {
+	srv := fleetServer(t)
+	if rec := request(t, srv.Handler(), "PUT", "/api/ownership/pay02",
+		`{"team":"Payments","owner":"dana","exposure":"internet"}`, dash()); rec.Code != 200 {
+		t.Fatalf("ownership put = %d", rec.Code)
+	}
+	postReport(t, srv, "pay02", "Ubuntu:24.04", "openssl", "CVE-2026-9201", "medium", "SCAN-D-1")
+
+	var list struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/vulnerabilities?limit=50", &list)
+	if len(list.Items) == 0 {
+		t.Fatal("no findings listed")
+	}
+	var findingID string
+	for _, it := range list.Items {
+		findingID = it.ID
+	}
+
+	var detail struct {
+		ID       string `json:"id"`
+		WorkItem *struct {
+			ID       string `json:"id"`
+			Team     string `json:"team"`
+			Owner    string `json:"owner"`
+			Severity string `json:"severity"`
+			DueAt    string `json:"due_at"`
+			Overdue  bool   `json:"overdue"`
+		} `json:"remediation_item"`
+	}
+	dashGet(t, srv.Handler(), "/api/vulnerabilities/"+findingID, &detail)
+	if detail.WorkItem == nil {
+		t.Fatal("finding detail has no remediation item, so the flyout cannot show an owner")
+	}
+	if detail.WorkItem.Team != "Payments" || detail.WorkItem.Owner != "dana" {
+		t.Fatalf("work item = %+v", detail.WorkItem)
+	}
+	// Internet exposure raises medium to high: 30-day window, and a real deadline.
+	if detail.WorkItem.Severity != "high" {
+		t.Fatalf("effective severity = %q, want high", detail.WorkItem.Severity)
+	}
+	if detail.WorkItem.DueAt == "" {
+		t.Fatal("work item has no due date")
+	}
+	if detail.WorkItem.Overdue {
+		t.Fatal("a freshly created item cannot be overdue")
+	}
 }

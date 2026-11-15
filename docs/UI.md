@@ -86,6 +86,8 @@ column with words.
 | **New scan** | How do I run an assessment? | three steps and four types: **Local System**, Network (scope + authorisation), Software/Container, and **Endpoint Scan** (dispatches to an enrolled agent at once when it is online; a request for an unreachable endpoint stays queued and is shown as such) |
 | **Scans** | What ran, what is running, what failed? | live stage + percent from the server, cancel, report links, history |
 | **Reports** | What did the assessment conclude? | stored reports, JSON/Markdown/SARIF/HTML export, evidence preserved; **software inventory** export (CSV asset list + CycloneDX SBOM) per host, and one environment-wide CSV across every assessed host |
+| **Remediation** | Who owes what, and by when? | work items derived from findings: team, owner, state, SLA due date, overdue flag; filter by team/state/overdue; **My work** scopes the queue to the signed-in operator and each row can be claimed; automated execution is reported as unavailable rather than offered |
+| **Ownership** | Who is responsible for each machine? | inventory of assets with their work counts, recorded team/engineer, exposure; single-row edit and multi-select bulk assignment; assets routed by the category mapping but with no record say so explicitly ("work maps to X") because routing is not accountability |
 | **Settings** | Policy, intelligence, agents, access | tabs; feed freshness + update; agent install commands only when artifacts are published |
 | **Sign in** (`/login`) | Who are you, and how do I stay signed in? | username + password form when a dashboard password exists; falls back to the token form on token-only servers; states the session length; one error line, no user/password distinction |
 
@@ -116,6 +118,13 @@ GET    /api/reports/{id}/export      json | markdown | sarif | html download
 GET    /api/feeds                    feed freshness + cache counts
 POST   /api/feeds/update             refresh KEV + EPSS as a job
 GET    /api/agents                   local agent, endpoints, install commands/build steps
+GET    /api/ownership                asset inventory: record + work counts + routed teams
+GET    /api/ownership/{host} · PUT   one asset's ownership
+POST   /api/ownership/bulk           assign many assets to one team in a single request
+GET    /api/remediation              work items (team, state, owner, overdue filters)
+GET    /api/remediation/summary      counts + automation status (disabled, with reason)
+GET    /api/remediation/{id} · PATCH one item: team, engineer, workflow state
+POST   /api/remediation/{id}/verify  record a verification scan (the only path to resolved)
 GET    /api/settings  · PUT          policy, offline default, release base
 POST   /api/ask                      deterministic answer + citations + grounding
 ```
@@ -128,6 +137,13 @@ Design rules enforced by the API (and its tests):
   UI otherwise shows the real build/publish steps;
 * findings are addressed by a stable id derived from host + package + version +
   CVE, so links survive re-scans;
+* findings are evidence and never change; ownership, deadline and workflow live
+  on the work item derived from them, so the finding flyout shows "owner and
+  deadline" from `/api/vulnerabilities/{id}` → `remediation_item` rather than
+  re-deriving routing in the browser;
+* routing never guesses: an asset with no ownership record and a finding whose
+  ecosystem cannot be classified goes to triage, and only `POST
+  /api/remediation/{id}/verify` can set `resolved`;
 * scan progress percentages come from server stages, not a timer;
 * the server refuses to bind a non-loopback address without a credential (a
   password set with `clanker vuln auth set-password`, or `CLANKER_GUARD_TOKEN`),

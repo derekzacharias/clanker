@@ -84,12 +84,23 @@ export default function Remediation() {
   const [team, setTeam] = useState("");
   const [state, setState] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
+  const [mineOnly, setMineOnly] = useState(false);
   const { push } = useToast();
 
   const summary = useAsync(() => api.remediationSummary());
+  // "Mine" is scoped to the signed-in operator, which is what makes the queue
+  // claimable: an engineer can see only the work they took on.
+  const session = useAsync(() => api.session());
+  const me = session.data?.username ?? "";
   const items = useAsync(
-    () => api.remediation({ team: team || undefined, state: state || undefined, overdue: overdueOnly || undefined }),
-    [team, state, overdueOnly],
+    () =>
+      api.remediation({
+        team: team || undefined,
+        state: state || undefined,
+        overdue: overdueOnly || undefined,
+        owner: mineOnly && me ? me : undefined,
+      }),
+    [team, state, overdueOnly, mineOnly, me],
   );
 
   const teams = useMemo(() => {
@@ -97,6 +108,17 @@ export default function Remediation() {
     (summary.data?.teams ?? []).forEach((t) => known.add(t));
     return [...known].sort();
   }, [summary.data]);
+
+  async function claim(item: RemediationItem) {
+    if (!me) return;
+    try {
+      await api.updateRemediation(item.id, { owner: me });
+      push(`${item.vulnerability_id} assigned to you`);
+      items.reload();
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Could not assign this item to you");
+    }
+  }
 
   async function assign(item: RemediationItem, nextTeam: string) {
     try {
@@ -142,7 +164,7 @@ export default function Remediation() {
       <Card>
         <CardHeader
           title="Work queue"
-          description="Routed from asset ownership, then the responsibility mapping. Unknown assets wait for a human instead of defaulting to a team."
+          description="Routed from asset ownership, then the responsibility mapping. Unknown assets wait for a human instead of defaulting to a team — set them in Ownership."
         />
         <CardBody className="space-y-3">
           <div className="flex flex-wrap items-end gap-2">
@@ -171,6 +193,11 @@ export default function Remediation() {
             <Button variant={overdueOnly ? "primary" : "secondary"} onClick={() => setOverdueOnly((v) => !v)}>
               {overdueOnly ? "Overdue only" : "Show overdue"}
             </Button>
+            {me ? (
+              <Button variant={mineOnly ? "primary" : "secondary"} onClick={() => setMineOnly((v) => !v)}>
+                My work
+              </Button>
+            ) : null}
             <Button variant="ghost" onClick={() => { items.reload(); summary.reload(); }}>
               Refresh
             </Button>
@@ -224,7 +251,12 @@ export default function Remediation() {
                         <Badge className={severityTone(item.severity)}>{item.severity}</Badge>
                         <span className="ml-1 text-xs text-subtle">{item.priority}</span>
                       </Td>
-                      <Td className="text-xs">{item.team || <span className="text-high">unassigned</span>}</Td>
+                      <Td className="text-xs">
+                        {item.team || <span className="text-high">unassigned</span>}
+                        <span className="block text-subtle">
+                          {item.owner || (item.team ? "no engineer" : "set an owner in Ownership")}
+                        </span>
+                      </Td>
                       <Td>
                         <Badge className={stateTone(item.state)}>{STATE_LABEL[item.state] ?? item.state}</Badge>
                       </Td>
@@ -240,18 +272,25 @@ export default function Remediation() {
                         <span className="block text-subtle">seen {relativeTime(item.last_seen)}</span>
                       </Td>
                       <Td>
-                        <Select
-                          value={item.team ?? ""}
-                          onChange={(e) => assign(item, e.target.value)}
-                          aria-label={`Assign ${item.vulnerability_id} on ${item.asset}`}
-                        >
-                          <option value="">Unassigned</option>
-                          {teams.map((t) => (
-                            <option key={t} value={t}>
-                              {t}
-                            </option>
-                          ))}
-                        </Select>
+                        <div className="flex items-center gap-1">
+                          <Select
+                            value={item.team ?? ""}
+                            onChange={(e) => assign(item, e.target.value)}
+                            aria-label={`Assign ${item.vulnerability_id} on ${item.asset}`}
+                          >
+                            <option value="">Unassigned</option>
+                            {teams.map((t) => (
+                              <option key={t} value={t}>
+                                {t}
+                              </option>
+                            ))}
+                          </Select>
+                          {me && item.owner !== me ? (
+                            <Button size="sm" variant="ghost" onClick={() => claim(item)} title={`Assign ${item.id} to ${me}`}>
+                              Claim
+                            </Button>
+                          ) : null}
+                        </div>
                       </Td>
                     </Tr>
                   ))}

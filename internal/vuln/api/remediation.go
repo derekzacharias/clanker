@@ -97,15 +97,97 @@ func (s *Server) mustSettings() map[string]string {
 	return vals
 }
 
-// handleOwnershipList returns ownership records; ?triage=true is the unassigned queue.
+// handleOwnershipList returns the ownership inventory: each asset with its record (if
+// any) and how much work is waiting on it. ?triage=true keeps only assets that still
+// have unowned work, which is the queue that needs a human decision.
 func (s *Server) handleOwnershipList(w http.ResponseWriter, r *http.Request) {
 	triage := strings.EqualFold(r.URL.Query().Get("triage"), "true")
-	records, err := s.remediate.ListOwnership(r.Context(), triage)
+	rows, err := s.remediate.AssetOverview(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "ownership_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": records, "total": len(records)})
+	if triage {
+		kept := rows[:0]
+		for _, row := range rows {
+			if row.Triaged {
+				kept = append(kept, row)
+			}
+		}
+		rows = kept
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": rows, "total": len(rows)})
+}
+
+// handleOwnershipBulk records responsibility for many assets in one action.
+//
+// Assigning assets one at a time is what makes triage queues stay unowned, so this
+// exists to make the right action the easy one. It is deliberately bounded and
+// all-or-nothing per asset: a bad name is reported, never silently dropped.
+func (s *Server) handleOwnershipBulk(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Assets      []string `json:"assets"`
+		Team        string   `json:"team"`
+		Owner       string   `json:"owner"`
+		Exposure    string   `json:"exposure"`
+		Environment string   `json:"environment"`
+		Criticality string   `json:"criticality"`
+		Contact     string   `json:"contact"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is not valid JSON")
+		return
+	}
+	team := strings.TrimSpace(body.Team)
+	if team == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "a team is required: unowned work belongs in triage, not in a bulk assignment")
+		return
+	}
+	assets := make([]string, 0, len(body.Assets))
+	seen := map[string]bool{}
+	for _, raw := range body.Assets {
+		a := strings.TrimSpace(raw)
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		assets = append(assets, a)
+	}
+	if len(assets) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "no assets were given")
+		return
+	}
+	if len(assets) > 200 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "at most 200 assets can be assigned at once")
+		return
+	}
+
+	updated := make([]string, 0, len(assets))
+	failed := map[string]string{}
+	for _, asset := range assets {
+		_, err := s.remediate.SetOwnership(r.Context(), remediate.Ownership{
+			Asset:       asset,
+			Team:        team,
+			Owner:       strings.TrimSpace(body.Owner),
+			Exposure:    strings.TrimSpace(body.Exposure),
+			Environment: strings.TrimSpace(body.Environment),
+			Criticality: strings.TrimSpace(body.Criticality),
+			Contact:     strings.TrimSpace(body.Contact),
+			Source:      "manual",
+		})
+		if err != nil {
+			failed[asset] = err.Error()
+			continue
+		}
+		updated = append(updated, asset)
+	}
+	s.log.Info("asset ownership assigned in bulk", "team", team, "assets", len(updated),
+		"failed", len(failed), "remote", s.clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"updated": updated,
+		"failed":  failed,
+		"total":   len(updated),
+	})
 }
 
 // handleOwnershipGet returns one asset's ownership (or the triage placeholder).
@@ -133,6 +215,13 @@ func (s *Server) handleOwnershipPut(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("asset ownership recorded", "asset", own.Asset, "team", own.Team, "status", own.Status, "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, own)
+}
+
+// remediationView is a work item plus the one derived fact a client cannot compute
+// without a clock: whether it is past its deadline.
+type remediationView struct {
+	remediate.Item
+	Overdue bool `json:"overdue"`
 }
 
 // handleRemediationList lists work items with the dashboard's filters.

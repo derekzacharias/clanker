@@ -14,6 +14,7 @@ import {
   ShieldAlert,
   Sparkles,
   Sun,
+  Users,
   X,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -32,6 +33,7 @@ const NAV = [
   { to: "/assets", label: "Assets", icon: Server },
   { to: "/vulnerabilities", label: "Vulnerabilities", icon: ShieldAlert },
   { to: "/remediation", label: "Remediation", icon: Wrench },
+  { to: "/ownership", label: "Ownership", icon: Users },
   { to: "/scans", label: "Scans", icon: Radar },
   { to: "/reports", label: "Reports", icon: FileBarChart2 },
   { to: "/settings", label: "Settings", icon: SettingsIcon },

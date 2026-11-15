@@ -564,3 +564,165 @@ func (s *Store) TeamsInUse(ctx context.Context) ([]string, error) {
 	sort.Strings(out)
 	return out, rows.Err()
 }
+
+// AssetRow is one line of the ownership inventory: an asset, who owns it, and how much
+// work is waiting on it. It merges the ownership record with the work-item aggregate so
+// the dashboard can show "1352 items, 28 unassigned" against a name instead of a bare
+// count.
+type AssetRow struct {
+	Ownership
+	Items int `json:"items"`
+	Open  int `json:"open"`
+	// Critical and Overdue count open items only: a resolved item is neither.
+	Critical int `json:"critical"`
+	Overdue  int `json:"overdue"`
+	// Triaged means at least one open item has no team, whether or not the asset has a
+	// record. Ownership recorded for the asset clears it for every item at once.
+	Triaged bool `json:"triaged"`
+	// RoutedTeams lists the teams the item routing currently sends this asset's work to,
+	// which is not the same as a recorded owner: the mapping routes work to a team, but
+	// no person has accepted accountability for the machine.
+	RoutedTeams []string `json:"routed_teams"`
+}
+
+// terminalStates is "not work any more" — resolved is verified, the other two are
+// decisions. Everything else, including detected/validated, still needs someone.
+var terminalStates = []string{
+	string(StateResolved), string(StateRiskAccepted), string(StateFalsePositive),
+}
+
+// AssetOverview lists every asset that has work or an ownership record, most work first.
+//
+// The two sides are merged in Go rather than joined in SQL: an asset with a record but no
+// items still has to be listed (otherwise the record is invisible and unusable), and an
+// asset with items but no record is exactly the triage case that needs to be seen.
+func (s *Store) AssetOverview(ctx context.Context) ([]AssetRow, error) {
+	now := s.now().UTC().Format(time.RFC3339)
+	// due_at is written as UTC RFC3339, so string comparison is chronological here.
+	open := `state NOT IN (?,?,?)`
+	agg := map[string]AssetRow{}
+	rows, err := s.db.QueryContext(ctx, `SELECT asset,
+		COUNT(*),
+		SUM(CASE WHEN `+open+` THEN 1 ELSE 0 END),
+		SUM(CASE WHEN `+open+` AND priority = 'P1' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN `+open+` AND due_at IS NOT NULL AND due_at < ? THEN 1 ELSE 0 END),
+		SUM(CASE WHEN `+open+` AND team = '' THEN 1 ELSE 0 END)
+		FROM remediation_items GROUP BY asset`,
+		terminalStates[0], terminalStates[1], terminalStates[2],
+		terminalStates[0], terminalStates[1], terminalStates[2],
+		terminalStates[0], terminalStates[1], terminalStates[2], now,
+		terminalStates[0], terminalStates[1], terminalStates[2])
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			asset       string
+			items       int
+			openN       sql.NullInt64
+			critical    sql.NullInt64
+			overdue     sql.NullInt64
+			unownedOpen sql.NullInt64
+		)
+		if err := rows.Scan(&asset, &items, &openN, &critical, &overdue, &unownedOpen); err != nil {
+			return nil, err
+		}
+		agg[asset] = AssetRow{
+			Ownership: Ownership{Asset: asset},
+			Items:     items,
+			Open:      int(openN.Int64),
+			Critical:  int(critical.Int64),
+			Overdue:   int(overdue.Int64),
+			Triaged:   unownedOpen.Int64 > 0,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Effective routing, so the inventory can distinguish "the mapping sends this work
+	// to Infrastructure" from "a human owns this asset".
+	routed := map[string][]string{}
+	teamRows, err := s.db.QueryContext(ctx, `SELECT DISTINCT asset, team FROM remediation_items
+		WHERE team <> '' AND `+open+` ORDER BY asset, team`,
+		terminalStates[0], terminalStates[1], terminalStates[2])
+	if err != nil {
+		return nil, err
+	}
+	for teamRows.Next() {
+		var asset, team string
+		if err := teamRows.Scan(&asset, &team); err != nil {
+			teamRows.Close()
+			return nil, err
+		}
+		routed[asset] = append(routed[asset], team)
+	}
+	teamRows.Close()
+	if err := teamRows.Err(); err != nil {
+		return nil, err
+	}
+	for asset, teams := range routed {
+		row := agg[asset]
+		row.RoutedTeams = teams
+		agg[asset] = row
+	}
+
+	owned, err := s.ListOwnership(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range owned {
+		row := agg[o.Asset]
+		row.Ownership = o
+		if o.Status == "owned" && strings.TrimSpace(o.Team) != "" {
+			// A record with a team is a decision already made: the remaining items just
+			// have not been re-routed yet, so they are not a triage gap.
+			row.Triaged = false
+		} else {
+			row.Triaged = row.Triaged || row.Open > 0
+		}
+		agg[o.Asset] = row
+	}
+
+	out := make([]AssetRow, 0, len(agg))
+	for _, row := range agg {
+		if row.RoutedTeams == nil {
+			row.RoutedTeams = []string{}
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Overdue != out[j].Overdue {
+			return out[i].Overdue > out[j].Overdue
+		}
+		if out[i].Critical != out[j].Critical {
+			return out[i].Critical > out[j].Critical
+		}
+		if out[i].Open != out[j].Open {
+			return out[i].Open > out[j].Open
+		}
+		return out[i].Asset < out[j].Asset
+	})
+	return out, nil
+}
+
+// FindForFinding returns the work item derived from a specific finding, so the finding
+// detail can show its owner and deadline instead of duplicating the routing rules.
+//
+// Matched on the same tuple that identifies a finding (asset, advisory, package,
+// version) rather than recomputing the hash: a hash computed from a display row would
+// silently stop matching if the fingerprint ever changed.
+func (s *Store) FindForFinding(ctx context.Context, asset, vulnerabilityID, product, version string) (*Item, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM remediation_items
+		WHERE asset = ? AND vulnerability_id = ? AND product = ? AND installed_version = ?
+		LIMIT 1`, asset, vulnerabilityID, product, version).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return s.Get(id)
+}

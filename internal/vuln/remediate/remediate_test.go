@@ -410,3 +410,115 @@ func TestOwnershipValidation(t *testing.T) {
 		t.Fatal("ownership without an asset must be refused")
 	}
 }
+
+// A team mapping that no finding can reach is configuration that looks enforced but
+// never fires, which is worse than not having it: an operator reading DefaultTeams
+// would believe accepted risks route to Security and source findings to Development.
+func TestDefaultTeamsAreAllReachable(t *testing.T) {
+	producible := map[string]string{
+		"os_package":      "Ubuntu 22.04",
+		"app_dependency":  "PyPI",
+		"container_image": "container-image",
+		"cloud_config":    "terraform",
+		"infrastructure":  "firmware",
+	}
+	for _, category := range []string{"os_package", "app_dependency", "container_image", "cloud_config", "infrastructure"} {
+		eco, ok := producible[category]
+		if !ok {
+			t.Fatalf("category %q is in the routing model with no sample ecosystem to prove it", category)
+		}
+		if got := Category(model.Finding{Ecosystem: eco, VulnerabilityID: "CVE-2026-1"}); got != category {
+			t.Fatalf("Category(%q) = %q, want %q", eco, got, category)
+		}
+		if _, ok := DefaultTeams[category]; !ok {
+			t.Fatalf("Classifiable category %q has no team in DefaultTeams", category)
+		}
+	}
+	for category := range DefaultTeams {
+		if _, ok := producible[category]; !ok {
+			t.Fatalf("DefaultTeams has %q but no finding can ever be classified into it", category)
+		}
+	}
+}
+
+// The two teams that used to be unreachable now have signals, and ambiguous ecosystems
+// still go to triage rather than to a guessed team.
+func TestCategorySeparatesCloudAndFirmwareFromTriaged(t *testing.T) {
+	cases := map[string]string{
+		"Terraform":       "cloud_config",
+		"Kubernetes":      "cloud_config",
+		"AWS ECS":         "cloud_config",
+		"Azure":           "cloud_config",
+		"Firmware":        "infrastructure",
+		"Linux kernel":    "infrastructure",
+		"VMware ESXi":     "infrastructure",
+		"NVD":             "", // a feed, not an ecosystem: a human decides
+		"unknown-vendorx": "",
+	}
+	for eco, want := range cases {
+		if got := Category(model.Finding{Ecosystem: eco, VulnerabilityID: "CVE-2026-2"}); got != want {
+			t.Fatalf("Category(%q) = %q, want %q", eco, got, want)
+		}
+	}
+}
+
+// The inventory has to answer three questions in one row: is it owned, how much work is
+// there, and is anything past its deadline. An asset with a record but no findings must
+// stay visible, or the record cannot be edited after the finding is fixed.
+func TestAssetOverviewMergesOwnershipWithWork(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	rep := model.Report{
+		ReportID: "SCAN-1",
+		Metadata: model.ScanMetadata{Host: "web01", Mode: "local"},
+		Findings: []model.Finding{
+			{Ecosystem: "Ubuntu", Product: "openssl", InstalledVersion: "3.0.1", VulnerabilityID: "CVE-1", Severity: "critical"},
+			{Ecosystem: "Ubuntu", Product: "bash", InstalledVersion: "5.1", VulnerabilityID: "CVE-2", Severity: "low"},
+			{Ecosystem: "NVD", Product: "openssh", InstalledVersion: "8.9", VulnerabilityID: "CVE-3", Severity: "high"},
+		},
+	}
+	if _, _, _, err := st.Reconcile(rep, DefaultPolicy()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, err := st.SetOwnership(ctx, Ownership{Asset: "no-findings.example", Team: "Development"}); err != nil {
+		t.Fatalf("SetOwnership: %v", err)
+	}
+
+	rows, err := st.AssetOverview(ctx)
+	if err != nil {
+		t.Fatalf("AssetOverview: %v", err)
+	}
+	byAsset := map[string]AssetRow{}
+	for _, r := range rows {
+		byAsset[r.Asset] = r
+	}
+	web, ok := byAsset["web01"]
+	if !ok {
+		t.Fatal("asset with findings is missing from the inventory")
+	}
+	if web.Items != 3 || web.Open != 3 {
+		t.Fatalf("web01 items/open = %d/%d, want 3/3", web.Items, web.Open)
+	}
+	if web.Critical != 1 {
+		t.Fatalf("web01 critical = %d, want 1", web.Critical)
+	}
+	if !web.Triaged {
+		t.Fatal("web01 has an unroutable finding, so it must be marked triaged")
+	}
+	// The OS packages route by mapping even though nobody accepted the asset: the
+	// inventory must be able to show both facts without presenting one as the other.
+	if len(web.RoutedTeams) != 1 || web.RoutedTeams[0] != "Infrastructure" {
+		t.Fatalf("routed teams = %v, want [Infrastructure]", web.RoutedTeams)
+	}
+	// The NVD finding has no ecosystem, so the asset keeps one unowned item even after
+	// the OS packages are routed by the mapping.
+	if web.Team != "" {
+		t.Fatalf("no ownership recorded, team = %q", web.Team)
+	}
+	if _, ok := byAsset["no-findings.example"]; !ok {
+		t.Fatal("an asset with an ownership record but no findings disappeared from the inventory")
+	}
+	if got := byAsset["no-findings.example"]; got.Items != 0 || got.Triaged {
+		t.Fatalf("record-only asset = %+v, want 0 items and not triaged", got)
+	}
+}

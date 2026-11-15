@@ -117,6 +117,19 @@ export interface Vulnerability {
   affected: Applicability;
   confidence: "high" | "medium" | "low";
   validation_status: string;
+  /** Work item derived from this finding, when one exists. Present on the detail only. */
+  remediation_item?: {
+    id: string;
+    asset: string;
+    team?: string;
+    owner?: string;
+    state: RemediationState;
+    priority: string;
+    severity: string;
+    category?: string;
+    due_at?: string;
+    overdue: boolean;
+  } | null;
   kev: boolean;
   kev_date_added?: string;
   kev_ransomware?: string;
@@ -779,6 +792,21 @@ export const api = {
   remediation: (params: { team?: string; state?: string; owner?: string; asset?: string; overdue?: boolean } = {}) =>
     request<{ items: RemediationItem[]; total: number }>(`/api/remediation${qs(params)}`),
   ownership: (asset: string) => request<Ownership>(`/api/ownership/${encodeURIComponent(asset)}`),
+  ownershipOverview: (opts: { triage?: boolean } = {}) =>
+    request<{ items: AssetOwnershipRow[]; total: number }>(`/api/ownership${qs({ triage: opts.triage })}`),
+  bulkOwnership: (body: {
+    assets: string[];
+    team: string;
+    owner?: string;
+    exposure?: string;
+    environment?: string;
+    criticality?: string;
+    contact?: string;
+  }) =>
+    request<{ updated: string[]; failed: Record<string, string>; total: number }>("/api/ownership/bulk", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   saveOwnership: (asset: string, body: Partial<Ownership>) =>
     request<Ownership>(`/api/ownership/${encodeURIComponent(asset)}`, { method: "PUT", body: JSON.stringify(body) }),
   updateRemediation: (id: string, body: { team?: string; owner?: string; state?: RemediationState; notes?: string }) =>
@@ -876,6 +904,32 @@ export interface Ownership {
   source?: string;
   status: "owned" | "triage";
   updated_at: string;
+}
+
+/** One line of the ownership inventory: an asset, its record (if any), and its work. */
+export interface AssetOwnershipRow {
+  asset: string;
+  team?: string;
+  owner?: string;
+  service?: string;
+  environment?: string;
+  criticality?: string;
+  exposure?: string;
+  contact?: string;
+  mechanism?: string;
+  maintenance_window?: string;
+  source?: string;
+  /** "owned" or "triage" when a record exists; absent when nobody has decided yet. */
+  status?: string;
+  updated_at?: string;
+  items: number;
+  open: number;
+  critical: number;
+  overdue: number;
+  /** At least one open item has no team, so a decision is needed. */
+  triaged: boolean;
+  /** Teams the routing currently sends this asset's work to (not an accepted owner). */
+  routed_teams?: string[];
 }
 
 export interface RemediationItem {
