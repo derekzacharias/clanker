@@ -262,6 +262,31 @@ function AgentsTab() {
         <CardHeader
           title="Install the agent on other endpoints"
           description="The command enrolls the endpoint here, scans it once, reports the findings and installs a background service so it stays reachable. Installers verify a published SHA-256 first."
+          actions={
+            <Button
+              size="sm"
+              disabled={minting}
+              onClick={async () => {
+                setMinting(true);
+                try {
+                  const res = await api.mintEnrollToken();
+                  setMinted({
+                    token: res.enroll_token,
+                    expires: res.expires_at,
+                    commands: res.commands,
+                    oneoff: res.oneoff_commands,
+                  });
+                  push("Enrollment token created — it works once and expires");
+                } catch (err) {
+                  push(err instanceof Error ? err.message : "Could not create an enrollment token");
+                } finally {
+                  setMinting(false);
+                }
+              }}
+            >
+              New enrollment token
+            </Button>
+          }
         />
         <CardBody className="space-y-3">
           {data.install.published ? (
@@ -292,6 +317,25 @@ function AgentsTab() {
                   working token here.
                 </p>
               )}
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+            {minted ? (
+              <>
+                <span>Enrollment token (expires {new Date(minted.expires).toLocaleString()}):</span>
+                <span ref={enrollRef} className="mono break-all text-fg">
+                  {minted.token}
+                </span>
+                <CopyButton value={minted.token} label="Copy enrollment token" selectRef={enrollRef} />
+                <span className="w-full text-subtle">
+                  Single use: it is consumed by the next successful enrollment, and expired or used tokens are refused.
+                  Create another one for each additional endpoint.
+                </span>
+              </>
+            ) : (
+              <span className="w-full text-subtle">
+                No token is active. Tokens are created on demand, expire after 24 hours and work once.
+              </span>
+            )}
+              </div>
               {wantWatch ? (
                 <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-muted">
                   <p className="font-medium text-fg">Nothing else to do after the install</p>
@@ -342,31 +386,6 @@ function AgentsTab() {
         <CardHeader
           title="Enrolled endpoints"
           description="Agents that hold a per-agent token for this server, and what they are doing."
-          actions={
-            <Button
-              size="sm"
-              disabled={minting}
-              onClick={async () => {
-                setMinting(true);
-                try {
-                  const res = await api.mintEnrollToken();
-                  setMinted({
-                    token: res.enroll_token,
-                    expires: res.expires_at,
-                    commands: res.commands,
-                    oneoff: res.oneoff_commands,
-                  });
-                  push("Enrollment token created — it works once and expires");
-                } catch (err) {
-                  push(err instanceof Error ? err.message : "Could not create an enrollment token");
-                } finally {
-                  setMinting(false);
-                }
-              }}
-            >
-              New enrollment token
-            </Button>
-          }
         />
         {(data.fleet?.enrolled ?? []).length === 0 ? (
           <CardBody>
@@ -456,25 +475,6 @@ function AgentsTab() {
           </TableWrap>
         )}
         <CardBody className="pt-0">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-            {minted ? (
-              <>
-                <span>Enrollment token (expires {new Date(minted.expires).toLocaleString()}):</span>
-                <span ref={enrollRef} className="mono break-all text-fg">
-                  {minted.token}
-                </span>
-                <CopyButton value={minted.token} label="Copy enrollment token" selectRef={enrollRef} />
-                <span className="w-full text-subtle">
-                  Single use: it is consumed by the next successful enrollment, and expired or used tokens are refused.
-                  Create another one for each additional endpoint.
-                </span>
-              </>
-            ) : (
-              <span className="w-full text-subtle">
-                No token is active. Tokens are created on demand, expire after 24 hours and work once.
-              </span>
-            )}
-          </div>
         </CardBody>
       </Card>
 
