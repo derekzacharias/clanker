@@ -25,6 +25,8 @@ func cmdEnroll(args []string) int {
 	server := fs.String("server", "", "Clanker Guard server URL, e.g. https://guard.example:8787")
 	token := fs.String("enroll-token", "", "enrollment token shown in Settings → Agents")
 	host := fs.String("host", "", "hostname to enroll as (default: this host's name)")
+	allowInsecure := fs.Bool("allow-insecure-http", false,
+		"permit a plain-HTTP server URL on a non-loopback address (lab networks only; not recommended)")
 	configPath := fs.String("config", "", "config file (default: user config dir/clanker-guard/agent.json)")
 	if err := fs.Parse(args); err != nil {
 		return 3
@@ -41,13 +43,31 @@ func cmdEnroll(args []string) int {
 			hostname = "unknown"
 		}
 	}
-	client := agent.New(*server, "")
+	if err := agent.ValidateTransport(*server, *allowInsecure); err != nil {
+		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+		return 3
+	}
+	// Reinstalling a machine that is already enrolled proves ownership of the
+	// existing identity by presenting its current credential. Without this a
+	// legitimate reinstall would be blocked (the server refuses to hand the
+	// hostname to a caller that cannot show it already had it).
+	proof := ""
+	if existing, err := agent.LoadConfig(agent.ConfigPath()); err == nil {
+		if strings.TrimRight(existing.Server, "/") == strings.TrimRight(*server, "/") {
+			proof = existing.Token
+			fmt.Fprintf(os.Stderr, "re-enrolling as %s (presenting the existing credential)\n", existing.AgentID)
+		}
+	}
+	client := agent.New(*server, proof)
 	if client.PlainHTTP() {
-		fmt.Fprintln(os.Stderr, "warning: this server URL is not HTTPS; the agent token will cross the network in clear text")
+		fmt.Fprintln(os.Stderr, "warning: enrolling over plain HTTP; the agent token crosses the network in clear text")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cfg, err := client.Enroll(ctx, strings.TrimSpace(*token), hostname, osName(), version)
+	if err == nil {
+		cfg.AllowInsecureHTTP = *allowInsecure
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
 		return 4
@@ -124,6 +144,9 @@ func startReporting(configPath string, disabled bool) (*reporting, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if err := agent.ValidateTransport(cfg.Server, cfg.AllowInsecureHTTP); err != nil {
+		return nil, fmt.Errorf("%w (re-enroll with an https:// server URL)", err)
 	}
 	return &reporting{cfg: cfg, reporter: agent.NewReporter(agent.New(cfg.Server, cfg.Token))}, nil
 }

@@ -34,8 +34,56 @@ type Config struct {
 	AgentID string `json:"agent_id"`
 	Token   string `json:"token"`
 	Host    string `json:"host,omitempty"`
-	// EnrolledAt is informational; it makes a stale config visible to the operator.
-	EnrolledAt time.Time `json:"enrolled_at"`
+	// AllowInsecureHTTP records an explicit operator decision to talk to a
+	// non-loopback server over plain HTTP. Without it, plain HTTP is refused: the
+	// agent bearer token and every report would otherwise cross the network in
+	// clear text.
+	AllowInsecureHTTP bool      `json:"allow_insecure_http,omitempty"`
+	EnrolledAt        time.Time `json:"enrolled_at"`
+}
+
+// loopback reports whether the URL host is this machine.
+func loopback(hostport string) bool {
+	host := hostport
+	if i := strings.LastIndex(hostport, ":"); i > 0 && !strings.Contains(hostport[i:], "]") {
+		host = hostport[:i]
+	}
+	host = strings.Trim(host, "[]")
+	switch host {
+	case "localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1":
+		return true
+	}
+	return strings.HasPrefix(host, "127.")
+}
+
+// ValidateTransport enforces encrypted agent traffic.
+//
+// HTTPS is required for every enrollment, check-in and report. Plain HTTP is
+// tolerated only for loopback (a test or a co-located dashboard) or when the
+// operator explicitly opted in, because the bearer token is the agent's entire
+// identity and it travels in that request.
+func ValidateTransport(server string, allowInsecure bool) error {
+	raw := strings.TrimSpace(server)
+	if raw == "" {
+		return errors.New("server URL is empty")
+	}
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		return nil
+	case strings.HasPrefix(lower, "http://"):
+		hostport := strings.TrimPrefix(raw, "http://")
+		if i := strings.IndexAny(hostport, "/?#"); i >= 0 {
+			hostport = hostport[:i]
+		}
+		if loopback(hostport) || allowInsecure {
+			return nil
+		}
+		return fmt.Errorf("refusing plain HTTP to %s: agent credentials and reports would travel unencrypted; "+
+			"use an https:// server URL (or pass --allow-insecure-http for an isolated lab network)", hostport)
+	default:
+		return fmt.Errorf("server URL must start with https:// (got %q)", raw)
+	}
 }
 
 // ConfigPath is $CLANKER_GUARD_AGENT_CONFIG, else <config dir>/clanker-guard/agent.json.

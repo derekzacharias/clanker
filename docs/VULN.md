@@ -231,6 +231,27 @@ receives the finished report and the agent's status. There is no third-party
 telemetry, no remote command channel and no auto-update: the server can accept a
 report, it cannot ask the endpoint to do anything.
 
+### Agent transport, identity and recovery
+
+- **Transport**: HTTPS is required for enrollment, check-in and report upload.
+  Plain HTTP is refused unless the host is loopback or the operator passes
+  `--allow-insecure-http` (recorded in the config, re-checked on every run).
+- **Identity**: enrollment binds an agent to a hostname *and* a credential. A
+  hostname that is already enrolled can only be re-attached by presenting that
+  credential (`409 identity_conflict` otherwise), so a reinstall cannot seize an
+  existing identity. Credentials are stored as SHA-256 hashes; the plaintext is
+  never retrievable.
+- **Reinstall**: the CLI presents the credential from the agent config
+  automatically, so a normal reinstall keeps its identity, findings history and
+  task queue.
+- **Recovery**: if the credential is lost, revoke the agent in the dashboard
+  (`POST /api/agents/{id}/revoke`); revocation takes effect on the next request
+  and re-enrollment then creates a new agent id.
+- **Not yet implemented** (tracked): mTLS with per-agent certificates, enrollment
+  token TTL/single-use, submission sequence numbers, task leases for killed
+  agents, and OS keychain credential storage. The bearer token is the current
+  agent identity.
+
 ### Software asset exports
 
 A findings report answers "what can hurt me". The inventory exports answer "what

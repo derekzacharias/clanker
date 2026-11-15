@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -58,6 +59,9 @@ var (
 	ErrNotFound = errors.New("agent not found")
 	// ErrRevoked distinguishes a deliberately revoked endpoint from an unknown one.
 	ErrRevoked = errors.New("agent is revoked")
+	// ErrIdentityConflict means a hostname is already enrolled and the caller did
+	// not prove it holds that agent's credential.
+	ErrIdentityConflict = errors.New("hostname is already enrolled by another agent")
 )
 
 // Agent is one enrolled endpoint.
@@ -75,6 +79,10 @@ type Agent struct {
 	EnrolledAt time.Time  `json:"enrolled_at"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`
 	Revoked    bool       `json:"revoked"`
+
+	// hash is the stored credential hash, used only to verify proof of possession
+	// during re-enrollment. It is never serialised.
+	hash string
 }
 
 // Online reports whether the dashboard should treat the endpoint as reachable.
@@ -191,23 +199,19 @@ func (s *Store) RotateEnrollToken(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-// Enroll registers an endpoint and returns the agent plus its one-time token.
-// The plaintext token is never stored or retrievable again.
-// Enroll registers an endpoint and returns the agent plus its one-time token.
+// Enroll registers a new endpoint, or re-attaches an existing one when the caller
+// proves it already holds that agent's credential.
 //
-// Re-enrolling a host that is already known reuses its record and rotates the
-// token instead of adding a second row: reinstalling an agent must not clone the
-// endpoint in the fleet, and the credential the old install held must stop
-// working. Any other non-revoked record for the same host is superseded, which
-// cleans up duplicates left by earlier enrollments.
-func (s *Store) Enroll(ctx context.Context, host, osName, version string) (Agent, string, error) {
+// A hostname is not an identity. Re-enrolling a hostname that is already active
+// must NOT rotate the existing agent's credential: otherwise any machine that
+// claims the name (DHCP reuse, a clone, an attacker on the segment) would take
+// over the endpoint's identity and its findings history. Re-attaching therefore
+// requires the current token; an operator who has lost it revokes the agent first
+// (POST /api/agents/{id}/revoke), after which enrollment starts a fresh identity.
+func (s *Store) Enroll(ctx context.Context, host, osName, version, proofOfPossession string) (Agent, string, error) {
 	host = strings.TrimSpace(host)
 	if host == "" {
 		return Agent{}, "", errors.New("host is required")
-	}
-	token, err := randomToken()
-	if err != nil {
-		return Agent{}, "", err
 	}
 	now := s.now()
 	host = truncate(host, 255)
@@ -219,24 +223,31 @@ func (s *Store) Enroll(ctx context.Context, host, osName, version string) (Agent
 		return Agent{}, "", err
 	}
 	if existing != nil {
+		if strings.TrimSpace(proofOfPossession) == "" {
+			return Agent{}, "", ErrIdentityConflict
+		}
+		// The proof is checked against the agent that owns this hostname, and only
+		// that agent: a token for a different endpoint proves nothing here.
+		if subtle.ConstantTimeCompare([]byte(hashToken(proofOfPossession)), []byte(existing.hash)) != 1 {
+			return Agent{}, "", ErrIdentityConflict
+		}
+		token, err := randomToken()
+		if err != nil {
+			return Agent{}, "", err
+		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE agents SET
 			token_hash = ?, os = CASE WHEN ? <> '' THEN ? ELSE os END,
 			version = CASE WHEN ? <> '' THEN ? ELSE version END,
-			state = ?, phase = '', percent = 0, message = ?, last_seen = ?, revoked = 0
+			state = ?, phase = '', percent = 0, message = ?, last_seen = ?
 			WHERE id = ?`,
 			hashToken(token), osName, osName, version, version, StateEnrolled,
-			"re-enrolled; token rotated", now.Format(time.RFC3339), existing.ID); err != nil {
-			return Agent{}, "", err
-		}
-		// Anything else claiming this hostname is stale by definition now.
-		if _, err := s.db.ExecContext(ctx, `UPDATE agents SET revoked = 1, state = ?, message = ?
-			WHERE host = ? AND id <> ? AND revoked = 0`, StateError, "superseded by a newer enrollment",
-			host, existing.ID); err != nil {
+			"re-enrolled with proof of possession; token rotated",
+			now.Format(time.RFC3339), existing.ID); err != nil {
 			return Agent{}, "", err
 		}
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO agent_events (agent_id, at, state, phase, percent, message)
 			VALUES (?,?,?,?,?,?)`, existing.ID, now.Format(time.RFC3339), StateEnrolled, "", 0,
-			"re-enrolled; previous token revoked"); err != nil {
+			"re-enrolled with proof of possession"); err != nil {
 			return Agent{}, "", err
 		}
 		a, err := s.Get(ctx, existing.ID)
@@ -246,6 +257,10 @@ func (s *Store) Enroll(ctx context.Context, host, osName, version string) (Agent
 		return a, token, nil
 	}
 
+	token, err := randomToken()
+	if err != nil {
+		return Agent{}, "", err
+	}
 	id, err := agentID()
 	if err != nil {
 		return Agent{}, "", err
@@ -273,16 +288,30 @@ func (s *Store) Enroll(ctx context.Context, host, osName, version string) (Agent
 
 // agentByHost returns the newest non-revoked record for a hostname, if any.
 func (s *Store) agentByHost(ctx context.Context, host string) (*Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, host, os, version, state, phase, percent, message,
-		findings, last_report_id, enrolled_at, last_seen, revoked FROM agents
-		WHERE host = ? AND revoked = 0 ORDER BY enrolled_at DESC LIMIT 1`, host)
-	a, err := scanAgent(row)
-	if errors.Is(err, ErrNotFound) {
+	var (
+		a        Agent
+		enrolled string
+		lastSeen sql.NullString
+		revoked  int
+	)
+	err := s.db.QueryRowContext(ctx, `SELECT id, host, os, version, state, phase, percent, message,
+		findings, last_report_id, enrolled_at, last_seen, revoked, token_hash FROM agents
+		WHERE host = ? AND revoked = 0 ORDER BY enrolled_at DESC LIMIT 1`, host).
+		Scan(&a.ID, &a.Host, &a.OS, &a.Version, &a.State, &a.Phase, &a.Percent, &a.Message,
+			&a.Findings, &a.LastReport, &enrolled, &lastSeen, &revoked, &a.hash)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	a.EnrolledAt, _ = time.Parse(time.RFC3339, enrolled)
+	if lastSeen.Valid && lastSeen.String != "" {
+		if ts, perr := time.Parse(time.RFC3339, lastSeen.String); perr == nil {
+			a.LastSeen = &ts
+		}
+	}
+	a.Revoked = revoked != 0
 	return &a, nil
 }
 

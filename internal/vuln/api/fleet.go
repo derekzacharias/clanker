@@ -86,8 +86,22 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "host is required")
 		return
 	}
-	ag, token, err := s.fleet.Enroll(r.Context(), body.Host, body.OS, body.Version)
-	if err != nil {
+	// Proof of possession: an already-enrolled hostname can only be re-attached by
+	// a caller holding that agent's current credential. Without it the request is
+	// refused, so reinstalling elsewhere cannot seize an existing identity.
+	proof := ""
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		proof = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	}
+	ag, token, err := s.fleet.Enroll(r.Context(), body.Host, body.OS, body.Version, proof)
+	switch {
+	case errors.Is(err, fleet.ErrIdentityConflict):
+		s.log.Warn("agent enrollment refused: hostname already enrolled", "host", body.Host, "remote", ip)
+		writeError(w, http.StatusConflict, "identity_conflict",
+			fmt.Sprintf("host %q is already enrolled by %s; reinstall with its existing credential, "+
+				"or revoke that agent in the dashboard and enroll again", body.Host, "another agent"))
+		return
+	case err != nil:
 		writeError(w, http.StatusBadRequest, "enroll_error", err.Error())
 		return
 	}

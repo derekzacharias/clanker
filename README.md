@@ -63,7 +63,22 @@ installers, and a deterministic "Ask Guard" panel. See
 [docs/UI.md](docs/UI.md) for the design system, accessibility notes and the API
 contract. Build the assets once with `cd web && npm ci && npm run build`.
 
-#### Signing in
+#### Agent transport and identity
+
+The agent only talks to the dashboard over **HTTPS**. `enroll`, `watch` and every
+report refuse a plain-HTTP URL unless it is loopback (tests, a co-located server)
+or the operator passed `--allow-insecure-http` for an isolated lab network; the
+decision is recorded in the agent config and re-checked on every run.
+
+A hostname is **not** an identity. Once a host is enrolled, a second machine
+claiming the same name cannot take the identity over: enrollment answers `409
+identity_conflict` unless the request presents the existing agent credential
+(which a reinstall does automatically from `~/.config/clanker-guard/agent.json`).
+If an endpoint has genuinely lost its credential, the operator revokes it in
+Settings → Agents and enrolls again — revocation is immediate and issues a new
+agent id.
+
+### Signing in
 
 Binding beyond localhost needs a credential. Create a dashboard password once and
 sign in from the browser instead of pasting a token into every tab:

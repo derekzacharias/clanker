@@ -44,6 +44,10 @@ func cmdWatch(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
 		return 3
 	}
+	if err := agent.ValidateTransport(cfg.Server, cfg.AllowInsecureHTTP); err != nil {
+		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+		return 3
+	}
 	client := agent.New(cfg.Server, cfg.Token)
 	fmt.Fprintf(os.Stderr, "watching %s as %s — scans requested from the dashboard start immediately\n",
 		cfg.Server, cfg.AgentID)

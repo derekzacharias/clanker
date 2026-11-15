@@ -713,3 +713,70 @@ func TestRunningScanCannotBeCancelled(t *testing.T) {
 		t.Fatalf("cancel while running = %d, want 404 (cannot stop a running scan)", rec.Code)
 	}
 }
+
+// TestEnrollmentCannotTakeOverAnExistingIdentity is the security property from the
+// brief: a second machine that claims an enrolled hostname must not be able to
+// rotate the existing agent's credential. Recovery is an explicit operator action.
+func TestEnrollmentCannotTakeOverAnExistingIdentity(t *testing.T) {
+	srv := fleetServer(t)
+	h := srv.Handler()
+	enrollToken, _ := srv.fleet.EnrollToken(t.Context())
+
+	body := `{"host":"web01","os":"Ubuntu 24.04","version":"0.1.5"}`
+	first := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": enrollToken})
+	if first.Code != 200 {
+		t.Fatalf("first enroll = %d", first.Code)
+	}
+	var enrolled struct {
+		AgentID string `json:"agent_id"`
+		Token   string `json:"agent_token"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &enrolled); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same hostname, no proof of possession: refused.
+	second := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": enrollToken})
+	if second.Code != http.StatusConflict {
+		t.Fatalf("takeover attempt = %d, want 409: %s", second.Code, second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), "identity_conflict") {
+		t.Fatalf("body = %s", second.Body.String())
+	}
+
+	// The original credential still works, so the real endpoint keeps reporting.
+	if rec := request(t, h, "POST", "/api/agents/checkin", `{"state":"idle"}`, agentHeaders(enrolled.Token)); rec.Code != http.StatusNoContent {
+		t.Fatalf("original agent lost access: %d", rec.Code)
+	}
+
+	// Proof of possession (the current credential) may re-attach the identity.
+	third := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{
+		"X-Guard-Enroll-Token": enrollToken,
+		"Authorization":        "Bearer " + enrolled.Token,
+	})
+	if third.Code != 200 {
+		t.Fatalf("re-attach with proof = %d: %s", third.Code, third.Body.String())
+	}
+	var reattached struct {
+		AgentID string `json:"agent_id"`
+		Token   string `json:"agent_token"`
+	}
+	if err := json.Unmarshal(third.Body.Bytes(), &reattached); err != nil {
+		t.Fatal(err)
+	}
+	if reattached.AgentID != enrolled.AgentID || reattached.Token == enrolled.Token {
+		t.Fatalf("re-attach did not keep the identity and rotate the token: %+v", reattached)
+	}
+	if rec := request(t, h, "POST", "/api/agents/checkin", `{"state":"idle"}`, agentHeaders(enrolled.Token)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("superseded credential still works: %d", rec.Code)
+	}
+
+	// Operator recovery: revoke, then a fresh identity is allowed.
+	if rec := request(t, h, "POST", "/api/agents/"+reattached.AgentID+"/revoke", "", dash()); rec.Code != 200 {
+		t.Fatalf("revoke = %d", rec.Code)
+	}
+	fourth := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": enrollToken})
+	if fourth.Code != 200 {
+		t.Fatalf("enroll after revoke = %d: %s", fourth.Code, fourth.Body.String())
+	}
+}

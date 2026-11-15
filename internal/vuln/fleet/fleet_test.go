@@ -67,7 +67,7 @@ func TestEnrollStoresOnlyAHash(t *testing.T) {
 	st, _ := newStore(t)
 	ctx := context.Background()
 
-	agent, token, err := st.Enroll(ctx, "web01.example.com", "Ubuntu 24.04", "0.1.0")
+	agent, token, err := st.Enroll(ctx, "web01.example.com", "Ubuntu 24.04", "0.1.0", "")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestEnrollStoresOnlyAHash(t *testing.T) {
 	}
 
 	// Two enrollments must not share an id or a token.
-	other, otherToken, err := st.Enroll(ctx, "web02", "", "")
+	other, otherToken, err := st.Enroll(ctx, "web02", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestEnrollStoresOnlyAHash(t *testing.T) {
 func TestCheckinUpdatesStatusAndKeepsHistory(t *testing.T) {
 	st, now := newStore(t)
 	ctx := context.Background()
-	agent, token, err := st.Enroll(ctx, "db01", "Debian 12", "0.1.0")
+	agent, token, err := st.Enroll(ctx, "db01", "Debian 12", "0.1.0", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestCheckinUpdatesStatusAndKeepsHistory(t *testing.T) {
 func TestEventHistoryIsBounded(t *testing.T) {
 	st, _ := newStore(t)
 	ctx := context.Background()
-	agent, _, err := st.Enroll(ctx, "host1", "", "")
+	agent, _, err := st.Enroll(ctx, "host1", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,8 +208,8 @@ func TestEventHistoryIsBounded(t *testing.T) {
 func TestMarkReportAndRevoke(t *testing.T) {
 	st, _ := newStore(t)
 	ctx := context.Background()
-	keep, keepToken, _ := st.Enroll(ctx, "host-keep", "", "")
-	gone, goneToken, _ := st.Enroll(ctx, "host-gone", "", "")
+	keep, keepToken, _ := st.Enroll(ctx, "host-keep", "", "", "")
+	gone, goneToken, _ := st.Enroll(ctx, "host-gone", "", "", "")
 
 	if err := st.MarkReport(ctx, gone.ID, "SCAN-1", 42); err != nil {
 		t.Fatalf("MarkReport: %v", err)
@@ -257,9 +257,9 @@ func TestMarkReportAndRevoke(t *testing.T) {
 func TestListIsOrderedByActivity(t *testing.T) {
 	st, now := newStore(t)
 	ctx := context.Background()
-	old, _, _ := st.Enroll(ctx, "old", "", "")
+	old, _, _ := st.Enroll(ctx, "old", "", "", "")
 	*now = now.Add(time.Hour)
-	recent, _, _ := st.Enroll(ctx, "recent", "", "")
+	recent, _, _ := st.Enroll(ctx, "recent", "", "", "")
 
 	list, err := st.List(ctx)
 	if err != nil {
@@ -289,7 +289,7 @@ func TestTruncateKeepsUTF8(t *testing.T) {
 func TestScanTaskLifecycle(t *testing.T) {
 	st, now := newStore(t)
 	ctx := context.Background()
-	agent, _, err := st.Enroll(ctx, "web01", "", "0.1.2")
+	agent, _, err := st.Enroll(ctx, "web01", "", "0.1.2", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +354,7 @@ func TestScanTaskRefusesUnknownAndRevokedAgents(t *testing.T) {
 	if _, _, err := st.QueueScan(ctx, "AGT-nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("queue for unknown agent = %v", err)
 	}
-	agent, _, _ := st.Enroll(ctx, "web01", "", "")
+	agent, _, _ := st.Enroll(ctx, "web01", "", "", "")
 	if err := st.Revoke(ctx, agent.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -366,13 +366,13 @@ func TestScanTaskRefusesUnknownAndRevokedAgents(t *testing.T) {
 func TestScanTaskValidation(t *testing.T) {
 	st, _ := newStore(t)
 	ctx := context.Background()
-	agent, _, _ := st.Enroll(ctx, "web01", "", "")
+	agent, _, _ := st.Enroll(ctx, "web01", "", "", "")
 	task, _, _ := st.QueueScan(ctx, agent.ID)
 	if err := st.CompleteTask(ctx, agent.ID, task.ID, "invented", "", ""); err == nil {
 		t.Fatal("an invented task status must be refused")
 	}
 	// Another agent cannot complete someone else's task.
-	other, _, _ := st.Enroll(ctx, "web02", "", "")
+	other, _, _ := st.Enroll(ctx, "web02", "", "", "")
 	if err := st.CompleteTask(ctx, other.ID, task.ID, TaskDone, "", ""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-agent completion = %v, want ErrNotFound", err)
 	}
@@ -382,85 +382,79 @@ func TestScanTaskValidation(t *testing.T) {
 	}
 }
 
-// TestReenrollingAHostReusesItsRecord is the reinstalled-agent case: the endpoint
-// must not appear twice, and the credential the previous install held must stop
-// working.
-func TestReenrollingAHostReusesItsRecord(t *testing.T) {
+// TestReenrollingAHostRequiresProofOfPossession is the identity-binding rule: a
+// hostname is not an identity. A second machine claiming the same name must not be
+// able to take over the agent that already owns it.
+func TestReenrollingAHostRequiresProofOfPossession(t *testing.T) {
 	st, _ := newStore(t)
 	ctx := context.Background()
 
-	first, firstToken, err := st.Enroll(ctx, "web01", "Ubuntu 24.04", "0.1.4")
+	first, firstToken, err := st.Enroll(ctx, "web01", "Ubuntu 24.04", "0.1.4", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, secondToken, err := st.Enroll(ctx, "web01", "Ubuntu 24.04", "0.1.5")
-	if err != nil {
+
+	// No credential: refused, and the existing agent keeps working untouched.
+	if _, _, err := st.Enroll(ctx, "web01", "Ubuntu 24.04", "0.1.5", ""); !errors.Is(err, ErrIdentityConflict) {
+		t.Fatalf("re-enroll without proof = %v, want ErrIdentityConflict", err)
+	}
+	if got, err := st.Authenticate(ctx, firstToken); err != nil || got.ID != first.ID {
+		t.Fatalf("existing agent lost its credential: %+v %v", got, err)
+	}
+
+	// A token belonging to a different endpoint proves nothing.
+	if _, otherToken, err := st.Enroll(ctx, "web02", "", "", ""); err != nil {
 		t.Fatal(err)
+	} else if _, _, err := st.Enroll(ctx, "web01", "", "", otherToken); !errors.Is(err, ErrIdentityConflict) {
+		t.Fatalf("cross-agent proof = %v, want ErrIdentityConflict", err)
 	}
-	if second.ID != first.ID {
-		t.Fatalf("re-enrollment created a second agent: %s then %s", first.ID, second.ID)
+
+	// Proof of possession re-attaches the same identity and rotates the token.
+	again, newToken, err := st.Enroll(ctx, "web01", "Ubuntu 24.04", "0.1.5", firstToken)
+	if err != nil {
+		t.Fatalf("re-enroll with proof: %v", err)
 	}
-	if secondToken == firstToken {
-		t.Fatal("re-enrollment must rotate the token")
+	if again.ID != first.ID {
+		t.Fatalf("identity changed on re-attach: %s -> %s", first.ID, again.ID)
+	}
+	if newToken == firstToken {
+		t.Fatal("re-attach must rotate the credential")
 	}
 	if _, err := st.Authenticate(ctx, firstToken); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("the previous token still authenticates: %v", err)
+		t.Fatal("the superseded credential still authenticates")
 	}
-	if got, err := st.Authenticate(ctx, secondToken); err != nil || got.ID != first.ID {
-		t.Fatalf("new token does not authenticate: %+v %v", got, err)
+	if got, err := st.Authenticate(ctx, newToken); err != nil || got.ID != first.ID {
+		t.Fatalf("new credential invalid: %+v %v", got, err)
 	}
-	list, err := st.List(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(list) != 1 {
-		t.Fatalf("fleet has %d rows for one host, want 1", len(list))
-	}
-	if list[0].Version != "0.1.5" {
-		t.Fatalf("version = %q, want the re-installed version", list[0].Version)
-	}
-	events, _ := st.Events(ctx, first.ID, 5)
-	if len(events) == 0 || !strings.Contains(events[0].Message, "re-enrolled") {
-		t.Fatalf("re-enrollment is not recorded in the history: %+v", events)
+	if list, _ := st.List(ctx); len(list) != 2 {
+		t.Fatalf("fleet has %d rows, want 2 (web01 re-attached, web02)", len(list))
 	}
 }
 
-// TestEnrollingHostWithStaleDuplicatesSupersedesThem cleans up the state earlier
-// enrollments left behind (one row per install).
-func TestEnrollingHostWithStaleDuplicatesSupersedesThem(t *testing.T) {
+// TestOperatorRevokeAllowsAFreshIdentity documents the supported recovery path when
+// an endpoint has lost its credential: the operator revokes it, then enrollment
+// creates a new identity instead of silently rotating the old one.
+func TestOperatorRevokeAllowsAFreshIdentity(t *testing.T) {
 	st, _ := newStore(t)
 	ctx := context.Background()
-	newest, _, err := st.Enroll(ctx, "web01", "", "0.1.4")
+	first, firstToken, err := st.Enroll(ctx, "web01", "", "0.1.4", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a duplicate row written by an older build.
-	if _, err := st.db.ExecContext(ctx, `INSERT INTO agents
-		(id, host, os, version, token_hash, state, phase, percent, message, findings, last_report_id, enrolled_at, last_seen, revoked)
-		VALUES ('AGT-old','web01','','0.1.1','x','idle','',0,'',0,'',?,?,0)`,
-		"2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"); err != nil {
+	if err := st.Revoke(ctx, first.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.Enroll(ctx, "web01", "", "0.1.5"); err != nil {
-		t.Fatal(err)
+	if _, err := st.Authenticate(ctx, firstToken); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("revoked credential = %v, want ErrRevoked", err)
 	}
-	list, err := st.List(ctx)
+	replacement, replacementToken, err := st.Enroll(ctx, "web01", "", "0.1.5", "")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("enroll after revoke: %v", err)
 	}
-	active := 0
-	for _, a := range list {
-		if a.Host != "web01" {
-			continue
-		}
-		if !a.Revoked {
-			active++
-			if a.ID != newest.ID {
-				t.Fatalf("active row is %s, want the reused record %s", a.ID, newest.ID)
-			}
-		}
+	if replacement.ID == first.ID {
+		t.Fatal("a new identity must be issued after revocation")
 	}
-	if active != 1 {
-		t.Fatalf("%d active rows for web01, want 1", active)
+	if got, err := st.Authenticate(ctx, replacementToken); err != nil || got.ID != replacement.ID {
+		t.Fatalf("replacement credential invalid: %+v %v", got, err)
 	}
 }

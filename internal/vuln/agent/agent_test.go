@@ -292,3 +292,50 @@ func TestClaimTaskSurfacesErrors(t *testing.T) {
 		t.Fatal("a revoked agent must see the error, not an empty queue")
 	}
 }
+
+func TestValidateTransport(t *testing.T) {
+	cases := []struct {
+		name          string
+		server        string
+		allowInsecure bool
+		wantErr       bool
+	}{
+		{"https", "https://guard.example:8787", false, false},
+		{"loopback http", "http://127.0.0.1:8787", false, false},
+		{"loopback localhost", "http://localhost:8787", false, false},
+		{"lan http", "http://192.168.20.77:8787", false, true},
+		{"lan http explicitly allowed", "http://192.168.20.77:8787", true, false},
+		{"no scheme", "guard.example:8787", false, true},
+		{"empty", "", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateTransport(tc.server, tc.allowInsecure)
+			if tc.wantErr && err == nil {
+				t.Fatalf("%q must be refused", tc.server)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("%q: %v", tc.server, err)
+			}
+		})
+	}
+}
+
+// TestEnrollSendsProofOfPossession pins the wire behaviour a reinstall relies on:
+// when the client already holds a credential, the enrollment request carries it so
+// the server can tell a legitimate reinstall from a hostname takeover.
+func TestEnrollSendsProofOfPossession(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"agent_id":"AGT-1","agent_token":"new"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, "existing-token").Enroll(context.Background(), "enroll", "web01", "", ""); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	if gotAuth != "Bearer existing-token" {
+		t.Fatalf("enrollment did not present the existing credential: %q", gotAuth)
+	}
+}
