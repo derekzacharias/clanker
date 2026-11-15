@@ -47,6 +47,10 @@ type Options struct {
 	// X-Forwarded-For header is trusted. Empty means "no proxy": the header is
 	// ignored and rate limits key on the real peer address.
 	TrustedProxies []string
+	// AgentVersion overrides the version advertised in install commands. Empty
+	// means "derive it": the dashboard's own version is the wrong answer, because
+	// agent releases and server releases are versioned independently.
+	AgentVersion string
 	// ReleaseBase is the published artifact base URL. When empty the UI is told
 	// that no artifacts are published yet instead of being shown fake commands.
 	ReleaseBase string

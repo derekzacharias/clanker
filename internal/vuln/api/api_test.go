@@ -866,3 +866,38 @@ func TestSoftwareExportRequiresDashboardAuth(t *testing.T) {
 		t.Fatalf("anonymous fleet export = %d, want 401", rec.Code)
 	}
 }
+
+// TestInstallCommandAdvertisesTheAgentReleaseVersion: the server's own version is
+// not the agent release version. Using it makes the installer look for a tag that
+// does not exist (server 0.2.2 vs release v0.1.7 → 404).
+func TestInstallCommandAdvertisesTheAgentReleaseVersion(t *testing.T) {
+	const base = "https://github.com/derekzacharias/clanker-guard-agent/releases/download/v0.1.7"
+	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	if got := srv.AgentVersion(); got != "0.1.7" {
+		t.Fatalf("AgentVersion from release base = %q, want 0.1.7", got)
+	}
+
+	// An explicit override wins.
+	override, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: base, AgentVersion: "0.3.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer override.Close()
+	if got := override.AgentVersion(); got != "0.3.0" {
+		t.Fatalf("explicit AgentVersion = %q", got)
+	}
+
+	// An unversioned base falls back to the build version (no tag to trust).
+	plain, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: "https://example.test/releases"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if got := plain.AgentVersion(); got != "0.2.2" {
+		t.Fatalf("fallback AgentVersion = %q", got)
+	}
+}

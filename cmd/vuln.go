@@ -533,6 +533,7 @@ func newVulnServeCmd() *cobra.Command {
 		authFile       string
 		sessionTTL     time.Duration
 		trustedProxies string
+		agentVersion   string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -567,6 +568,7 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 				AuthPath:       authFile,
 				SessionTTL:     sessionTTL,
 				TrustedProxies: splitList(trustedProxies),
+				AgentVersion:   agentVersion,
 			})
 			if err != nil {
 				return err
@@ -603,6 +605,8 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 	cmd.Flags().StringVar(&releaseBase, "release-base", "", "published agent artifact base URL (or CLANKER_GUARD_RELEASE_BASE)")
 	cmd.Flags().StringVar(&authFile, "auth-file", auth.DefaultPath(), "password credential file (empty disables password sign-in)")
 	cmd.Flags().DurationVar(&sessionTTL, "session-ttl", auth.DefaultSessionTTL, "how long a browser sign-in stays valid")
+	cmd.Flags().StringVar(&agentVersion, "agent-version", os.Getenv("CLANKER_GUARD_AGENT_VERSION"),
+		"agent release version advertised in install commands (default: the tag in --release-base, else this build's version)")
 	cmd.Flags().StringVar(&trustedProxies, "trusted-proxies", os.Getenv("CLANKER_GUARD_TRUSTED_PROXIES"),
 		"comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted (needed behind a TLS-terminating proxy so rate limits and logs see real client addresses)")
 	common.register(cmd)

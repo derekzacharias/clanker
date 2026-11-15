@@ -1045,7 +1045,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		return fmt.Sprint(endpoints[i]["host"]) < fmt.Sprint(endpoints[j]["host"])
 	})
 
-	version := s.opts.ToolVersion
+	version := s.AgentVersion()
 	// The install command is generated for *this* server: an endpoint that pastes
 	// it enrolls straight back here, which is what makes "install and report" one
 	// step instead of two.

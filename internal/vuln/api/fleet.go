@@ -576,6 +576,29 @@ func (s *Server) handleAgentCancelScan(w http.ResponseWriter, r *http.Request) {
 // enrollCommands renders the copy-and-paste installers for this server and token.
 // extra is appended to the shell command and translated for PowerShell, so the
 // one-off variant (--no-service) stays in sync with the default.
+// AgentVersion is the version to advertise for the endpoint agent.
+//
+// It is not the server's version: the agent is released on its own cadence, and
+// using the dashboard version in the install command makes the installer look for
+// a release tag that does not exist. The release base normally ends in a tag
+// (.../download/v0.1.7), which is the authoritative answer; an explicit
+// --agent-version wins over both.
+func (s *Server) AgentVersion() string {
+	if v := strings.TrimSpace(s.opts.AgentVersion); v != "" {
+		return v
+	}
+	base := strings.TrimRight(s.opts.ReleaseBase, "/")
+	if i := strings.LastIndex(base, "/v"); i >= 0 {
+		candidate := base[i+2:]
+		if candidate != "" && strings.IndexFunc(candidate, func(r rune) bool {
+			return !(r >= '0' && r <= '9') && r != '.'
+		}) == -1 {
+			return candidate
+		}
+	}
+	return s.opts.ToolVersion
+}
+
 // enrollCommandTemplate renders the installers with a visible placeholder instead
 // of a token, so the dashboard can show the command before one is minted.
 func (s *Server) enrollCommandTemplate(r *http.Request) map[string]string {
@@ -584,7 +607,7 @@ func (s *Server) enrollCommandTemplate(r *http.Request) map[string]string {
 
 func (s *Server) enrollCommands(r *http.Request, enrollToken string, extra ...string) map[string]string {
 	base := strings.TrimRight(s.opts.ReleaseBase, "/")
-	version := s.opts.ToolVersion
+	version := s.AgentVersion()
 	serverURL := requestBaseURL(r)
 	shellExtra, winExtra := "", ""
 	// Only the flags the installers actually understand are accepted here, and
