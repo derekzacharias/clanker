@@ -54,6 +54,8 @@ func run(args []string) int {
 		return cmdWatch(args[1:])
 	case "service":
 		return cmdService(args[1:])
+	case "doctor":
+		return cmdDoctor(args[1:])
 	case "uninstall":
 		return cmdUninstall(args[1:])
 	case "version", "--version", "-v":
@@ -84,7 +86,8 @@ Usage:
   clanker-guard-agent enroll --server URL --enroll-token TOKEN [--host NAME]
   clanker-guard-agent status [--json]
   clanker-guard-agent watch [--hold 25s] [--once]
-  clanker-guard-agent service install|uninstall|status
+  clanker-guard-agent service install|uninstall|start|stop|restart|status
+  clanker-guard-agent doctor
   clanker-guard-agent uninstall [--yes]
   clanker-guard-agent version
 
@@ -133,6 +136,8 @@ func cmdScan(args []string) int {
 	progress := func(scan.Stage) {}
 	if rep != nil {
 		progress = rep.progress
+		// Deliver anything left over from a previous outage before starting work.
+		rep.flushQueue(context.Background(), os.Stderr)
 	}
 
 	res, err := scan.Run(context.Background(), scan.Options{

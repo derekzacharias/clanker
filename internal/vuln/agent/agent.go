@@ -10,6 +10,9 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,8 +42,12 @@ type Config struct {
 	// non-loopback server over plain HTTP. Without it, plain HTTP is refused: the
 	// agent bearer token and every report would otherwise cross the network in
 	// clear text.
-	AllowInsecureHTTP bool      `json:"allow_insecure_http,omitempty"`
-	EnrolledAt        time.Time `json:"enrolled_at"`
+	AllowInsecureHTTP bool `json:"allow_insecure_http,omitempty"`
+	// NextSequence is the next report sequence this agent will use. It is persisted
+	// so a restart cannot replay an old sequence number, which the server would (and
+	// should) reject.
+	NextSequence int64     `json:"next_sequence,omitempty"`
+	EnrolledAt   time.Time `json:"enrolled_at"`
 }
 
 // loopback reports whether the URL host is this machine.
@@ -238,15 +246,37 @@ func (c *Client) Checkin(ctx context.Context, st Status) error {
 }
 
 // Report uploads a finished report document (the JSON the scan already writes).
+//
+// Every submission carries a unique id, a monotonic sequence and the digest of the
+// exact bytes sent, so the server can tell a legitimate retry from a replayed or
+// tampered upload without trusting anything inside the document.
 func (c *Client) Report(ctx context.Context, report []byte) (Ack, error) {
+	return c.ReportWithSequence(ctx, report, 0)
+}
+
+// ReportWithSequence is Report with an explicit sequence. sequence <= 0 lets the
+// server behave as it did before replay protection existed (legacy clients).
+func (c *Client) ReportWithSequence(ctx context.Context, report []byte, sequence int64) (Ack, error) {
 	if len(report) == 0 {
 		return Ack{}, errors.New("report is empty")
 	}
 	if len(report) > maxReportBytes {
 		return Ack{}, fmt.Errorf("report is %d bytes, over the %d byte limit", len(report), maxReportBytes)
 	}
+	sum := sha256.Sum256(report)
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return Ack{}, fmt.Errorf("submission id: %w", err)
+	}
+	headers := map[string]string{
+		"X-Guard-Submission-Id":  hex.EncodeToString(id),
+		"X-Guard-Payload-SHA256": hex.EncodeToString(sum[:]),
+	}
+	if sequence > 0 {
+		headers["X-Guard-Sequence"] = strconv.FormatInt(sequence, 10)
+	}
 	var ack Ack
-	if err := c.postRaw(ctx, "/api/agents/report", report, &ack); err != nil {
+	if err := c.postRaw(ctx, "/api/agents/report", report, &ack, headers); err != nil {
 		return Ack{}, err
 	}
 	return ack, nil
@@ -424,4 +454,24 @@ func (c *Client) authorize(req *http.Request) {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+}
+
+// Health asks the server for its liveness document. It is unauthenticated on the
+// server, so it doubles as a connectivity probe before an agent has credentials.
+func (c *Client) Health(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Server+"/api/health", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "clanker-guard-agent")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("cannot reach %s: %w", c.Server, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("health check returned %d", resp.StatusCode)
+	}
+	return strings.TrimSpace(string(raw)), nil
 }

@@ -79,6 +79,9 @@ type Agent struct {
 	EnrolledAt time.Time  `json:"enrolled_at"`
 	LastSeen   *time.Time `json:"last_seen,omitempty"`
 	Revoked    bool       `json:"revoked"`
+	// LastSequence is the highest submission sequence accepted from this agent. It
+	// makes replayed reports detectable without trusting a client-supplied id.
+	LastSequence int64 `json:"last_sequence"`
 
 	// hash is the stored credential hash, used only to verify proof of possession
 	// during re-enrollment. It is never serialised.
@@ -142,6 +145,15 @@ CREATE TABLE IF NOT EXISTS agent_events (
   message  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id, seq DESC);
+CREATE TABLE IF NOT EXISTS agent_enroll_tokens (
+  token_hash TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  used_by    TEXT NOT NULL DEFAULT '',
+  label      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_enroll_expiry ON agent_enroll_tokens(expires_at);
 `
 
 // enrollTokenKey is the settings row holding the shared bootstrap secret.
@@ -164,39 +176,104 @@ func New(db *sql.DB) (*Store, error) {
 	if _, err := db.Exec(taskSchema); err != nil {
 		return nil, fmt.Errorf("initialise agent task table: %w", err)
 	}
+	// Ensure columns added after the first release exist on older databases. This
+	// must happen before any index references them.
+	for _, stmt := range []string{
+		`ALTER TABLE agents ADD COLUMN last_sequence INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE agent_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE agent_tasks ADD COLUMN lease_expires_at TEXT`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return nil, fmt.Errorf("migrate fleet schema: %w", err)
+		}
+	}
+	if _, err := db.Exec(taskIndexes); err != nil {
+		return nil, fmt.Errorf("initialise agent task indexes: %w", err)
+	}
 	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 // SetClock is for tests.
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
 
-// EnrollToken returns the shared bootstrap secret, creating it on first use so
-// enrollment needs no extra configuration step.
-func (s *Store) EnrollToken(ctx context.Context) (string, error) {
-	var v string
-	err := s.db.QueryRowContext(ctx, `SELECT v FROM settings WHERE k = ?`, enrollTokenKey).Scan(&v)
-	switch {
-	case err == nil && v != "":
-		return v, nil
-	case err != nil && !errors.Is(err, sql.ErrNoRows):
-		return "", err
-	}
-	return s.RotateEnrollToken(ctx)
-}
+// DefaultEnrollTokenTTL bounds how long a freshly minted enrollment token is
+// usable. Short enough that a leaked token is not a standing invitation.
+const DefaultEnrollTokenTTL = 24 * time.Hour
 
-// RotateEnrollToken replaces the bootstrap secret. Already-enrolled agents keep
-// their own tokens; only future enrollments need the new value.
-func (s *Store) RotateEnrollToken(ctx context.Context) (string, error) {
+var (
+	// ErrEnrollTokenInvalid means no such token (unknown, or already purged).
+	ErrEnrollTokenInvalid = errors.New("enrollment token is not valid")
+	// ErrEnrollTokenExpired means the token aged out before it was used.
+	ErrEnrollTokenExpired = errors.New("enrollment token has expired")
+	// ErrEnrollTokenUsed means the token was already exchanged. Tokens are
+	// single-use so one leaked installer command cannot enroll a second endpoint.
+	ErrEnrollTokenUsed = errors.New("enrollment token has already been used")
+)
+
+// MintEnrollToken creates a single-use enrollment token.
+//
+// The token is returned in plaintext exactly once; only its SHA-256 is stored, so
+// a database copy does not yield usable tokens.
+func (s *Store) MintEnrollToken(ctx context.Context, ttl time.Duration, label string) (string, time.Time, error) {
+	if ttl <= 0 {
+		ttl = DefaultEnrollTokenTTL
+	}
 	token, err := randomToken()
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO settings (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
-		enrollTokenKey, token); err != nil {
-		return "", err
+	now := s.now()
+	expires := now.Add(ttl)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO agent_enroll_tokens
+		(token_hash, created_at, expires_at, label) VALUES (?,?,?,?)`,
+		hashToken(token), now.Format(time.RFC3339), expires.Format(time.RFC3339), truncate(label, 100)); err != nil {
+		return "", time.Time{}, err
 	}
-	return token, nil
+	// Opportunistic cleanup: expired and long-used tokens are useless.
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM agent_enroll_tokens
+		WHERE expires_at < ? OR (used_at IS NOT NULL AND used_at < ?)`,
+		now.Add(-time.Hour).Format(time.RFC3339), now.Add(-7*24*time.Hour).Format(time.RFC3339))
+	return token, expires, nil
+}
+
+// ConsumeEnrollToken validates a token and burns it atomically. The UPDATE is
+// conditional, so two simultaneous enrollments cannot both use one token.
+func (s *Store) ConsumeEnrollToken(ctx context.Context, token, usedBy string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ErrEnrollTokenInvalid
+	}
+	now := s.now()
+	hash := hashToken(token)
+	res, err := s.db.ExecContext(ctx, `UPDATE agent_enroll_tokens SET used_at = ?, used_by = ?
+		WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`,
+		now.Format(time.RFC3339), truncate(usedBy, 120), hash, now.Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 1 {
+		return nil
+	}
+	// Explain the failure precisely enough to act on, without disclosing whether
+	// an unknown hash ever existed beyond "not valid".
+	var usedAt, expiresAt sql.NullString
+	err = s.db.QueryRowContext(ctx, `SELECT used_at, expires_at FROM agent_enroll_tokens WHERE token_hash = ?`, hash).
+		Scan(&usedAt, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrEnrollTokenInvalid
+	}
+	if err != nil {
+		return err
+	}
+	if usedAt.Valid && usedAt.String != "" {
+		return ErrEnrollTokenUsed
+	}
+	if expiresAt.Valid {
+		if ts, perr := time.Parse(time.RFC3339, expiresAt.String); perr == nil && !now.Before(ts) {
+			return ErrEnrollTokenExpired
+		}
+	}
+	return ErrEnrollTokenInvalid
 }
 
 // Enroll registers a new endpoint, or re-attaches an existing one when the caller
@@ -322,11 +399,28 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Agent, error) {
 		return Agent{}, ErrNotFound
 	}
 	row := s.db.QueryRowContext(ctx, `SELECT id, host, os, version, state, phase, percent, message,
-		findings, last_report_id, enrolled_at, last_seen, revoked FROM agents WHERE token_hash = ?`, hashToken(token))
-	a, err := scanAgent(row)
-	if err != nil {
+		findings, last_report_id, enrolled_at, last_seen, revoked, last_sequence FROM agents WHERE token_hash = ?`,
+		hashToken(token))
+	var (
+		a        Agent
+		enrolled string
+		lastSeen sql.NullString
+		revoked  int
+	)
+	if err := row.Scan(&a.ID, &a.Host, &a.OS, &a.Version, &a.State, &a.Phase, &a.Percent, &a.Message,
+		&a.Findings, &a.LastReport, &enrolled, &lastSeen, &revoked, &a.LastSequence); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Agent{}, ErrNotFound
+		}
 		return Agent{}, err
 	}
+	a.EnrolledAt, _ = time.Parse(time.RFC3339, enrolled)
+	if lastSeen.Valid && lastSeen.String != "" {
+		if ts, perr := time.Parse(time.RFC3339, lastSeen.String); perr == nil {
+			a.LastSeen = &ts
+		}
+	}
+	a.Revoked = revoked != 0
 	if a.Revoked {
 		return Agent{}, ErrRevoked
 	}
@@ -558,6 +652,10 @@ type Task struct {
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 	Note        string     `json:"note,omitempty"`
 	ReportID    string     `json:"report_id,omitempty"`
+	// Attempts counts claims, so a crash-looping agent is visible and bounded.
+	Attempts int `json:"attempts"`
+	// LeaseExpiresAt is when the server stops trusting a running claim.
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 }
 
 const taskSchema = `
@@ -570,10 +668,18 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   started_at   TEXT,
   finished_at  TEXT,
   note         TEXT NOT NULL DEFAULT '',
-  report_id    TEXT NOT NULL DEFAULT ''
+  report_id    TEXT NOT NULL DEFAULT '',
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at TEXT
 );
+`
+
+// taskIndexes are created after the column migrations: an index on a column that
+// an older database has not got yet would fail the whole startup.
+const taskIndexes = `
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_agent ON agent_tasks(agent_id, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_lease ON agent_tasks(status, lease_expires_at);
 `
 
 // QueueScan asks an endpoint for a scan. Re-queueing while one is still pending
@@ -587,6 +693,7 @@ func (s *Store) QueueScan(ctx context.Context, agentID string) (Task, bool, erro
 	if agent.Revoked {
 		return Task{}, false, ErrRevoked
 	}
+	s.reapExpiredLeases(ctx)
 	if pending, err := s.pendingTask(ctx, agentID); err != nil {
 		return Task{}, false, err
 	} else if pending != nil {
@@ -614,13 +721,16 @@ func (s *Store) QueueScan(ctx context.Context, agentID string) (Task, bool, erro
 // ClaimTask hands the oldest queued task to the agent and marks it running.
 // Claiming is atomic so two concurrent check-ins cannot both start the same scan.
 func (s *Store) ClaimTask(ctx context.Context, agentID string) (*Task, error) {
+	s.reapExpiredLeases(ctx)
 	pending, err := s.pendingTask(ctx, agentID)
 	if err != nil || pending == nil {
 		return nil, err
 	}
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET status = ?, started_at = ?
-		WHERE id = ? AND status = ?`, TaskRunning, now.Format(time.RFC3339), pending.ID, TaskQueued)
+	lease := now.Add(TaskLease).Format(time.RFC3339)
+	res, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET status = ?, started_at = ?,
+		lease_expires_at = ?, attempts = attempts + 1 WHERE id = ? AND status = ?`,
+		TaskRunning, now.Format(time.RFC3339), lease, pending.ID, TaskQueued)
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +749,8 @@ func (s *Store) CompleteTask(ctx context.Context, agentID, taskID, status, note,
 		return fmt.Errorf("task status must be %q or %q", TaskDone, TaskFailed)
 	}
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET status = ?, finished_at = ?, note = ?, report_id = ?
+	res, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET status = ?, finished_at = ?, note = ?, report_id = ?,
+		lease_expires_at = NULL
 		WHERE id = ? AND agent_id = ? AND status IN (?, ?)`,
 		status, now.Format(time.RFC3339), truncate(note, 500), truncate(reportID, 120),
 		taskID, agentID, TaskQueued, TaskRunning)
@@ -663,8 +774,8 @@ func (s *Store) Tasks(ctx context.Context, agentID string, limit int) ([]Task, e
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, kind, status, requested_at, started_at, finished_at, note, report_id
-		FROM agent_tasks WHERE agent_id = ? ORDER BY requested_at DESC LIMIT ?`, agentID, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent_id, kind, status, requested_at, started_at, finished_at, note, report_id,
+		attempts, lease_expires_at FROM agent_tasks WHERE agent_id = ? ORDER BY requested_at DESC LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -682,8 +793,8 @@ func (s *Store) Tasks(ctx context.Context, agentID string, limit int) ([]Task, e
 
 // LatestTask is the newest task for an endpoint, or nil when it never had one.
 func (s *Store) LatestTask(ctx context.Context, agentID string) (*Task, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, agent_id, kind, status, requested_at, started_at, finished_at, note, report_id
-		FROM agent_tasks WHERE agent_id = ? ORDER BY requested_at DESC LIMIT 1`, agentID)
+	row := s.db.QueryRowContext(ctx, `SELECT id, agent_id, kind, status, requested_at, started_at, finished_at, note, report_id,
+		attempts, lease_expires_at FROM agent_tasks WHERE agent_id = ? ORDER BY requested_at DESC LIMIT 1`, agentID)
 	t, err := scanTask(row)
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
@@ -695,8 +806,8 @@ func (s *Store) LatestTask(ctx context.Context, agentID string) (*Task, error) {
 }
 
 func (s *Store) pendingTask(ctx context.Context, agentID string) (*Task, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, agent_id, kind, status, requested_at, started_at, finished_at, note, report_id
-		FROM agent_tasks WHERE agent_id = ? AND status IN (?, ?) ORDER BY requested_at LIMIT 1`,
+	row := s.db.QueryRowContext(ctx, `SELECT id, agent_id, kind, status, requested_at, started_at, finished_at, note, report_id,
+		attempts, lease_expires_at FROM agent_tasks WHERE agent_id = ? AND status IN (?, ?) ORDER BY requested_at LIMIT 1`,
 		agentID, TaskQueued, TaskRunning)
 	t, err := scanTask(row)
 	if errors.Is(err, ErrNotFound) {
@@ -713,9 +824,11 @@ func scanTask(r rowScanner) (Task, error) {
 		t                 Task
 		requested         string
 		started, finished sql.NullString
+		lease             sql.NullString
 		note, reportID    string
 	)
-	if err := r.Scan(&t.ID, &t.AgentID, &t.Kind, &t.Status, &requested, &started, &finished, &note, &reportID); err != nil {
+	if err := r.Scan(&t.ID, &t.AgentID, &t.Kind, &t.Status, &requested, &started, &finished, &note, &reportID,
+		&t.Attempts, &lease); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Task{}, ErrNotFound
 		}
@@ -734,6 +847,11 @@ func scanTask(r rowScanner) (Task, error) {
 	}
 	t.Note = note
 	t.ReportID = reportID
+	if lease.Valid && lease.String != "" {
+		if ts, err := time.Parse(time.RFC3339, lease.String); err == nil {
+			t.LeaseExpiresAt = &ts
+		}
+	}
 	return t, nil
 }
 
@@ -764,4 +882,38 @@ func (s *Store) CancelTask(ctx context.Context, agentID string) (int, error) {
 		VALUES (?,?,?,?,?,?)`, agentID, now.Format(time.RFC3339), StateIdle, "cancelled", 0,
 		"queued scan cancelled by operator")
 	return int(n), err
+}
+
+// AdvanceSequence records the highest report sequence accepted from an agent.
+// It is monotonic by construction: the caller only reaches this after verifying
+// that the incoming sequence is greater than the stored one.
+func (s *Store) AdvanceSequence(ctx context.Context, agentID string, sequence int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET last_sequence = ?
+		WHERE id = ? AND last_sequence < ?`, sequence, agentID, sequence)
+	return err
+}
+
+// TaskLease is how long a claimed scan may run before the server assumes the agent
+// is gone and puts the work back. Generous enough for a full assessment on a slow
+// package-heavy endpoint, short enough that a killed agent does not wedge the queue.
+const TaskLease = 30 * time.Minute
+
+// maxTaskAttempts bounds how often a task is retried after its lease expires.
+const maxTaskAttempts = 3
+
+// reapExpiredLeases returns work whose agent stopped reporting back to the queue.
+// Called opportunistically before claiming or queueing, so no background goroutine
+// is needed and correctness does not depend on a scheduler.
+func (s *Store) reapExpiredLeases(ctx context.Context) {
+	now := s.now().Format(time.RFC3339)
+	// Retry while attempts remain...
+	_, _ = s.db.ExecContext(ctx, `UPDATE agent_tasks
+		SET status = ?, lease_expires_at = NULL, attempts = attempts + 1, note = ?
+		WHERE status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at < ? AND attempts + 1 < ?`,
+		TaskQueued, "lease expired; requeued", TaskRunning, now, maxTaskAttempts)
+	// ...and give up afterwards, recording why rather than leaving it running forever.
+	_, _ = s.db.ExecContext(ctx, `UPDATE agent_tasks
+		SET status = ?, lease_expires_at = NULL, attempts = attempts + 1, finished_at = ?, note = ?
+		WHERE status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at < ? AND attempts + 1 >= ?`,
+		TaskFailed, now, "lease expired: the agent did not report back", TaskRunning, now, maxTaskAttempts)
 }

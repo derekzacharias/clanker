@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -337,5 +339,44 @@ func TestEnrollSendsProofOfPossession(t *testing.T) {
 	}
 	if gotAuth != "Bearer existing-token" {
 		t.Fatalf("enrollment did not present the existing credential: %q", gotAuth)
+	}
+}
+
+// TestReportSendsSubmissionHeaders pins what the server's replay protection reads:
+// a unique id, the digest of the exact bytes, and the sequence when one is given.
+func TestReportSendsSubmissionHeaders(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = map[string]string{
+			"id":       r.Header.Get("X-Guard-Submission-Id"),
+			"digest":   r.Header.Get("X-Guard-Payload-SHA256"),
+			"sequence": r.Header.Get("X-Guard-Sequence"),
+		}
+		_, _ = w.Write([]byte(`{"run_id":"SCAN-1","accepted":true}`))
+	}))
+	defer srv.Close()
+
+	body := []byte(`{"report_id":"SCAN-1"}`)
+	if _, err := New(srv.URL, "tok").ReportWithSequence(context.Background(), body, 7); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	sum := sha256.Sum256(body)
+	if got["digest"] != hex.EncodeToString(sum[:]) {
+		t.Fatalf("digest = %q", got["digest"])
+	}
+	if got["sequence"] != "7" {
+		t.Fatalf("sequence = %q", got["sequence"])
+	}
+	if len(got["id"]) < 16 {
+		t.Fatalf("submission id = %q", got["id"])
+	}
+
+	// A second call must not reuse the submission id.
+	first := got["id"]
+	if _, err := New(srv.URL, "tok").ReportWithSequence(context.Background(), body, 8); err != nil {
+		t.Fatal(err)
+	}
+	if got["id"] == first {
+		t.Fatal("submission ids must be unique per upload")
 	}
 }

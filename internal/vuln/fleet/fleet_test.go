@@ -12,6 +12,25 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// OpenStoreForTest opens an existing database file through the real migration path.
+func OpenStoreForTest(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	st, err := New(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return st, nil
+}
+
 func newStore(t *testing.T) (*Store, *time.Time) {
 	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "intel.db")+"?_pragma=busy_timeout(5000)")
@@ -33,33 +52,52 @@ func newStore(t *testing.T) (*Store, *time.Time) {
 	return st, &now
 }
 
-func TestEnrollTokenIsCreatedOnceAndRotatable(t *testing.T) {
-	st, _ := newStore(t)
+func TestEnrollTokensAreSingleUseExpiringAndHashed(t *testing.T) {
+	st, now := newStore(t)
 	ctx := context.Background()
 
-	first, err := st.EnrollToken(ctx)
+	token, expires, err := st.MintEnrollToken(ctx, time.Hour, "laptop")
 	if err != nil {
-		t.Fatalf("EnrollToken: %v", err)
+		t.Fatalf("MintEnrollToken: %v", err)
 	}
-	if len(first) < 40 {
-		t.Fatalf("enrollment token is too short: %q", first)
+	if len(token) < 40 {
+		t.Fatalf("token is too short: %q", token)
 	}
-	again, err := st.EnrollToken(ctx)
+	if !expires.Equal(now.Add(time.Hour)) {
+		t.Fatalf("expiry = %s", expires)
+	}
+	// Only the hash is stored.
+	var stored string
+	if err := st.db.QueryRowContext(ctx, `SELECT token_hash FROM agent_enroll_tokens`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == token {
+		t.Fatal("the enrollment token must not be stored in plaintext")
+	}
+
+	// First consumption wins; the second is refused as already used.
+	if err := st.ConsumeEnrollToken(ctx, token, "web01"); err != nil {
+		t.Fatalf("first consume: %v", err)
+	}
+	if err := st.ConsumeEnrollToken(ctx, token, "web02"); !errors.Is(err, ErrEnrollTokenUsed) {
+		t.Fatalf("second consume = %v, want ErrEnrollTokenUsed", err)
+	}
+	// An unknown token is indistinguishable from a wrong one.
+	if err := st.ConsumeEnrollToken(ctx, "nope", ""); !errors.Is(err, ErrEnrollTokenInvalid) {
+		t.Fatalf("unknown token = %v, want ErrEnrollTokenInvalid", err)
+	}
+	if err := st.ConsumeEnrollToken(ctx, "", ""); !errors.Is(err, ErrEnrollTokenInvalid) {
+		t.Fatalf("empty token = %v", err)
+	}
+
+	// Expiry is enforced against the store clock.
+	short, _, err := st.MintEnrollToken(ctx, time.Minute, "")
 	if err != nil {
-		t.Fatalf("EnrollToken (second call): %v", err)
+		t.Fatal(err)
 	}
-	if again != first {
-		t.Fatal("EnrollToken must be stable until rotated")
-	}
-	rotated, err := st.RotateEnrollToken(ctx)
-	if err != nil {
-		t.Fatalf("RotateEnrollToken: %v", err)
-	}
-	if rotated == first {
-		t.Fatal("rotation returned the previous token")
-	}
-	if current, _ := st.EnrollToken(ctx); current != rotated {
-		t.Fatal("EnrollToken did not return the rotated value")
+	*now = now.Add(2 * time.Minute)
+	if err := st.ConsumeEnrollToken(ctx, short, ""); !errors.Is(err, ErrEnrollTokenExpired) {
+		t.Fatalf("expired token = %v, want ErrEnrollTokenExpired", err)
 	}
 }
 
@@ -456,5 +494,122 @@ func TestOperatorRevokeAllowsAFreshIdentity(t *testing.T) {
 	}
 	if got, err := st.Authenticate(ctx, replacementToken); err != nil || got.ID != replacement.ID {
 		t.Fatalf("replacement credential invalid: %+v %v", got, err)
+	}
+}
+
+// TestTaskLeaseReturnsWorkFromADeadAgent keeps a killed agent from wedging the
+// queue: a claimed task that is never reported back becomes claimable again.
+func TestTaskLeaseReturnsWorkFromADeadAgent(t *testing.T) {
+	st, now := newStore(t)
+	ctx := context.Background()
+	agent, _, err := st.Enroll(ctx, "web01", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := st.QueueScan(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimTask(ctx, agent.ID)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %v %v", claimed, err)
+	}
+
+	// Inside the lease nothing changes: a slow scan is not punished.
+	*now = now.Add(TaskLease / 2)
+	if got, err := st.ClaimTask(ctx, agent.ID); err != nil || got != nil {
+		t.Fatalf("claim inside the lease = %+v %v (want nil)", got, err)
+	}
+	if latest, _ := st.LatestTask(ctx, agent.ID); latest.Status != TaskRunning {
+		t.Fatalf("task left the running state early: %+v", latest)
+	}
+
+	// Past the lease the work is requeued and can be claimed again.
+	*now = now.Add(TaskLease + time.Minute)
+	if got, err := st.ClaimTask(ctx, agent.ID); err != nil || got == nil {
+		t.Fatalf("claim after lease expiry = %+v %v (want the requeued task)", got, err)
+	} else if got.ID != task.ID {
+		t.Fatalf("reclaimed a different task: %s", got.ID)
+	}
+	// Attempts are counted so a crash loop eventually stops retrying.
+	stale, _ := st.LatestTask(ctx, agent.ID)
+	if stale.Attempts < 2 {
+		t.Fatalf("attempts = %d, want the retry to be counted", stale.Attempts)
+	}
+}
+
+// TestTaskLeaseEventuallyGivesUp: after the retry budget the task fails with a
+// reason instead of cycling forever.
+func TestTaskLeaseEventuallyGivesUp(t *testing.T) {
+	st, now := newStore(t)
+	ctx := context.Background()
+	agent, _, _ := st.Enroll(ctx, "web01", "", "", "")
+	if _, _, err := st.QueueScan(ctx, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxTaskAttempts+1; i++ {
+		if _, err := st.ClaimTask(ctx, agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		*now = now.Add(TaskLease + time.Minute)
+	}
+	// Trigger the reap explicitly (claim would do it, but nothing is claimable now).
+	st.reapExpiredLeases(ctx)
+	latest, err := st.LatestTask(ctx, agent.ID)
+	if err != nil || latest == nil {
+		t.Fatalf("latest = %v %v", latest, err)
+	}
+	if latest.Status != TaskFailed {
+		t.Fatalf("status = %q, want failed after %d attempts", latest.Status, latest.Attempts)
+	}
+	if !strings.Contains(latest.Note, "lease expired") {
+		t.Fatalf("note = %q", latest.Note)
+	}
+}
+
+// TestMigratesADatabaseFromBeforeTheLeaseAndSequenceColumns is the upgrade path that
+// matters in production: an existing fleet database must gain the new columns (and
+// the indexes that depend on them) instead of failing to start.
+func TestMigratesADatabaseFromBeforeTheLeaseAndSequenceColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "intel.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Old schema: no last_sequence, no attempts, no lease_expires_at.
+	oldSchema := `
+CREATE TABLE agents (
+  id TEXT PRIMARY KEY, host TEXT NOT NULL, os TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'enrolled', phase TEXT NOT NULL DEFAULT '',
+  percent INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '', findings INTEGER NOT NULL DEFAULT 0,
+  last_report_id TEXT NOT NULL DEFAULT '', enrolled_at TEXT NOT NULL, last_seen TEXT, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE agent_tasks (
+  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+  requested_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+  note TEXT NOT NULL DEFAULT '', report_id TEXT NOT NULL DEFAULT '');
+CREATE TABLE agent_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, at TEXT NOT NULL,
+  state TEXT NOT NULL, phase TEXT NOT NULL DEFAULT '', percent INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '');
+INSERT INTO agents (id, host, token_hash, enrolled_at) VALUES ('AGT-old','web01','x','2026-01-01T00:00:00Z');
+`
+	if _, err := db.Exec(oldSchema); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Opening through the store must migrate, not fail.
+	st, err := OpenStoreForTest(path)
+	if err != nil {
+		t.Fatalf("open after upgrade: %v", err)
+	}
+	defer st.db.Close()
+	if agents, err := st.List(context.Background()); err != nil || len(agents) != 1 {
+		t.Fatalf("existing rows must survive the migration: %v %v", agents, err)
+	}
+	// And the new behaviour works on the migrated database.
+	if _, err := st.db.Exec(`UPDATE agents SET last_sequence = 5`); err != nil {
+		t.Fatalf("last_sequence column missing: %v", err)
+	}
+	if _, err := st.db.Exec(`UPDATE agent_tasks SET lease_expires_at = '2026-01-01T00:00:00Z', attempts = 1`); err != nil {
+		t.Fatalf("task lease columns missing: %v", err)
 	}
 }

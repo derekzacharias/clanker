@@ -70,6 +70,11 @@ report refuse a plain-HTTP URL unless it is loopback (tests, a co-located server
 or the operator passed `--allow-insecure-http` for an isolated lab network; the
 decision is recorded in the agent config and re-checked on every run.
 
+Enrollment tokens are single use and expire after 24 hours; the dashboard mints one
+per endpoint (Settings → Agents → New enrollment token) and the installer consumes
+it. Reported results are replay-protected (monotonic sequence + payload digest) and
+spooled locally if the dashboard is unreachable.
+
 A hostname is **not** an identity. Once a host is enrolled, a second machine
 claiming the same name cannot take the identity over: enrollment answers `409
 identity_conflict` unless the request presents the existing agent credential

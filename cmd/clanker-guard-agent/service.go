@@ -17,7 +17,7 @@ import (
 // installer calls `service install` and the endpoint is simply online.
 func cmdService(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: clanker-guard-agent service install|uninstall|status")
+		fmt.Fprintln(os.Stderr, "usage: clanker-guard-agent service install|uninstall|start|stop|restart|status")
 		return 3
 	}
 	action := args[0]
@@ -78,6 +78,27 @@ func cmdService(args []string) int {
 			return 4
 		}
 		fmt.Fprintln(os.Stderr, "service removed")
+		return 0
+
+	case "start", "stop", "restart":
+		var err error
+		switch action {
+		case "start":
+			err = mgr.Start(ctx)
+		case "stop":
+			err = mgr.Stop(ctx)
+		default:
+			err = mgr.Restart(ctx)
+		}
+		if errors.Is(err, service.ErrUnsupported) {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+			return 0
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: "+err.Error())
+			return 4
+		}
+		fmt.Fprintf(os.Stderr, "service %s: ok\n", action)
 		return 0
 
 	case "status":

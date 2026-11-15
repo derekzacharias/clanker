@@ -208,6 +208,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/agents/tasks/claim", s.handleAgentClaimTask)
 	s.mux.HandleFunc("POST /api/agents/tasks/complete", s.handleAgentCompleteTask)
 	s.mux.HandleFunc("GET /api/agents/{id}/events", s.handleAgentEvents)
+	s.mux.HandleFunc("POST /api/agents/enroll-token", s.handleEnrollTokenRotate)
+	// Kept as an alias so existing tooling keeps working; both mint a new token.
 	s.mux.HandleFunc("POST /api/agents/enroll-token/rotate", s.handleEnrollTokenRotate)
 	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.handlePutSettings)

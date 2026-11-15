@@ -116,6 +116,62 @@ func (m *Manager) Uninstall(ctx context.Context) (Status, error) {
 	}
 }
 
+// Start, Stop and Restart drive the installed service. They are no-ops with
+// ErrUnsupported on platforms this package does not manage.
+func (m *Manager) Start(ctx context.Context) error {
+	switch m.goos {
+	case "linux":
+		_, err := m.Run(ctx, "systemctl", "--user", "start", Name+".service")
+		return err
+	case "darwin":
+		plist, err := m.launchdPlistPath()
+		if err != nil {
+			return err
+		}
+		_, err = m.Run(ctx, "launchctl", "bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), plist)
+		return err
+	case "windows":
+		_, err := m.Run(ctx, "schtasks", "/Run", "/TN", Name)
+		return err
+	default:
+		return ErrUnsupported
+	}
+}
+
+func (m *Manager) Stop(ctx context.Context) error {
+	switch m.goos {
+	case "linux":
+		_, err := m.Run(ctx, "systemctl", "--user", "stop", Name+".service")
+		return err
+	case "darwin":
+		plist, err := m.launchdPlistPath()
+		if err != nil {
+			return err
+		}
+		_, err = m.Run(ctx, "launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), plist)
+		return err
+	case "windows":
+		_, err := m.Run(ctx, "schtasks", "/End", "/TN", Name)
+		return err
+	default:
+		return ErrUnsupported
+	}
+}
+
+func (m *Manager) Restart(ctx context.Context) error {
+	switch m.goos {
+	case "linux":
+		_, err := m.Run(ctx, "systemctl", "--user", "restart", Name+".service")
+		return err
+	default:
+		// launchd and schtasks have no restart verb; stop then start is equivalent.
+		if err := m.Stop(ctx); err != nil && !errors.Is(err, ErrUnsupported) {
+			return err
+		}
+		return m.Start(ctx)
+	}
+}
+
 // Current reports the installed state without changing anything.
 func (m *Manager) Current(ctx context.Context) Status {
 	switch m.goos {

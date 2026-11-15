@@ -230,8 +230,11 @@ function AgentsTab() {
   // Default: install so the endpoint stays reachable. An installer that scans once
   // and exits leaves the endpoint offline the moment it returns.
   const [keepAvailable, setKeepAvailable] = useState(true);
+  // A freshly minted single-use token: shown once with its commands and expiry.
+  const [minted, setMinted] = useState<{ token: string; expires: string; commands: Record<string, string>; oneoff: Record<string, string> } | null>(null);
+  const [minting, setMinting] = useState(false);
   const wantWatch = keepAvailable && Boolean(data?.install.keeps_available);
-  const commands = wantWatch ? data?.install.commands : data?.install.oneoff_commands ?? data?.install.commands;
+  const commands = minted ? (wantWatch ? minted.commands : minted.oneoff) : undefined;
   if (loading && !data) return <LoadingBlock label="Loading agent status" />;
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
   if (!data) return null;
@@ -274,11 +277,19 @@ function AgentsTab() {
                   }
                 />
               ) : null}
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <InstallCommand title="Linux" command={commands?.linux ?? ""} />
-                <InstallCommand title="macOS" command={commands?.macos ?? ""} />
-                <InstallCommand title="Windows (PowerShell)" command={commands?.windows ?? ""} />
-              </div>
+              {commands ? (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <InstallCommand title="Linux" command={commands?.linux ?? ""} />
+                  <InstallCommand title="macOS" command={commands?.macos ?? ""} />
+                  <InstallCommand title="Windows (PowerShell)" command={commands?.windows ?? ""} />
+                </div>
+              ) : (
+                <Banner tone="info" title="Create a token to get the install command">
+                  Enrollment tokens are single use and expire after 24 hours, so the command is generated when you
+                  create one. Choose <span className="font-medium">New enrollment token</span> above, paste the command
+                  on the endpoint, and create a fresh token for the next endpoint.
+                </Banner>
+              )}
               {wantWatch ? (
                 <div className="rounded-md border border-border bg-surface-2 p-3 text-xs text-muted">
                   <p className="font-medium text-fg">Nothing else to do after the install</p>
@@ -332,17 +343,26 @@ function AgentsTab() {
           actions={
             <Button
               size="sm"
+              disabled={minting}
               onClick={async () => {
+                setMinting(true);
                 try {
-                  await api.rotateEnrollToken();
-                  push("Enrollment token rotated — existing agents keep working");
-                  reload();
+                  const res = await api.mintEnrollToken();
+                  setMinted({
+                    token: res.enroll_token,
+                    expires: res.expires_at,
+                    commands: res.commands,
+                    oneoff: res.oneoff_commands,
+                  });
+                  push("Enrollment token created — it works once and expires");
                 } catch (err) {
-                  push(err instanceof Error ? err.message : "Could not rotate the token");
+                  push(err instanceof Error ? err.message : "Could not create an enrollment token");
+                } finally {
+                  setMinting(false);
                 }
               }}
             >
-              Rotate enroll token
+              New enrollment token
             </Button>
           }
         />
@@ -435,38 +455,23 @@ function AgentsTab() {
         )}
         <CardBody className="pt-0">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span>Enrollment token:</span>
-            <span ref={enrollRef} className="mono break-all text-fg">
-              {data.fleet?.enroll_token}
-            </span>
-            <CopyButton
-              value={data.fleet?.enroll_token ?? ""}
-              label="Copy enrollment token"
-              selectRef={enrollRef}
-            />
-            <span className="w-full text-subtle">
-              Rotating it only affects new enrollments; revoke an endpoint to cut off its own token.
-            </span>
-            {(data.fleet?.enrolled ?? []).some((a) => !a.watching && !a.revoked) ? (
-              <div className="mt-2 w-full rounded-md border border-border bg-surface-2 p-2">
-                <p className="text-xs text-muted">
-                  Endpoints shown as <span className="font-medium text-fg">offline</span> are unreachable: no agent is
-                  listening for work there, so a scan requested from New scan waits until one is. Start the watcher on
-                  those hosts:
-                </p>
-                <div className="mt-1.5 flex items-center gap-2">
-                  <span className="mono text-xs text-fg">clanker-guard-agent service install</span>
-                  <CopyButton
-                    value="clanker-guard-agent service install"
-                    label="Copy the command that starts the background service"
-                  />
-                </div>
-                <p className="mt-1 text-xs text-subtle">
-                  One command: it writes and enables the platform's service definition, so the endpoint stays available
-                  across logout and reboot.
-                </p>
-              </div>
-            ) : null}
+            {minted ? (
+              <>
+                <span>Enrollment token (expires {new Date(minted.expires).toLocaleString()}):</span>
+                <span ref={enrollRef} className="mono break-all text-fg">
+                  {minted.token}
+                </span>
+                <CopyButton value={minted.token} label="Copy enrollment token" selectRef={enrollRef} />
+                <span className="w-full text-subtle">
+                  Single use: it is consumed by the next successful enrollment, and expired or used tokens are refused.
+                  Create another one for each additional endpoint.
+                </span>
+              </>
+            ) : (
+              <span className="w-full text-subtle">
+                No token is active. Tokens are created on demand, expire after 24 hours and work once.
+              </span>
+            )}
           </div>
         </CardBody>
       </Card>

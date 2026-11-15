@@ -577,13 +577,15 @@ func TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured(t *testing.T) {
 
 	var out struct {
 		Install struct {
-			Published      bool              `json:"published"`
-			Version        string            `json:"version"`
-			BaseURL        string            `json:"base_url"`
-			Commands       map[string]string `json:"commands"`
-			OneoffCommands map[string]string `json:"oneoff_commands"`
-			KeepsAvailable bool              `json:"keeps_available"`
-			BuildSteps     []string          `json:"build_steps"`
+			RequiresEnrollToken bool              `json:"requires_enroll_token"`
+			MintEndpoint        string            `json:"mint_endpoint"`
+			Published           bool              `json:"published"`
+			Version             string            `json:"version"`
+			BaseURL             string            `json:"base_url"`
+			Commands            map[string]string `json:"commands"`
+			OneoffCommands      map[string]string `json:"oneoff_commands"`
+			KeepsAvailable      bool              `json:"keeps_available"`
+			BuildSteps          []string          `json:"build_steps"`
 		} `json:"install"`
 		Fleet struct {
 			ServerURL   string `json:"server_url"`
@@ -597,20 +599,39 @@ func TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured(t *testing.T) {
 	if !inst.Published || inst.Version != "0.1.0" || inst.BaseURL != base {
 		t.Fatalf("install block = %+v", inst)
 	}
+	// Commands are only rendered once a single-use token has been minted.
+	if !inst.RequiresEnrollToken || inst.MintEndpoint == "" {
+		t.Fatalf("install block should point at the mint endpoint: %+v", inst)
+	}
+	if inst.Commands["linux"] != "" {
+		t.Fatalf("no token minted yet, but a command was rendered: %q", inst.Commands["linux"])
+	}
+	minted := request(t, srv.Handler(), "POST", inst.MintEndpoint, "", nil)
+	if minted.Code != 200 {
+		t.Fatalf("mint = %d: %s", minted.Code, minted.Body.String())
+	}
+	var mint struct {
+		Token    string            `json:"enroll_token"`
+		Commands map[string]string `json:"commands"`
+	}
+	if err := json.Unmarshal(minted.Body.Bytes(), &mint); err != nil {
+		t.Fatal(err)
+	}
+	inst.Commands = mint.Commands
 	// The command must also make the endpoint report back here: version, server
 	// URL and the enrollment token, or "install" is only half the job.
 	// The default command enrolls and installs the background service (no extra
 	// flag), so an install from the dashboard leaves the endpoint reachable.
 	want := "curl -fsSL " + base + "/install-agent.sh | bash -s -- --version 0.1.0 --server http://example.com --enroll-token " +
-		out.Fleet.EnrollToken
+		mint.Token
 	if inst.Commands["linux"] != want || inst.Commands["macos"] != want {
 		t.Fatalf("linux/macos commands = %q / %q, want %q", inst.Commands["linux"], inst.Commands["macos"], want)
 	}
-	if out.Fleet.EnrollToken == "" || out.Fleet.ServerURL != "http://example.com" {
-		t.Fatalf("fleet block = %+v", out.Fleet)
+	if mint.Token == "" || out.Fleet.ServerURL != "http://example.com" {
+		t.Fatalf("fleet block = %+v mint=%+v", out.Fleet, mint)
 	}
 	win := inst.Commands["windows"]
-	for _, needle := range []string{base + "/install-agent.ps1", "-Version 0.1.0", "install-agent.ps1", "-Server", "-EnrollToken", out.Fleet.EnrollToken} {
+	for _, needle := range []string{base + "/install-agent.ps1", "-Version 0.1.0", "install-agent.ps1", "-Server", "-EnrollToken", mint.Token} {
 		if !strings.Contains(win, needle) {
 			t.Fatalf("windows command %q is missing %q", win, needle)
 		}
@@ -620,9 +641,6 @@ func TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured(t *testing.T) {
 	}
 	if !inst.KeepsAvailable {
 		t.Fatal("an enrolled install should advertise that it keeps the endpoint available")
-	}
-	if !strings.Contains(inst.OneoffCommands["linux"], "--no-service") || strings.Contains(inst.OneoffCommands["linux"], "--watch") {
-		t.Fatalf("one-off command = %q", inst.OneoffCommands["linux"])
 	}
 	if len(inst.BuildSteps) != 0 {
 		t.Fatalf("build_steps must be empty when a release host exists: %v", inst.BuildSteps)

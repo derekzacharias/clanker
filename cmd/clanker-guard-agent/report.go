@@ -127,9 +127,10 @@ func cmdStatus(args []string) int {
 // reporting is the scan-side helper: it announces what the endpoint is doing
 // while the assessment runs and uploads the finished report.
 type reporting struct {
-	cfg      agent.Config
-	reporter *agent.Reporter
-	warned   bool
+	cfg        agent.Config
+	configPath string
+	reporter   *agent.Reporter
+	warned     bool
 }
 
 // startReporting loads the enrollment. A missing config is not an error: the
@@ -148,7 +149,10 @@ func startReporting(configPath string, disabled bool) (*reporting, error) {
 	if err := agent.ValidateTransport(cfg.Server, cfg.AllowInsecureHTTP); err != nil {
 		return nil, fmt.Errorf("%w (re-enroll with an https:// server URL)", err)
 	}
-	return &reporting{cfg: cfg, reporter: agent.NewReporter(agent.New(cfg.Server, cfg.Token))}, nil
+	if configPath == "" {
+		configPath = agent.ConfigPath()
+	}
+	return &reporting{cfg: cfg, configPath: configPath, reporter: agent.NewReporter(agent.New(cfg.Server, cfg.Token))}, nil
 }
 
 // progress is wired into scan.Options.Progress.
@@ -181,10 +185,28 @@ func (r *reporting) upload(ctx context.Context, res scan.Result, stderr io.Write
 		fmt.Fprintf(stderr, "warning: could not encode the report: %v\n", err)
 		return ""
 	}
-	ack, err := r.reporter.Client.Report(ctx, payload)
+	// Each successful upload consumes one sequence number. It is persisted so a
+	// restart cannot re-use an old one, which the server treats as a replay.
+	sequence := r.cfg.NextSequence + 1
+	ack, err := r.reporter.Client.ReportWithSequence(ctx, payload, sequence)
 	if err != nil {
-		fmt.Fprintf(stderr, "warning: report was not accepted by %s: %v\n", r.cfg.Server, err)
+		// A rejected report (bad request, replay, revoked credential) will not get
+		// better by retrying; a transport failure might, so only that is queued.
+		if isTransportError(err) {
+			if qerr := r.spool(payload, sequence, res.Report.ReportID); qerr == nil {
+				fmt.Fprintf(stderr, "warning: %s is unreachable (%v); report queued locally and will be retried\n",
+					r.cfg.Server, err)
+			} else {
+				fmt.Fprintf(stderr, "warning: report not accepted (%v) and could not be queued (%v)\n", err, qerr)
+			}
+		} else {
+			fmt.Fprintf(stderr, "warning: report was rejected by %s: %v\n", r.cfg.Server, err)
+		}
 		return ""
+	}
+	r.cfg.NextSequence = sequence
+	if err := agent.SaveConfig(r.configPath, r.cfg); err != nil {
+		fmt.Fprintf(stderr, "warning: could not persist the submission sequence: %v\n", err)
 	}
 	fmt.Fprintf(stderr, "reported to %s: %s (%d findings)\n", r.cfg.Server, ack.RunID, ack.Findings)
 	// The server marks the endpoint idle when it accepts a report; a final status
@@ -195,6 +217,59 @@ func (r *reporting) upload(ctx context.Context, res scan.Result, stderr io.Write
 		Version: version, OS: osName(),
 	}, true)
 	return ack.RunID
+}
+
+// spool stores a report for later delivery, advancing the persisted sequence so the
+// queued copy keeps its place in the replay-protected order.
+func (r *reporting) spool(payload []byte, sequence int64, reportID string) error {
+	q, err := agent.OpenQueue(agent.QueuePath(r.configPath))
+	if err != nil {
+		return err
+	}
+	if err := q.Enqueue(payload, sequence, reportID, time.Now().UTC()); err != nil {
+		return err
+	}
+	r.cfg.NextSequence = sequence
+	return agent.SaveConfig(r.configPath, r.cfg)
+}
+
+// flushQueue uploads spooled reports in order, stopping at the first failure so the
+// server's monotonic sequence check stays satisfied.
+func (r *reporting) flushQueue(ctx context.Context, stderr io.Writer) {
+	q, err := agent.OpenQueue(agent.QueuePath(r.configPath))
+	if err != nil {
+		return
+	}
+	items, err := q.List()
+	if err != nil || len(items) == 0 {
+		return
+	}
+	sent := 0
+	for _, item := range items {
+		_, err := r.reporter.Client.ReportWithSequence(ctx, item.Payload, item.Sequence)
+		if err != nil {
+			if !isTransportError(err) {
+				// The server will never accept this one; drop it rather than blocking
+				// every later report behind it.
+				_ = q.Remove(item.Path)
+				fmt.Fprintf(stderr, "warning: dropped a queued report the server rejected (%v)\n", err)
+				continue
+			}
+			fmt.Fprintf(stderr, "note: %d report(s) still queued for %s\n", len(items)-sent, r.cfg.Server)
+			return
+		}
+		_ = q.Remove(item.Path)
+		sent++
+	}
+	if sent > 0 {
+		fmt.Fprintf(stderr, "uploaded %d queued report(s)\n", sent)
+	}
+}
+
+// isTransportError distinguishes "could not deliver" from "server said no".
+// agent.Client wraps request failures with "cannot reach".
+func isTransportError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "cannot reach")
 }
 
 func (r *reporting) note(err error) {

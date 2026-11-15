@@ -28,6 +28,13 @@
 #   * Uninstall with: clanker-guard-agent uninstall --yes
 set -euo pipefail
 
+# Public half of the release signing key. Pinned here on purpose: if this key is
+# wrong, every install fails loudly instead of silently trusting a swapped checksum.
+# Rotation: ship an installer that trusts both keys, then drop the old one.
+SIGNING_PUBKEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAddak3m8jw7qjzUpeyOrogWrFP6NxuF5MHv7Dj56fqx8=
+-----END PUBLIC KEY-----'
+SIGNING_AVAILABLE=0
 REPO="derekzacharias/clanker-guard-agent"
 DEFAULT_BASE="https://github.com/${REPO}/releases/download"
 VERSION="${CLANKER_GUARD_VERSION:-}"
@@ -106,6 +113,27 @@ agent_config_path() {
   printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/clanker-guard/agent.json"
 }
 
+verify_manifest_signature() {
+  local dir="$1"
+  if [ ! -s "$dir/SHA256SUMS.sig" ]; then
+    echo "warning: this release publishes no SHA256SUMS.sig; only SHA-256 integrity is verified." >&2
+    echo "warning: obtain the installer and checksums over a trusted channel if that matters here." >&2
+    return 0
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "error: openssl is required to verify the release signature; refusing to install" >&2
+    return 3
+  fi
+  printf '%s\n' "$SIGNING_PUBKEY" > "$dir/.signing.pub"
+  if ! openssl pkeyutl -verify -pubin -inkey "$dir/.signing.pub" -rawin \
+      -in "$dir/SHA256SUMS" -sigfile "$dir/SHA256SUMS.sig" >/dev/null 2>&1; then
+    echo "error: SHA256SUMS signature does not match the pinned release key; refusing to install" >&2
+    return 3
+  fi
+  echo "verified release signature (Ed25519)"
+  return 0
+}
+
 fetch() {
   local url="$1" dest="$2"
   if command -v curl >/dev/null 2>&1; then
@@ -148,12 +176,27 @@ verify() {
 echo "clanker-guard-agent ${VERSION} (${OS}/${ARCH})"
 echo "downloading: ${URL_BASE}/${ARTIFACT}"
 fetch "${URL_BASE}/${ARTIFACT}" "$TMPDIR_GUARD/$ARTIFACT"
-fetch "${URL_BASE}/${ARTIFACT}.sha256" "$TMPDIR_GUARD/$ARTIFACT.sha256" || true
-if [ ! -s "$TMPDIR_GUARD/$ARTIFACT.sha256" ]; then
-  fetch "${URL_BASE}/SHA256SUMS" "$TMPDIR_GUARD/SHA256SUMS"
+# Trust order matters: the aggregate manifest, when signed, is the only source of
+# truth. A per-artifact .sha256 next to a signed manifest would let a compromised
+# origin swap the artifact and its local checksum together.
+fetch "${URL_BASE}/SHA256SUMS" "$TMPDIR_GUARD/SHA256SUMS" || true
+fetch "${URL_BASE}/SHA256SUMS.sig" "$TMPDIR_GUARD/SHA256SUMS.sig" || true
+if [ -s "$TMPDIR_GUARD/SHA256SUMS" ] && [ -s "$TMPDIR_GUARD/SHA256SUMS.sig" ]; then
+  verify_manifest_signature "$TMPDIR_GUARD" || exit 3
+  verify "$TMPDIR_GUARD/$ARTIFACT" "$TMPDIR_GUARD/SHA256SUMS" "$ARTIFACT"
+elif [ -s "$TMPDIR_GUARD/SHA256SUMS" ]; then
+  verify_manifest_signature "$TMPDIR_GUARD" || exit 3
   verify "$TMPDIR_GUARD/$ARTIFACT" "$TMPDIR_GUARD/SHA256SUMS" "$ARTIFACT"
 else
-  verify "$TMPDIR_GUARD/$ARTIFACT" "$TMPDIR_GUARD/$ARTIFACT.sha256" "$ARTIFACT"
+  # Unsigned release: fall back to the per-artifact checksum, which the warning
+  # above already framed as integrity-only, not authenticity.
+  fetch "${URL_BASE}/${ARTIFACT}.sha256" "$TMPDIR_GUARD/$ARTIFACT.sha256" || true
+  if [ -s "$TMPDIR_GUARD/$ARTIFACT.sha256" ]; then
+    verify "$TMPDIR_GUARD/$ARTIFACT" "$TMPDIR_GUARD/$ARTIFACT.sha256" "$ARTIFACT"
+  else
+    echo "error: no checksums published for ${ARTIFACT}; refusing to install" >&2
+    exit 3
+  fi
 fi
 
 install -m 0755 "$TMPDIR_GUARD/$ARTIFACT" "$BIN_DIR/clanker-guard-agent"

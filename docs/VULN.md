@@ -247,10 +247,27 @@ report, it cannot ask the endpoint to do anything.
 - **Recovery**: if the credential is lost, revoke the agent in the dashboard
   (`POST /api/agents/{id}/revoke`); revocation takes effect on the next request
   and re-enrollment then creates a new agent id.
-- **Not yet implemented** (tracked): mTLS with per-agent certificates, enrollment
-  token TTL/single-use, submission sequence numbers, task leases for killed
-  agents, and OS keychain credential storage. The bearer token is the current
-  agent identity.
+- **Enrollment tokens**: minted on demand in Settings → Agents, single use, expire
+  after 24 h (configurable up to 30 days), stored only as SHA-256. A used or
+  expired token is refused with a specific reason.
+- **Replay protection**: each report carries `X-Guard-Submission-Id`,
+  `X-Guard-Sequence` (monotonic per agent, persisted) and
+  `X-Guard-Payload-SHA256`. A lower sequence is refused as a replay, a digest
+  mismatch is refused before parsing, and retries of the newest submission stay
+  idempotent by report id.
+- **Task leases**: a claimed scan must report back within 30 minutes; otherwise it
+  is requeued (up to 3 attempts) and then failed with a reason, so a killed agent
+  cannot wedge the queue.
+- **Offline queue**: a report that cannot be delivered is spooled to
+  `<config dir>/queue` (0600, 25 reports / 64 MB, newest kept), retried in order on
+  the next run, and deleted only after the server acknowledges it.
+- **Lifecycle**: `service install|uninstall|start|stop|restart|status` and `doctor`
+  (binary, enrollment, transport, server, credential, service, cache, queue).
+- **Signed releases**: `SHA256SUMS.sig` (Ed25519) is verified by the installer
+  against a pinned public key; a tampered artifact or manifest is refused.
+- **Still not implemented**: mTLS with per-agent certificates, OS keychain
+  credential storage (DPAPI/Keychain), centralised intelligence snapshots per
+  assessment, and self-update (`update`).
 
 ### Software asset exports
 

@@ -21,12 +21,16 @@ function removeClipboardApi() {
 }
 
 function agentsPayload() {
-  const command =
-    "curl -fsSL https://example.test/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server http://guard:8787 --enroll-token SECRET";
   return {
     local: { host: "guard", version: "0.1.1", cache_path: "/tmp/intel.db", platform: "linux/amd64", installed: true },
     endpoints: [],
-    install: { published: true, version: "0.1.1", base_url: "https://example.test/v0.1.1", commands: { linux: command, macos: command, windows: "iwr ..." } },
+    install: {
+      published: true,
+      version: "0.1.1",
+      base_url: "https://example.test/v0.1.1",
+      requires_enroll_token: true,
+      mint_endpoint: "/api/agents/enroll-token",
+    },
     fleet: { server_url: "http://guard:8787", enroll_token: "SECRET", online_window: "15m0s", count: 0, enrolled: [] },
     managed_mode: true,
     managed_note: "Endpoints report to this server only. There is no remote command channel.",
@@ -38,6 +42,19 @@ function mockAgentsApi() {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.startsWith("/api/agents/enroll-token")) {
+        const linux = "curl -fsSL https://example.test/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server http://guard:8787 --enroll-token MINTED";
+        return new Response(
+          JSON.stringify({
+            enroll_token: "MINTED",
+            expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+            single_use: true,
+            commands: { linux, macos: linux, windows: "iwr ..." },
+            oneoff_commands: { linux: `${linux} --no-service`, macos: linux, windows: "iwr ..." },
+          }),
+          { status: 200 },
+        );
+      }
       if (url.startsWith("/api/agents")) {
         return new Response(JSON.stringify(agentsPayload()), { status: 200 });
       }
@@ -106,6 +123,7 @@ describe("install command copy button", () => {
     mockAgentsApi();
 
     render(<Settings />);
+    await userEvent.click(await screen.findByRole("button", { name: /New enrollment token/i }));
     const button = await screen.findByRole("button", { name: /Copy Linux install command/i });
     await userEvent.click(button);
 
@@ -121,6 +139,7 @@ describe("install command copy button", () => {
     mockAgentsApi();
 
     render(<Settings />);
+    await userEvent.click(await screen.findByRole("button", { name: /New enrollment token/i }));
     const button = await screen.findByRole("button", { name: /Copy enrollment token/i });
     await userEvent.click(button);
 
@@ -135,6 +154,7 @@ describe("install command copy button", () => {
     mockAgentsApi();
 
     render(<Settings />);
+    await userEvent.click(await screen.findByRole("button", { name: /New enrollment token/i }));
     const button = await screen.findByRole("button", { name: /Copy Linux install command/i });
     await userEvent.click(button);
 

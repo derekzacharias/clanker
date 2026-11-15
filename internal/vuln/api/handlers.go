@@ -1050,45 +1050,19 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	// it enrolls straight back here, which is what makes "install and report" one
 	// step instead of two.
 	serverURL := requestBaseURL(r)
-	enrollToken, tokenErr := s.fleet.EnrollToken(r.Context())
-	if tokenErr != nil {
-		s.log.Warn("read enrollment token", "err", tokenErr)
-	}
+	// Enrollment tokens are minted on demand (single use, short lived), so the
+	// dashboard advertises how to get one rather than printing a standing secret.
 	install := map[string]any{
 		"published": s.opts.ReleaseBase != "",
 		"version":   version,
 		"base_url":  s.opts.ReleaseBase,
 	}
 	if s.opts.ReleaseBase != "" {
-		base := strings.TrimRight(s.opts.ReleaseBase, "/")
-		enrolled := serverURL != "" && enrollToken != ""
-		args := "--version " + version
-		winArgs := fmt.Sprintf("-Version %s", version)
-		if enrolled {
-			args += fmt.Sprintf(" --server %s --enroll-token %s", serverURL, enrollToken)
-			winArgs += fmt.Sprintf(` -Server "%s" -EnrollToken "%s"`, serverURL, enrollToken)
-		}
-		shell := func(shellExtra, winExtra string) map[string]string {
-			return map[string]string{
-				"linux": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
-				"macos": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
-				// The Windows script takes its parameters as arguments and cannot be
-				// piped into iex with them, so save it and run it explicitly.
-				"windows": fmt.Sprintf(
-					`iwr %s/install-agent.ps1 -OutFile "$env:TEMP\install-agent.ps1" -UseBasicParsing; `+
-						`& "$env:TEMP\install-agent.ps1" %s%s`, base, winArgs, winExtra),
-			}
-		}
-		// Default: the installer enrolls, scans once and installs a background service,
-		// so the endpoint is reachable with no follow-up work. The one-off variant is
-		// still offered for an endpoint that must not run a service.
-		install["commands"] = shell("", "")
-		oneoffShell, oneoffWin := " --no-service", " -NoService"
-		if !enrolled {
-			oneoffShell, oneoffWin = "", ""
-		}
-		install["oneoff_commands"] = shell(oneoffShell, oneoffWin)
-		install["keeps_available"] = enrolled
+		// Commands need a token to be usable; until one is minted the dashboard
+		// shows the exact call to mint it.
+		install["requires_enroll_token"] = true
+		install["mint_endpoint"] = "/api/agents/enroll-token"
+		install["keeps_available"] = true
 	} else {
 		// Never show a fake release URL: tell the user exactly how to publish.
 		install["build_steps"] = []string{
@@ -1122,11 +1096,13 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("list agents", "err", err)
 	}
 	fleetView := map[string]any{
-		"server_url":       serverURL,
-		"enroll_token":     enrollToken,
-		"reachable_window": fleet.ReachableWindow.String(),
-		"enrolled":         enrolled,
-		"count":            len(enrolled),
+		"server_url":               serverURL,
+		"reachable_window":         fleet.ReachableWindow.String(),
+		"enroll_token":             "",
+		"enroll_token_ttl_hours":   int(fleet.DefaultEnrollTokenTTL.Hours()),
+		"enroll_tokens_single_use": true,
+		"enrolled":                 enrolled,
+		"count":                    len(enrolled),
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

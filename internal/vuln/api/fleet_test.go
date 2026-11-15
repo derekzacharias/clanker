@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +49,7 @@ func dash() map[string]string { return map[string]string{"X-Guard-Token": "dash-
 // enrollAgent runs the enrollment handshake and returns the agent id and token.
 func enrollAgent(t *testing.T, srv *Server, host string) (string, string) {
 	t.Helper()
-	enrollToken, err := srv.fleet.EnrollToken(t.Context())
+	enrollToken, _, err := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,7 @@ func TestAgentEnrollNeedsTheEnrollmentToken(t *testing.T) {
 		t.Fatalf("enroll with a wrong token = %d, want 401", rec.Code)
 	}
 	// Missing host is refused once the caller is authenticated.
-	enrollToken, _ := srv.fleet.EnrollToken(t.Context())
+	enrollToken, _, _ := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "test")
 	if rec := request(t, h, "POST", "/api/agents/enroll", `{"os":"linux"}`,
 		map[string]string{"X-Guard-Enroll-Token": enrollToken}); rec.Code != http.StatusBadRequest {
 		t.Fatalf("enroll without a host = %d, want 400", rec.Code)
@@ -136,7 +138,7 @@ func TestAgentEnrollmentIsRateLimited(t *testing.T) {
 			t.Fatalf("attempt %d = %d", i+1, rec.Code)
 		}
 	}
-	enrollToken, _ := srv.fleet.EnrollToken(t.Context())
+	enrollToken, _, _ := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "test")
 	rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"x"}`,
 		map[string]string{"X-Guard-Enroll-Token": enrollToken})
 	if rec.Code != http.StatusTooManyRequests {
@@ -161,8 +163,9 @@ func TestAgentCheckinStatusIsVisibleToTheDashboard(t *testing.T) {
 
 	var agents struct {
 		Fleet struct {
-			Count    int `json:"count"`
-			Enrolled []struct {
+			Count                 int  `json:"count"`
+			EnrollTokensSingleUse bool `json:"enroll_tokens_single_use"`
+			Enrolled              []struct {
 				Host     string `json:"host"`
 				State    string `json:"state"`
 				Phase    string `json:"phase"`
@@ -190,8 +193,15 @@ func TestAgentCheckinStatusIsVisibleToTheDashboard(t *testing.T) {
 	if got.LastSeen == "" {
 		t.Fatal("last_seen is missing")
 	}
-	if agents.Fleet.EnrollToken == "" || agents.Fleet.ServerURL == "" {
-		t.Fatalf("fleet block must expose the bootstrap secret and server URL: %+v", agents.Fleet)
+	if agents.Fleet.ServerURL == "" {
+		t.Fatalf("fleet block must expose the server URL: %+v", agents.Fleet)
+	}
+	// No standing secret is advertised any more: tokens are minted per enrollment.
+	if agents.Fleet.EnrollToken != "" {
+		t.Fatalf("fleet block must not expose a long-lived enrollment token: %q", agents.Fleet.EnrollToken)
+	}
+	if !agents.Fleet.EnrollTokensSingleUse {
+		t.Fatalf("fleet block should advertise single-use tokens: %+v", agents.Fleet)
 	}
 
 	// An invented state is refused rather than stored.
@@ -361,31 +371,75 @@ func TestRevokingAnAgentStopsIt(t *testing.T) {
 	}
 }
 
-func TestRotatedEnrollTokenStopsNewEnrollments(t *testing.T) {
+// TestEnrollmentTokensAreSingleUseAndExpire is the enrollment-token contract:
+// short lived, burned on first use, and not usable for a second endpoint.
+func TestEnrollmentTokensAreSingleUseAndExpire(t *testing.T) {
 	srv := fleetServer(t)
 	h := srv.Handler()
-	old, err := srv.fleet.EnrollToken(t.Context())
+
+	// Mint through the API, as the dashboard does.
+	rec := request(t, h, "POST", "/api/agents/enroll-token", `{"label":"laptop"}`, dash())
+	if rec.Code != 200 {
+		t.Fatalf("mint = %d: %s", rec.Code, rec.Body.String())
+	}
+	var minted struct {
+		Token     string            `json:"enroll_token"`
+		ExpiresAt string            `json:"expires_at"`
+		SingleUse bool              `json:"single_use"`
+		Commands  map[string]string `json:"commands"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &minted); err != nil {
+		t.Fatal(err)
+	}
+	if minted.Token == "" || !minted.SingleUse || minted.ExpiresAt == "" {
+		t.Fatalf("minted = %+v", minted)
+	}
+	if !strings.Contains(minted.Commands["linux"], "--enroll-token "+minted.Token) {
+		t.Fatalf("command does not carry the token: %q", minted.Commands["linux"])
+	}
+
+	// First use succeeds.
+	first := request(t, h, "POST", "/api/agents/enroll", `{"host":"web01"}`, map[string]string{"X-Guard-Enroll-Token": minted.Token})
+	if first.Code != 200 {
+		t.Fatalf("first enrollment = %d: %s", first.Code, first.Body.String())
+	}
+	// Second use of the same token is refused: one command, one endpoint.
+	second := request(t, h, "POST", "/api/agents/enroll", `{"host":"web02"}`, map[string]string{"X-Guard-Enroll-Token": minted.Token})
+	if second.Code != http.StatusUnauthorized {
+		t.Fatalf("reused token = %d, want 401", second.Code)
+	}
+	if !strings.Contains(second.Body.String(), "already been used") {
+		t.Fatalf("reuse should say why: %s", second.Body.String())
+	}
+	// An unknown token is refused without revealing whether it ever existed.
+	if rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"web03"}`, map[string]string{"X-Guard-Enroll-Token": "nope"}); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown token = %d, want 401", rec.Code)
+	}
+	// No token at all.
+	if rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"web04"}`, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token = %d, want 401", rec.Code)
+	}
+}
+
+// TestExpiredEnrollmentTokenIsRefused covers the TTL: a token left in a ticket for
+// too long is useless.
+func TestExpiredEnrollmentTokenIsRefused(t *testing.T) {
+	srv := fleetServer(t)
+	h := srv.Handler()
+	clk := newClock()
+	srv.fleet.SetClock(clk.Now)
+
+	token, _, err := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "short")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rotated struct {
-		EnrollToken string `json:"enroll_token"`
+	clk.Advance(2 * time.Hour)
+	rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"web01"}`, map[string]string{"X-Guard-Enroll-Token": token})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired token = %d, want 401: %s", rec.Code, rec.Body.String())
 	}
-	rec := request(t, h, "POST", "/api/agents/enroll-token/rotate", "", dash())
-	if rec.Code != 200 {
-		t.Fatalf("rotate = %d", rec.Code)
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &rotated); err != nil {
-		t.Fatal(err)
-	}
-	if rotated.EnrollToken == "" || rotated.EnrollToken == old {
-		t.Fatal("rotation did not produce a new token")
-	}
-	if rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"new"}`, map[string]string{"X-Guard-Enroll-Token": old}); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("old enrollment token = %d, want 401", rec.Code)
-	}
-	if rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"new"}`, map[string]string{"X-Guard-Enroll-Token": rotated.EnrollToken}); rec.Code != 200 {
-		t.Fatalf("new enrollment token = %d, want 200", rec.Code)
+	if !strings.Contains(rec.Body.String(), "expired") {
+		t.Fatalf("body = %s", rec.Body.String())
 	}
 }
 
@@ -720,10 +774,15 @@ func TestRunningScanCannotBeCancelled(t *testing.T) {
 func TestEnrollmentCannotTakeOverAnExistingIdentity(t *testing.T) {
 	srv := fleetServer(t)
 	h := srv.Handler()
-	enrollToken, _ := srv.fleet.EnrollToken(t.Context())
-
+	mint := func() string {
+		token, _, err := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
 	body := `{"host":"web01","os":"Ubuntu 24.04","version":"0.1.5"}`
-	first := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": enrollToken})
+	first := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": mint()})
 	if first.Code != 200 {
 		t.Fatalf("first enroll = %d", first.Code)
 	}
@@ -736,7 +795,7 @@ func TestEnrollmentCannotTakeOverAnExistingIdentity(t *testing.T) {
 	}
 
 	// Same hostname, no proof of possession: refused.
-	second := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": enrollToken})
+	second := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": mint()})
 	if second.Code != http.StatusConflict {
 		t.Fatalf("takeover attempt = %d, want 409: %s", second.Code, second.Body.String())
 	}
@@ -751,7 +810,7 @@ func TestEnrollmentCannotTakeOverAnExistingIdentity(t *testing.T) {
 
 	// Proof of possession (the current credential) may re-attach the identity.
 	third := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{
-		"X-Guard-Enroll-Token": enrollToken,
+		"X-Guard-Enroll-Token": mint(),
 		"Authorization":        "Bearer " + enrolled.Token,
 	})
 	if third.Code != 200 {
@@ -775,8 +834,82 @@ func TestEnrollmentCannotTakeOverAnExistingIdentity(t *testing.T) {
 	if rec := request(t, h, "POST", "/api/agents/"+reattached.AgentID+"/revoke", "", dash()); rec.Code != 200 {
 		t.Fatalf("revoke = %d", rec.Code)
 	}
-	fourth := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": enrollToken})
+	fourth := request(t, h, "POST", "/api/agents/enroll", body, map[string]string{"X-Guard-Enroll-Token": mint()})
 	if fourth.Code != 200 {
 		t.Fatalf("enroll after revoke = %d: %s", fourth.Code, fourth.Body.String())
+	}
+}
+
+// TestReportReplayProtection covers the submission sequence and digest: a replay of
+// an older submission is refused, a tampered body is refused, and a plain retry of
+// the newest report stays idempotent.
+func TestReportReplayProtection(t *testing.T) {
+	srv := fleetServer(t)
+	h := srv.Handler()
+	_, token := enrollAgent(t, srv, "web01")
+
+	// Two distinct reports, each submitted with its own sequence.
+	first := minimalReport("web01", "SCAN-A")
+	second := minimalReport("web01", "SCAN-B")
+
+	post := func(body []byte, sequence string) *httptest.ResponseRecorder {
+		headers := agentHeaders(token)
+		if sequence != "" {
+			headers["X-Guard-Sequence"] = sequence
+		}
+		return request(t, h, "POST", "/api/agents/report", string(body), headers)
+	}
+
+	if rec := post(first, "1"); rec.Code != 200 {
+		t.Fatalf("sequence 1 = %d: %s", rec.Code, rec.Body.String())
+	}
+	// Replaying sequence 1 after sequence 2 must be refused...
+	if rec := post(second, "2"); rec.Code != 200 {
+		t.Fatalf("sequence 2 = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(first, "1"); rec.Code != http.StatusConflict {
+		t.Fatalf("replayed sequence = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	// ...while a retry of the newest submission is still idempotent.
+	if rec := post(second, "2"); rec.Code != 200 {
+		t.Fatalf("retry of newest submission = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	// A malformed sequence is rejected rather than silently ignored.
+	if rec := post(second, "not-a-number"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed sequence = %d, want 400", rec.Code)
+	}
+	if rec := post(second, "0"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("zero sequence = %d, want 400", rec.Code)
+	}
+	// Only the two distinct reports were stored.
+	runs, err := srv.store.ListRuns(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("stored %d runs, want 2", len(runs))
+	}
+}
+
+// TestReportDigestMismatch: a body that does not match its declared digest is
+// rejected before it can reach the history.
+func TestReportDigestMismatch(t *testing.T) {
+	srv := fleetServer(t)
+	h := srv.Handler()
+	_, token := enrollAgent(t, srv, "web01")
+	body := minimalReport("web01", "SCAN-A")
+
+	sum := sha256.Sum256([]byte("something else"))
+	headers := agentHeaders(token)
+	headers["X-Guard-Payload-SHA256"] = hex.EncodeToString(sum[:])
+	rec := request(t, h, "POST", "/api/agents/report", string(body), headers)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("digest mismatch = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "digest") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	if runs, _ := srv.store.ListRuns(t.Context(), 10); len(runs) != 0 {
+		t.Fatalf("a mismatched report was stored")
 	}
 }

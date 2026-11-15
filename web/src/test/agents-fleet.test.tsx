@@ -20,6 +20,8 @@ function agentsFixture() {
       version: "0.1.1",
       base_url: `${BASE}/releases/download/v0.1.1`,
       keeps_available: true,
+      requires_enroll_token: true,
+      mint_endpoint: "/api/agents/enroll-token",
       oneoff_commands: {
         linux: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token ENROLL-SECRET --no-service`,
         macos: `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token ENROLL-SECRET --no-service`,
@@ -102,8 +104,18 @@ function mockAgents(overrides?: { enrolled?: unknown[] }) {
   if (overrides?.enrolled) payload.fleet.enrolled = overrides.enrolled as typeof payload.fleet.enrolled;
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.startsWith("/api/agents/enroll-token/rotate")) {
-      return new Response(JSON.stringify({ enroll_token: "NEW-SECRET" }), { status: 200 });
+    if (url.startsWith("/api/agents/enroll-token")) {
+      const linux = `curl -fsSL ${BASE}/releases/download/v0.1.1/install-agent.sh | bash -s -- --version 0.1.1 --server ${BASE} --enroll-token MINTED-SECRET`;
+      return new Response(
+        JSON.stringify({
+          enroll_token: "MINTED-SECRET",
+          expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+          single_use: true,
+          commands: { linux, macos: linux, windows: "iwr ... -EnrollToken MINTED-SECRET" },
+          oneoff_commands: { linux: `${linux} --no-service`, macos: `${linux} --no-service`, windows: "iwr ... -NoService" },
+        }),
+        { status: 200 },
+      );
     }
     if (url.startsWith("/api/agents/")) {
       return new Response(JSON.stringify({ revoked: "AGT-2" }), { status: 200 });
@@ -162,13 +174,18 @@ describe("enrolled endpoint fleet", () => {
     render(<Settings />);
     await screen.findByRole("table", { name: /Enrolled endpoints/i });
 
+    // Tokens are single use, so the command appears only after minting one.
+    expect(screen.queryByText(/install-agent\.sh \| bash -s/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /New enrollment token/i }));
+
     // Linux and macOS share the same shell one-liner, so both cards match.
     const commands = await screen.findAllByText(/install-agent\.sh \| bash -s/);
     expect(commands.length).toBeGreaterThanOrEqual(1);
     expect(commands[0]).toHaveTextContent(`--server ${BASE}`);
-    expect(commands[0]).toHaveTextContent("--enroll-token ENROLL-SECRET");
-    // The operator can see the bootstrap secret the command embeds.
-    expect(screen.getAllByText(/ENROLL-SECRET/).length).toBeGreaterThan(0);
+    expect(commands[0]).toHaveTextContent("--enroll-token MINTED-SECRET");
+    // The operator can see the token the command embeds, and that it expires.
+    expect(screen.getAllByText(/MINTED-SECRET/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/expires/i)).toBeInTheDocument();
   });
 
   it("revokes an endpoint and refreshes the list", async () => {

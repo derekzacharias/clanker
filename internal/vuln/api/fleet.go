@@ -1,7 +1,9 @@
 package api
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,16 +63,12 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too_many_attempts", "too many failed enrollment attempts; wait and retry")
 		return
 	}
-	want, err := s.fleet.EnrollToken(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "enroll_error", err.Error())
-		return
-	}
 	got := strings.TrimSpace(r.Header.Get("X-Guard-Enroll-Token"))
-	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+	if got == "" {
 		s.enrollLimiter.fail(ip, now)
-		s.log.Warn("agent enrollment rejected", "remote", ip)
-		writeError(w, http.StatusUnauthorized, "unauthorized", "enrollment token is missing or wrong")
+		s.log.Warn("agent enrollment rejected: no enrollment token", "remote", ip)
+		writeError(w, http.StatusUnauthorized, "unauthorized",
+			"enrollment token is required; generate one in Settings → Agents")
 		return
 	}
 	var body struct {
@@ -92,6 +90,28 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	proof := ""
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		proof = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	}
+	// The token is burned before enrollment so a single installer command cannot
+	// enroll two endpoints, and a replay of a captured request finds it spent.
+	if err := s.fleet.ConsumeEnrollToken(r.Context(), got, body.Host); err != nil {
+		s.enrollLimiter.fail(ip, now)
+		code := http.StatusUnauthorized
+		msg := "enrollment token is missing or wrong"
+		switch {
+		case errors.Is(err, fleet.ErrEnrollTokenExpired):
+			msg = "enrollment token has expired; generate a new one in Settings → Agents"
+		case errors.Is(err, fleet.ErrEnrollTokenUsed):
+			msg = "enrollment token has already been used; generate a new one"
+		case errors.Is(err, fleet.ErrEnrollTokenInvalid):
+			code = http.StatusUnauthorized
+			msg = "enrollment token is not valid; generate one in Settings → Agents"
+		default:
+			code = http.StatusInternalServerError
+			msg = err.Error()
+		}
+		s.log.Warn("agent enrollment rejected", "remote", ip, "reason", err.Error())
+		writeError(w, code, "unauthorized", msg)
+		return
 	}
 	ag, token, err := s.fleet.Enroll(r.Context(), body.Host, body.OS, body.Version, proof)
 	switch {
@@ -162,6 +182,24 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("report exceeds the %d byte limit", maxAgentReportBytes))
 		return
 	}
+	// Replay protection. The digest proves these are the bytes that were hashed;
+	// the sequence proves this submission is newer than the last one accepted. A
+	// retry of the newest submission stays idempotent (same report id), while an
+	// older sequence is refused outright.
+	sequence, seqErr := submissionSequence(r)
+	if seqErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid_submission", seqErr.Error())
+		return
+	}
+	if digest := strings.TrimSpace(r.Header.Get("X-Guard-Payload-SHA256")); digest != "" {
+		sum := sha256.Sum256(raw)
+		if subtle.ConstantTimeCompare([]byte(strings.ToLower(digest)), []byte(hex.EncodeToString(sum[:]))) != 1 {
+			s.log.Warn("report digest mismatch", "agent", ag.ID, "remote", clientIP(r))
+			writeError(w, http.StatusBadRequest, "digest_mismatch", "payload digest does not match the body")
+			return
+		}
+	}
+
 	var rep model.Report
 	if err := json.Unmarshal(raw, &rep); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_report", "body is not a Clanker Guard report: "+err.Error())
@@ -181,6 +219,16 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	if !strings.EqualFold(strings.TrimSpace(rep.Metadata.Host), ag.Host) {
 		writeError(w, http.StatusConflict, "host_mismatch",
 			fmt.Sprintf("this agent is enrolled as %q but reported as %q; re-enroll if the hostname changed", ag.Host, rep.Metadata.Host))
+		return
+	}
+
+	// Sequence handling happens after the report id is known, so a plain retry of
+	// an already-stored report is accepted idempotently instead of looking like a
+	// replay attempt.
+	if sequence > 0 && sequence < ag.LastSequence {
+		s.log.Warn("replayed report rejected", "agent", ag.ID, "sequence", sequence, "last", ag.LastSequence)
+		writeError(w, http.StatusConflict, "replay_detected",
+			fmt.Sprintf("submission sequence %d is older than the last accepted submission (%d)", sequence, ag.LastSequence))
 		return
 	}
 
@@ -214,6 +262,11 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("store agent report", "agent", ag.ID, "err", err)
 		writeError(w, http.StatusInternalServerError, "store_error", "could not store the report")
 		return
+	}
+	if sequence > ag.LastSequence {
+		if err := s.fleet.AdvanceSequence(r.Context(), ag.ID, sequence); err != nil {
+			s.log.Warn("record submission sequence", "agent", ag.ID, "err", err)
+		}
 	}
 	if err := s.fleet.MarkReport(r.Context(), ag.ID, rep.ReportID, len(rep.Findings)); err != nil {
 		s.log.Warn("record agent report", "agent", ag.ID, "err", err)
@@ -258,16 +311,39 @@ func (s *Server) handleAgentEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleEnrollTokenRotate replaces the shared bootstrap secret.
+// handleEnrollTokenRotate mints a single-use enrollment token.
+//
+// There is no permanent shared secret any more: the operator generates a token
+// when they actually enroll an endpoint, it expires (default 24h) and it is burned
+// on first use. Already-enrolled agents are unaffected — they have their own
+// credentials.
 func (s *Server) handleEnrollTokenRotate(w http.ResponseWriter, r *http.Request) {
-	token, err := s.fleet.RotateEnrollToken(r.Context())
+	var body struct {
+		TTLHours int    `json:"ttl_hours"`
+		Label    string `json:"label"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body)
+	}
+	ttl := fleet.DefaultEnrollTokenTTL
+	if body.TTLHours > 0 && body.TTLHours <= 720 {
+		ttl = time.Duration(body.TTLHours) * time.Hour
+	}
+	token, expires, err := s.fleet.MintEnrollToken(r.Context(), ttl, body.Label)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "agent_error", err.Error())
 		return
 	}
-	// Already-enrolled agents keep their own tokens; only new enrollments change.
-	s.log.Info("agent enrollment token rotated", "remote", clientIP(r))
-	writeJSON(w, http.StatusOK, map[string]any{"enroll_token": token})
+	s.log.Info("enrollment token minted", "expires", expires.Format(time.RFC3339), "remote", clientIP(r))
+	commands := s.enrollCommands(r, token)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enroll_token":    token,
+		"expires_at":      expires.Format(time.RFC3339),
+		"single_use":      true,
+		"commands":        commands,
+		"oneoff_commands": s.enrollCommands(r, token, "--no-service"),
+		"keeps_available": true,
+	})
 }
 
 func (s *Server) writeFleetError(w http.ResponseWriter, err error) {
@@ -488,4 +564,51 @@ func (s *Server) handleAgentCancelScan(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("queued agent scan cancelled", "agent", id, "remote", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": n})
+}
+
+// enrollCommands renders the copy-and-paste installers for this server and token.
+// extra is appended to the shell command and translated for PowerShell, so the
+// one-off variant (--no-service) stays in sync with the default.
+func (s *Server) enrollCommands(r *http.Request, enrollToken string, extra ...string) map[string]string {
+	base := strings.TrimRight(s.opts.ReleaseBase, "/")
+	version := s.opts.ToolVersion
+	serverURL := requestBaseURL(r)
+	shellExtra, winExtra := "", ""
+	// Only the flags the installers actually understand are accepted here, and
+	// each has an explicit PowerShell spelling rather than a guessed one.
+	winNames := map[string]string{"--no-service": "NoService", "--watch": "Watch"}
+	for _, flag := range extra {
+		if name, ok := winNames[flag]; ok {
+			shellExtra += " " + flag
+			winExtra += " -" + name
+		}
+	}
+	args := "--version " + version
+	winArgs := "-Version " + version
+	if serverURL != "" && enrollToken != "" {
+		args += fmt.Sprintf(" --server %s --enroll-token %s", serverURL, enrollToken)
+		winArgs += fmt.Sprintf(` -Server "%s" -EnrollToken "%s"`, serverURL, enrollToken)
+	}
+	return map[string]string{
+		"linux": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
+		"macos": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
+		"windows": fmt.Sprintf(
+			`iwr %s/install-agent.ps1 -OutFile "$env:TEMP\install-agent.ps1" -UseBasicParsing; `+
+				`& "$env:TEMP\install-agent.ps1" %s%s`, base, winArgs, winExtra),
+	}
+}
+
+// submissionSequence parses the replay-protection sequence. Absent means a legacy
+// client (accepted, and the gateway logs nothing); present must be a positive
+// integer, so a malformed header cannot silently disable the check.
+func submissionSequence(r *http.Request) (int64, error) {
+	raw := strings.TrimSpace(r.Header.Get("X-Guard-Sequence"))
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("X-Guard-Sequence must be a positive integer")
+	}
+	return n, nil
 }

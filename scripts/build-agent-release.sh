@@ -57,6 +57,21 @@ cp "$ROOT/scripts/uninstall-agent.sh" "$OUT/uninstall-agent.sh"
     shasum -a 256 clanker-guard-agent_* install-agent.sh install-agent.ps1 uninstall-agent.sh > SHA256SUMS
   fi
 )
+# Sign the checksum manifest with Ed25519 when a signing key is configured.
+# The installer verifies this against a pinned public key, so a compromised
+# release origin cannot swap both the artifact and its checksum.
+if [ -n "${CLANKER_GUARD_SIGNING_KEY:-}" ]; then
+  if [ ! -f "$CLANKER_GUARD_SIGNING_KEY" ]; then
+    echo "error: CLANKER_GUARD_SIGNING_KEY=$CLANKER_GUARD_SIGNING_KEY does not exist" >&2
+    exit 3
+  fi
+  ( cd "$OUT" && openssl pkeyutl -sign -inkey "$CLANKER_GUARD_SIGNING_KEY" -rawin \
+      -in SHA256SUMS -out SHA256SUMS.sig )
+  echo "signed SHA256SUMS -> SHA256SUMS.sig"
+else
+  echo "warning: CLANKER_GUARD_SIGNING_KEY not set; artifacts are unsigned (SHA-256 only)" >&2
+fi
+
 echo
 echo "artifacts in $OUT"
 ls -1 "$OUT"

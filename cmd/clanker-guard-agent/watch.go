@@ -48,6 +48,11 @@ func cmdWatch(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
 		return 3
 	}
+	// Flush spooled reports first: if the outage that queued them is over, the
+	// dashboard should catch up before new work starts.
+	if rep, err := startReporting("", false); err == nil && rep != nil {
+		rep.flushQueue(context.Background(), os.Stderr)
+	}
 	client := agent.New(cfg.Server, cfg.Token)
 	fmt.Fprintf(os.Stderr, "watching %s as %s — scans requested from the dashboard start immediately\n",
 		cfg.Server, cfg.AgentID)
@@ -85,6 +90,11 @@ func cmdWatch(args []string) int {
 // runTask executes one claimed scan and reports the outcome.
 func runTask(ctx context.Context, cfg agent.Config, task *agent.Task) {
 	fmt.Fprintf(os.Stderr, "task %s: running scan\n", task.ID)
+	// Flush spooled reports first: if the outage that queued them is over, the
+	// dashboard should catch up before new work starts.
+	if rep, err := startReporting("", false); err == nil && rep != nil {
+		rep.flushQueue(context.Background(), os.Stderr)
+	}
 	client := agent.New(cfg.Server, cfg.Token)
 	rep, err := startReporting("", false)
 	if err != nil || rep == nil {

@@ -781,6 +781,15 @@ export const api = {
     request<{ cancelled: number }>(`/api/agents/${encodeURIComponent(id)}/scan/cancel`, { method: "POST" }),
   revokeAgent: (id: string) =>
     request<{ revoked: string }>(`/api/agents/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
+  // Enrollment tokens are single-use and expire, so they are minted on demand.
+  mintEnrollToken: (label?: string) =>
+    request<{
+      enroll_token: string;
+      expires_at: string;
+      single_use: boolean;
+      commands: Record<string, string>;
+      oneoff_commands: Record<string, string>;
+    }>("/api/agents/enroll-token", { method: "POST", body: JSON.stringify({ label: label ?? "" }) }),
   rotateEnrollToken: () =>
     request<{ enroll_token: string }>("/api/agents/enroll-token/rotate", { method: "POST" }),
   settings: () => request<Settings>("/api/settings"),
