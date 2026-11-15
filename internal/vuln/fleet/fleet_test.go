@@ -292,6 +292,63 @@ func TestMarkReportAndRevoke(t *testing.T) {
 	}
 }
 
+// A watching agent is in constant contact, so it must not read as stale. The bug this
+// pins: presence said online while "last seen" said hours ago, because only check-ins
+// moved the clock and a held claim request never does.
+func TestTouchMakesAWatchingAgentReadAsJustSeen(t *testing.T) {
+	st, clock := newStore(t)
+	ctx := context.Background()
+	ag, _, _ := st.Enroll(ctx, "host-watch", "", "", "")
+
+	// Two hours of watching: the agent is reachable, but nothing has reported.
+	*clock = clock.Add(2 * time.Hour)
+	before, err := st.Get(ctx, ag.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if before.Online(*clock) {
+		t.Fatal("an agent silent for two hours must not look reachable on the clock alone")
+	}
+
+	if err := st.Touch(ctx, ag.ID); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	got, err := st.Get(ctx, ag.ID)
+	if err != nil {
+		t.Fatalf("Get after touch: %v", err)
+	}
+	if v := got.Online(*clock); !v {
+		t.Fatalf("agent still offline after contact: %+v", got)
+	}
+	if got.State != before.State {
+		t.Fatalf("contact must not change what the agent is doing: %q -> %q", before.State, got.State)
+	}
+	if got.Findings != before.Findings || got.LastReport != before.LastReport {
+		t.Fatalf("contact must not invent results: %+v", got)
+	}
+}
+
+// Revoked endpoints are gone: contact from a token that no longer authenticates must
+// not resurrect a last-seen timestamp.
+func TestTouchIgnoresRevokedAgents(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	ag, _, _ := st.Enroll(ctx, "host-revoked", "", "", "")
+	if err := st.Revoke(ctx, ag.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if err := st.Touch(ctx, ag.ID); err != nil {
+		t.Fatalf("Touch on revoked agent: %v", err)
+	}
+	got, err := st.Get(ctx, ag.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastSeen.After(got.EnrolledAt.Add(time.Second)) {
+		t.Fatalf("revoked agent's last_seen moved: %v", got.LastSeen)
+	}
+}
+
 func TestListIsOrderedByActivity(t *testing.T) {
 	st, now := newStore(t)
 	ctx := context.Background()

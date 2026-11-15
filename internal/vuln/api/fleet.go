@@ -476,6 +476,13 @@ func (s *Server) handleAgentClaimTask(w http.ResponseWriter, r *http.Request) {
 	hold := s.presence.register(ag.ID)
 	defer s.presence.cancel(ag.ID, hold)
 
+	// A claim request is contact: the agent is up and asking for work. Recording it
+	// keeps "last seen" consistent with the presence that already marks it online.
+	// Failure here must not deny work — the token and the task are what matter.
+	if err := s.fleet.Touch(ctx, ag.ID); err != nil {
+		s.log.Warn("touch agent failed", "agent", ag.ID, "err", err)
+	}
+
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 

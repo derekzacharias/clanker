@@ -459,6 +459,19 @@ func (s *Store) Checkin(ctx context.Context, agentID string, ci Checkin) error {
 	return err
 }
 
+// Touch records contact without changing what the agent is doing.
+//
+// last_seen means "when did we last hear from this endpoint". A held claim request is
+// hearing from it, so it counts: without this, an agent that is reliably watching for
+// work showed as "online, last seen 2h ago" — the reachability signal and the clock
+// disagreed, which reads as a broken dashboard.
+func (s *Store) Touch(ctx context.Context, agentID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE agents SET last_seen = ? WHERE id = ? AND revoked = 0`,
+		s.now().Format(time.RFC3339), agentID)
+	return err
+}
+
 // MarkReport records the run id and finding count of an ingested report.
 func (s *Store) MarkReport(ctx context.Context, agentID, runID string, findings int) error {
 	now := s.now()
