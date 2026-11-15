@@ -243,7 +243,10 @@ if [ "$RUN_SCAN" = "1" ] || { [ "$REPORT_SCAN" = "1" ] && [ "$NO_SCAN" = "0" ]; 
   "$BIN_DIR/clanker-guard-agent" scan --local
   SCAN_CODE=$?
   set -e
-  if [ "$WATCH" = "0" ]; then
+  # Only stop here when nothing else was asked for. The service install below is
+  # the default, so exiting on "not --watch" used to skip it entirely and leave
+  # an endpoint that reports once and then goes dark.
+  if [ "$WATCH" = "0" ] && [ "$SERVICE" = "0" ]; then
     exit "$SCAN_CODE"
   fi
 fi
@@ -274,3 +277,7 @@ else
   echo "note: no service installed (--no-service); this endpoint is reachable only while" >&2
   echo "      you run: $BIN_DIR/clanker-guard-agent watch" >&2
 fi
+
+# Findings (2) and reduced coverage (4) are scan outcomes, not install failures,
+# but the exit code must still carry them for scripted callers.
+exit "${SCAN_CODE:-0}"
