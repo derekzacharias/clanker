@@ -661,7 +661,9 @@ function InstallCommand({ title, command }: { title: string; command: string }) 
           onOutcome={setOutcome}
         />
       </div>
-      <pre className="scroll-x p-3 text-[0.6875rem] leading-relaxed">
+      {/* The global `pre` rule supplies the gray panel; flush inside the card so
+          there is one border, not two. */}
+      <pre className="scroll-x m-0 rounded-none border-0 border-t border-border p-3 text-[0.6875rem] leading-relaxed">
         <code ref={codeRef}>{command}</code>
       </pre>
       <p role="status" aria-live="polite" className="px-3 pb-2 text-xs text-muted">
