@@ -53,8 +53,15 @@ func cmdEnroll(args []string) int {
 	// hostname to a caller that cannot show it already had it).
 	proof := ""
 	if existing, err := agent.LoadConfig(agent.ConfigPath()); err == nil {
-		if strings.TrimRight(existing.Server, "/") == strings.TrimRight(*server, "/") {
-			proof = existing.Token
+		// Present the credential even when the server URL changed: moving an
+		// endpoint to a new address must not cost it its identity. The server
+		// scopes the proof to the agent that owns this hostname, so a credential
+		// for a different endpoint simply fails closed.
+		proof = existing.Token
+		if strings.TrimRight(existing.Server, "/") != strings.TrimRight(*server, "/") {
+			fmt.Fprintf(os.Stderr, "re-enrolling %s and switching it from %s to %s\n",
+				existing.AgentID, existing.Server, *server)
+		} else {
 			fmt.Fprintf(os.Stderr, "re-enrolling as %s (presenting the existing credential)\n", existing.AgentID)
 		}
 	}

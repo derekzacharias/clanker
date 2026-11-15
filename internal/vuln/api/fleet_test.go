@@ -913,3 +913,31 @@ func TestReportDigestMismatch(t *testing.T) {
 		t.Fatalf("a mismatched report was stored")
 	}
 }
+
+// TestIdentityConflictDoesNotBurnTheEnrollmentToken keeps a retry possible: the
+// operator hits a conflict (the host is already enrolled), revokes it, and reuses
+// the same single-use token instead of minting a new one.
+func TestIdentityConflictDoesNotBurnTheEnrollmentToken(t *testing.T) {
+	srv := fleetServer(t)
+	h := srv.Handler()
+	mint := func() string {
+		tok, _, err := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "retry")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+
+	// Enroll web01 with token A, then attempt web01 again with token B: conflict.
+	if rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"web01"}`, map[string]string{"X-Guard-Enroll-Token": mint()}); rec.Code != 200 {
+		t.Fatalf("first enroll = %d", rec.Code)
+	}
+	tokenB := mint()
+	if rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"web01"}`, map[string]string{"X-Guard-Enroll-Token": tokenB}); rec.Code != http.StatusConflict {
+		t.Fatalf("conflict = %d", rec.Code)
+	}
+	// The same token still works for a different host after the conflict.
+	if rec := request(t, h, "POST", "/api/agents/enroll", `{"host":"web02"}`, map[string]string{"X-Guard-Enroll-Token": tokenB}); rec.Code != 200 {
+		t.Fatalf("retry after conflict = %d: %s", rec.Code, rec.Body.String())
+	}
+}

@@ -613,3 +613,30 @@ INSERT INTO agents (id, host, token_hash, enrolled_at) VALUES ('AGT-old','web01'
 		t.Fatalf("task lease columns missing: %v", err)
 	}
 }
+
+// TestFailedEnrollmentReleasesTheToken: a rejected attempt (identity conflict) must
+// not cost a single-use token, or a mistyped hostname forces the operator to mint
+// another one.
+func TestFailedEnrollmentReleasesTheToken(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+
+	token, _, err := st.MintEnrollToken(ctx, time.Hour, "retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ConsumeEnrollToken(ctx, token, "web01"); err != nil {
+		t.Fatalf("first consume: %v", err)
+	}
+	// The enrollment that consumed it failed; hand it back.
+	if err := st.ReleaseEnrollToken(ctx, token, "web01"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := st.ConsumeEnrollToken(ctx, token, "web01"); err != nil {
+		t.Fatalf("retry after release: %v", err)
+	}
+	// Releasing someone else's consumption is refused.
+	if err := st.ReleaseEnrollToken(ctx, token, "other-host"); !errors.Is(err, ErrEnrollTokenInvalid) {
+		t.Fatalf("release for another host = %v, want ErrEnrollTokenInvalid", err)
+	}
+}

@@ -114,6 +114,13 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ag, token, err := s.fleet.Enroll(r.Context(), body.Host, body.OS, body.Version, proof)
+	if err != nil {
+		// The token was burned above; hand it back when the failure was not about
+		// the token, so the operator can fix the hostname and retry with the same one.
+		if releaseErr := s.fleet.ReleaseEnrollToken(r.Context(), got, body.Host); releaseErr != nil {
+			s.log.Warn("could not release enrollment token", "err", releaseErr)
+		}
+	}
 	switch {
 	case errors.Is(err, fleet.ErrIdentityConflict):
 		s.log.Warn("agent enrollment refused: hostname already enrolled", "host", body.Host, "remote", ip)

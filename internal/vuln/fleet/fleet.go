@@ -478,6 +478,29 @@ func (s *Store) MarkReport(ctx context.Context, agentID, runID string, findings 
 	return err
 }
 
+// ReleaseEnrollToken un-burns a token after an enrollment that failed for a reason
+// other than the token itself (an identity conflict, a rejected hostname). Without
+// this a mistyped hostname would cost the operator a single-use token. Release is
+// limited to tokens used in the last few minutes so it cannot be abused to revive
+// an old one.
+func (s *Store) ReleaseEnrollToken(ctx context.Context, token, usedBy string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ErrEnrollTokenInvalid
+	}
+	now := s.now()
+	res, err := s.db.ExecContext(ctx, `UPDATE agent_enroll_tokens SET used_at = NULL, used_by = ''
+		WHERE token_hash = ? AND used_by = ? AND used_at IS NOT NULL AND used_at > ?`,
+		hashToken(token), truncate(usedBy, 120), now.Add(-5*time.Minute).Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrEnrollTokenInvalid
+	}
+	return nil
+}
+
 // List returns every enrolled agent, newest activity first.
 func (s *Store) List(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, host, os, version, state, phase, percent, message,
