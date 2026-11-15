@@ -611,7 +611,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // 401 on the auth endpoints is an ordinary answer (no session yet, wrong
   // password), not "your credential was rejected": dispatching the recovery
   // event for those would re-enter the probe that produced them.
-  if (res.status === 401 && !path.startsWith("/api/auth/")) {
+  // /api/health is unauthenticated by design: a 401 from it is not an authentication
+  // event, and firing the recovery flow from a liveness probe would sign the operator
+  // out over a meaningless response.
+  if (res.status === 401 && !path.startsWith("/api/auth/") && path !== "/api/health") {
     window.dispatchEvent(new CustomEvent("guard:unauthorized"));
   }
   if (!res.ok) {
@@ -720,7 +723,7 @@ export async function downloadFeedbackExport(): Promise<string> {
 
 export const api = {
   meta: () => request<Meta>("/api/meta"),
-  health: () => request<{ status: string }>("/api/health"),
+  health: () => request<{ status: string; version?: string; uptime?: string }>("/api/health"),
   // Auth: the session probe is deliberately unauthenticated so the login screen
   // can tell "needs sign-in" from "unreachable" before it has credentials.
   session: () => request<AuthSession>("/api/auth/session"),

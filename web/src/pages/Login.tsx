@@ -1,6 +1,7 @@
 import { KeyRound, Loader2, LockKeyhole, ShieldAlert } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, api, getToken, setToken, type AuthSession } from "../lib/api";
+import { useAppVersion } from "../lib/version";
 import { navigate, useQueryParam } from "../lib/router";
 import { Button } from "../components/ui/Button";
 import { Field, Input } from "../components/ui/Field";
@@ -34,6 +35,7 @@ export default function Login() {
   const [token, setTokenValue] = useState(() => getToken());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const version = useAppVersion();
 
   useEffect(() => {
     let cancelled = false;
@@ -243,6 +245,7 @@ export default function Login() {
         <p className="mt-4 text-center text-xs text-subtle">
           Clanker Guard keeps vulnerability data on this machine only.
         </p>
+        <p className="mt-1 text-center text-xs text-subtle">v{version}</p>
       </div>
     </div>
   );

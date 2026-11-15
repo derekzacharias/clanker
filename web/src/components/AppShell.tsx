@@ -25,6 +25,7 @@ import { AskGuard } from "./AskGuard";
 import { AuthGate } from "./AuthGate";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ApiError, api, getToken, setToken, type AuthSession } from "../lib/api";
+import { useAppVersion } from "../lib/version";
 
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -46,6 +47,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [authReason, setAuthReason] = useState<"required" | "rejected" | "manual">("required");
   const [authVersion, setAuthVersion] = useState(0);
   const [session, setSession] = useState<AuthSession | null>(null);
+  const version = useAppVersion();
   // Pages only mount once the auth model is known: an unauthenticated deep link
   // must redirect before it fires a request that would 401.
   const [sessionReady, setSessionReady] = useState(false);
@@ -72,7 +74,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         setSessionReady(true);
         if (s.required && !s.authenticated) {
           if (s.methods.password) {
-            navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
+            // Never redirect from the login screen to itself: that nests ?next= and
+            // can loop when two probes race.
+            if (window.location.pathname !== "/login") {
+              navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
+            }
             return;
           }
           setAuthNeeded(true);
@@ -204,6 +210,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Plus className="h-4 w-4" aria-hidden="true" />
             New Scan
           </Button>
+          <p className="mt-2 text-center text-xs text-subtle" title="Version reported by this server">
+            v{version}
+          </p>
         </div>
       </aside>
 
@@ -226,6 +235,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Button variant="primary" className="mt-4 w-full" onClick={() => navigate("/scans/new")}>
               <Plus className="h-4 w-4" aria-hidden="true" /> New Scan
             </Button>
+            <p className="mt-2 text-center text-xs text-subtle">v{version}</p>
           </div>
         </div>
       ) : null}
