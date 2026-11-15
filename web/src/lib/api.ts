@@ -118,6 +118,8 @@ export interface Vulnerability {
   confidence: "high" | "medium" | "low";
   validation_status: string;
   /** Work item derived from this finding, when one exists. Present on the detail only. */
+  /** Issues tracked for this finding (normally zero or one). */
+  gitlab_tickets?: GitLabTicket[];
   remediation_item?: {
     id: string;
     asset: string;
@@ -792,6 +794,49 @@ export const api = {
   remediation: (params: { team?: string; state?: string; owner?: string; asset?: string; overdue?: boolean } = {}) =>
     request<{ items: RemediationItem[]; total: number }>(`/api/remediation${qs(params)}`),
   ownership: (asset: string) => request<Ownership>(`/api/ownership/${encodeURIComponent(asset)}`),
+  gitlabConfig: () => request<GitLabConfig>("/api/integrations/gitlab"),
+  saveGitLab: (body: {
+    enabled?: boolean;
+    url?: string;
+    token?: string;
+    clear_token?: boolean;
+    project_id?: number;
+    labels?: string[];
+    assignee?: string;
+    timeout_seconds?: number;
+    allow_insecure_http?: boolean;
+  }) => request<GitLabConfig>("/api/integrations/gitlab", { method: "PUT", body: JSON.stringify(body) }),
+  testGitLab: (body: { url?: string; token?: string; project_id?: number; allow_insecure_http?: boolean } = {}) =>
+    request<GitLabVerifyResult>("/api/integrations/gitlab/test", { method: "POST", body: JSON.stringify(body) }),
+  gitlabProjects: (search?: string) =>
+    request<{ items: GitLabProject[]; total: number }>(
+      `/api/integrations/gitlab/projects${qs({ search })}`,
+    ),
+  gitlabUsers: (search?: string) =>
+    request<{ items: { id: number; username: string; name: string }[]; total: number }>(
+      `/api/integrations/gitlab/users${qs({ search })}`,
+    ),
+  gitlabPreview: (findingId: string) =>
+    request<{ title: string; description: string; labels: string[]; label_field: string; project_id: number; finding_key: string }>(
+      "/api/integrations/gitlab/preview",
+      { method: "POST", body: JSON.stringify({ finding_id: findingId }) },
+    ),
+  createGitLabTicket: (body: {
+    finding_id: string;
+    project_id?: number;
+    title?: string;
+    description?: string;
+    labels?: string[];
+    assignee_id?: number;
+  }) =>
+    request<{ ticket: GitLabTicket; created: boolean; reused: boolean; message: string }>(
+      "/api/integrations/gitlab/tickets",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  refreshGitLabTicket: (id: string) =>
+    request<{ ticket: GitLabTicket }>(`/api/integrations/gitlab/tickets/${encodeURIComponent(id)}/refresh`, {
+      method: "POST",
+    }),
   ownershipOverview: (opts: { triage?: boolean } = {}) =>
     request<{ items: AssetOwnershipRow[]; total: number }>(`/api/ownership${qs({ triage: opts.triage })}`),
   bulkOwnership: (body: {
@@ -907,6 +952,72 @@ export interface Ownership {
 }
 
 /** One line of the ownership inventory: an asset, its record (if any), and its work. */
+/** GitLab ticket tracked by Clanker Guard. GitLab remains the source of truth for state. */
+export interface GitLabTicket {
+  id: string;
+  finding_key: string;
+  asset: string;
+  vulnerability_id: string;
+  project_id: number;
+  project_path?: string;
+  issue_iid: number;
+  issue_url: string;
+  title: string;
+  labels?: string;
+  /** "opened" | "closed" as last read from GitLab. */
+  state: string;
+  assignee?: string;
+  created_by?: string;
+  created_at: string;
+  last_synced_at?: string;
+  pending: boolean;
+  note?: string;
+}
+
+export interface GitLabProject {
+  id: number;
+  name: string;
+  path_with_namespace: string;
+  web_url: string;
+  issues_enabled: boolean;
+}
+
+export interface GitLabCheck {
+  name: string;
+  ok: boolean;
+  detail?: string;
+  warning?: boolean;
+}
+
+export interface GitLabVerifyResult {
+  ok: boolean;
+  checks: GitLabCheck[];
+  version?: string;
+  user?: string;
+  project?: GitLabProject;
+  can_create_issues: boolean;
+  summary: string;
+}
+
+export interface GitLabConfig {
+  enabled: boolean;
+  url: string;
+  project_id: number;
+  labels: string[] | null;
+  assignee: string;
+  timeout_seconds: number;
+  allow_insecure_http: boolean;
+  /** The token itself is never sent to the browser: only whether one is stored. */
+  token_set: boolean;
+  token_source: "file" | "environment";
+  ready: boolean;
+  blocked: string;
+  verified_at?: string | null;
+  verify_ok: boolean;
+  verify_note: string;
+  config_file: string;
+}
+
 export interface AssetOwnershipRow {
   asset: string;
   team?: string;

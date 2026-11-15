@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
+	"github.com/bgdnvk/clanker/internal/vuln/ticketing"
 )
 
 // jobManager tracks running scan/feed jobs and their cancel functions.
@@ -145,11 +146,13 @@ type vulnRow struct {
 	// Attached by the detail handler only: the list endpoints stay about findings, and
 	// ownership is one lookup rather than a join across every row. (The field next to it,
 	// Remediation, is the advisory's advice text — a different thing.)
-	WorkItem    *remediationView `json:"remediation_item,omitempty"`
-	Raise       []string         `json:"confidence_increase,omitempty"`
-	Lower       []string         `json:"confidence_reduction,omitempty"`
-	RiskFactors []riskRow        `json:"risk_factors,omitempty"`
-	References  []linkRow        `json:"references,omitempty"`
+	WorkItem *remediationView `json:"remediation_item,omitempty"`
+	// GitLabTickets are the issues tracked for this finding (normally zero or one).
+	GitLabTickets []ticketing.Ticket `json:"gitlab_tickets,omitempty"`
+	Raise         []string           `json:"confidence_increase,omitempty"`
+	Lower         []string           `json:"confidence_reduction,omitempty"`
+	RiskFactors   []riskRow          `json:"risk_factors,omitempty"`
+	References    []linkRow          `json:"references,omitempty"`
 	// Analyst is the evidence-backed correction applied by a review, when one
 	// exists. The scanner verdict stays in Affected.
 	Analyst *analystView `json:"analyst,omitempty"`

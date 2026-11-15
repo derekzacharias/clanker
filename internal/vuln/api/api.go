@@ -25,6 +25,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/remediate"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
+	"github.com/bgdnvk/clanker/internal/vuln/ticketing"
 )
 
 // Options configures the HTTP server.
@@ -55,6 +56,11 @@ type Options struct {
 	// ReleaseBase is the published artifact base URL. When empty the UI is told
 	// that no artifacts are published yet instead of being shown fake commands.
 	ReleaseBase string
+	// GitLabPath is the GitLab integration file (0600, holds the access token).
+	// Empty means the per-user default; tests set it to a temp dir.
+	GitLabPath string
+	// Getenv overrides os.Getenv for integration credentials (tests).
+	Getenv func(string) string
 	// Logger receives request and job logs.
 	Logger *slog.Logger
 	// Now is injectable for tests.
@@ -83,6 +89,11 @@ type Server struct {
 	trustedProxies []*net.IPNet
 	// remediate owns asset ownership and remediation work items.
 	remediate *remediate.Store
+	// tickets links findings to GitLab issues.
+	tickets *ticketing.Store
+	// getenv reads the deployment environment for integration credentials (tests inject
+	// their own so a developer's GITLAB_TOKEN cannot change a test outcome).
+	getenv func(string) string
 }
 
 // New opens the store and returns a ready server.
@@ -158,6 +169,15 @@ func New(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("initialise remediation store: %w", err)
 	}
 	s.remediate = remStore
+	ticketStore, err := ticketing.New(store.DB())
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("initialise ticket store: %w", err)
+	}
+	s.tickets = ticketStore
+	if s.getenv == nil {
+		s.getenv = os.Getenv
+	}
 	if s.auth != nil {
 		if mode, insecure := s.auth.InsecurePerms(); insecure {
 			s.log.Warn("credential file is readable by other accounts; run: chmod 600",
@@ -235,6 +255,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/remediation/{id}", s.handleRemediationGet)
 	s.mux.HandleFunc("PATCH /api/remediation/{id}", s.handleRemediationPatch)
 	s.mux.HandleFunc("POST /api/remediation/{id}/verify", s.handleRemediationVerify)
+
+	// GitLab ticketing: configuration, connection test, and issues.
+	s.mux.HandleFunc("GET /api/integrations/gitlab", s.handleGitLabGet)
+	s.mux.HandleFunc("PUT /api/integrations/gitlab", s.handleGitLabPut)
+	s.mux.HandleFunc("POST /api/integrations/gitlab/test", s.handleGitLabTest)
+	s.mux.HandleFunc("GET /api/integrations/gitlab/projects", s.handleGitLabProjects)
+	s.mux.HandleFunc("GET /api/integrations/gitlab/users", s.handleGitLabUsers)
+	s.mux.HandleFunc("POST /api/integrations/gitlab/preview", s.handleGitLabPreview)
+	s.mux.HandleFunc("GET /api/integrations/gitlab/tickets", s.handleGitLabTickets)
+	s.mux.HandleFunc("POST /api/integrations/gitlab/tickets", s.handleGitLabCreateTicket)
+	s.mux.HandleFunc("POST /api/integrations/gitlab/tickets/{id}/refresh", s.handleGitLabTicketRefresh)
 
 	s.mux.HandleFunc("GET /api/feeds", s.handleFeeds)
 	s.mux.HandleFunc("POST /api/feeds/update", s.handleFeedUpdate)

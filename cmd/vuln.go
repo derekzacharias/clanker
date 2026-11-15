@@ -26,6 +26,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/sbom"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
 	"github.com/bgdnvk/clanker/internal/vuln/scope"
+	"github.com/bgdnvk/clanker/internal/vuln/ticketing"
 )
 
 // ExitCode reports the exit code requested by the last subcommand.
@@ -531,6 +532,7 @@ func newVulnServeCmd() *cobra.Command {
 		webDir         string
 		releaseBase    string
 		authFile       string
+		gitlabFile     string
 		sessionTTL     time.Duration
 		trustedProxies string
 		agentVersion   string
@@ -566,6 +568,7 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 				Token:          os.Getenv("CLANKER_GUARD_TOKEN"),
 				ReleaseBase:    releaseBase,
 				AuthPath:       authFile,
+				GitLabPath:     gitlabFile,
 				SessionTTL:     sessionTTL,
 				TrustedProxies: splitList(trustedProxies),
 				AgentVersion:   agentVersion,
@@ -604,6 +607,8 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 	cmd.Flags().StringVar(&webDir, "web-dir", "web/dist", "directory containing the built web UI")
 	cmd.Flags().StringVar(&releaseBase, "release-base", "", "published agent artifact base URL (or CLANKER_GUARD_RELEASE_BASE)")
 	cmd.Flags().StringVar(&authFile, "auth-file", auth.DefaultPath(), "password credential file (empty disables password sign-in)")
+	cmd.Flags().StringVar(&gitlabFile, "gitlab-config", ticketing.DefaultConfigPath(),
+		"GitLab integration file (0600; holds the access token) or CLANKER_GUARD_GITLAB_FILE")
 	cmd.Flags().DurationVar(&sessionTTL, "session-ttl", auth.DefaultSessionTTL, "how long a browser sign-in stays valid")
 	cmd.Flags().StringVar(&agentVersion, "agent-version", os.Getenv("CLANKER_GUARD_AGENT_VERSION"),
 		"agent release version advertised in install commands (default: the tag in --release-base, else this build's version)")

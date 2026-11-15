@@ -63,6 +63,15 @@ installers, and a deterministic "Ask Guard" panel. See
 [docs/UI.md](docs/UI.md) for the design system, accessibility notes and the API
 contract. Build the assets once with `cd web && npm ci && npm run build`.
 
+#### GitLab ticketing
+
+Findings can be turned into GitLab issues from the finding panel: Settings →
+Integrations → GitLab takes a server URL, an access token and a destination project, then
+**Create GitLab Ticket** previews the issue body, creates it through the GitLab API and
+stores the link and state. Off by default; the token is write-only and never returned to the
+browser. See [docs/GITLAB.md](docs/GITLAB.md) for configuration, the security rules (SSRF,
+plain-HTTP, redirects, duplicate prevention) and what the generated issue contains.
+
 #### Agent transport and identity
 
 The agent only talks to the dashboard over **HTTPS**. `enroll`, `watch` and every

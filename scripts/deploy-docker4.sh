@@ -121,7 +121,10 @@ RUN_ARGS="-d --name $CONTAINER --restart unless-stopped --user 1000:1000 -p $POR
 [ -n "$TRUSTED_PROXIES" ] && RUN_ARGS="$RUN_ARGS -e CLANKER_GUARD_TRUSTED_PROXIES=$TRUSTED_PROXIES"
 run "ssh -o BatchMode=yes '$HOST' 'cd $REMOTE_DIR && docker build --no-cache -q -t $IMAGE . >/dev/null'"
 run "ssh -o BatchMode=yes '$HOST' 'docker rm -f $CONTAINER >/dev/null 2>&1 || true'"
-run "ssh -o BatchMode=yes '$HOST' 'docker run $RUN_ARGS $IMAGE --listen $LISTEN --web-dir /web --cache /data/intel.db --auth-file /config/auth.json'"
+# The GitLab integration file lives beside the password file: it holds an access token,
+# so it must sit on the mounted config volume with 0600 permissions, not in the container's
+# ephemeral home (which would silently drop the token on every restart).
+run "ssh -o BatchMode=yes '$HOST' 'docker run $RUN_ARGS $IMAGE --listen $LISTEN --web-dir /web --cache /data/intel.db --auth-file /config/auth.json --gitlab-config /config/gitlab.json'"
 
 log "verify"
 if [ "$DRY_RUN" = "1" ]; then

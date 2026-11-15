@@ -5,6 +5,7 @@ import { api, ApiError, getToken, setToken, type EnrolledAgent, type FeedRespons
 import { useAsync } from "../lib/useApi";
 import { useQueryParam } from "../lib/router";
 import Improvement from "./Improvement";
+import { GitLabSettings } from "../components/GitLabSettings";
 import { formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -17,7 +18,7 @@ import { Switch } from "../components/ui/Switch";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 
-const TABS = ["general", "intelligence", "agents", "improvement", "access"] as const;
+const TABS = ["general", "intelligence", "agents", "integrations", "improvement", "access"] as const;
 
 export default function Settings() {
   const tabParam = useQueryParam("tab");
@@ -25,13 +26,17 @@ export default function Settings() {
   const initialTab = TABS.includes((tabParam ?? "") as (typeof TABS)[number]) ? (tabParam as string) : "general";
   return (
     <div>
-      <PageHeader title="Settings" description="Scanner policy, vulnerability intelligence, endpoint agents and access." />
+      <PageHeader
+        title="Settings"
+        description="Scanner policy, vulnerability intelligence, endpoint agents, integrations and access."
+      />
       <Tabs.Root defaultValue={initialTab}>
         <Tabs.List className="mb-3 flex flex-wrap gap-1 border-b border-border" aria-label="Settings sections">
           {[
             ["general", "General"],
             ["intelligence", "Intelligence"],
             ["agents", "Endpoint agents"],
+            ["integrations", "Integrations"],
             ["improvement", "Continuous improvement"],
             ["access", "Access"],
           ].map(([value, label]) => (
@@ -54,6 +59,18 @@ export default function Settings() {
         <Tabs.Content value="agents">
           <AgentsTab />
         </Tabs.Content>
+        <Tabs.Content value="integrations">
+          <Card>
+            <CardHeader
+              title="GitLab"
+              description="Create remediation issues from findings. The access token is stored on the server and never returned to the browser."
+            />
+            <CardBody>
+              <GitLabSettings />
+            </CardBody>
+          </Card>
+        </Tabs.Content>
+
         <Tabs.Content value="improvement">
           <Improvement />
         </Tabs.Content>

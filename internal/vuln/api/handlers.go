@@ -529,13 +529,27 @@ func (s *Server) handleVulnerabilityDetail(w http.ResponseWriter, r *http.Reques
 	}
 	// Ownership and the deadline live on the work item, not on the finding: findings are
 	// evidence and never change, while who owes the fix and when can.
+	var findingKey string
 	if s.remediate != nil {
 		item, err := s.remediate.FindForFinding(r.Context(), v.Asset, v.CVE, v.Product, v.InstalledVersion)
 		switch {
 		case err == nil:
 			v.WorkItem = &remediationView{Item: *item, Overdue: item.Overdue(s.opts.Now())}
+			findingKey = item.FindingKey
 		case !errors.Is(err, remediate.ErrNotFound):
 			s.log.Warn("look up remediation item for finding", "finding", id, "err", err)
+		}
+	}
+	// The ticket link travels with the finding so the detail panel can show the issue
+	// instead of offering to create a second one.
+	if s.tickets != nil {
+		if findingKey == "" {
+			findingKey = remediate.FindingKey(v.Asset, modelFindingFor(v))
+		}
+		if tickets, err := s.tickets.ForFinding(r.Context(), findingKey); err != nil {
+			s.log.Warn("look up tickets for finding", "finding", id, "err", err)
+		} else {
+			v.GitLabTickets = tickets
 		}
 	}
 	writeJSON(w, http.StatusOK, v)

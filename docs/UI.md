@@ -88,7 +88,7 @@ column with words.
 | **Reports** | What did the assessment conclude? | stored reports, JSON/Markdown/SARIF/HTML export, evidence preserved; **software inventory** export (CSV asset list + CycloneDX SBOM) per host, and one environment-wide CSV across every assessed host |
 | **Remediation** | Who owes what, and by when? | work items derived from findings: team, owner, state, SLA due date, overdue flag; filter by team/state/overdue; **My work** scopes the queue to the signed-in operator and each row can be claimed; automated execution is reported as unavailable rather than offered |
 | **Ownership** | Who is responsible for each machine? | inventory of assets with their work counts, recorded team/engineer, exposure; single-row edit and multi-select bulk assignment; assets routed by the category mapping but with no record say so explicitly ("work maps to X") because routing is not accountability |
-| **Settings** | Policy, intelligence, agents, access | tabs; feed freshness + update; agent install commands only when artifacts are published |
+| **Settings** | Policy, intelligence, agents, integrations, access | tabs; feed freshness + update; agent install commands only when artifacts are published |
 | **Sign in** (`/login`) | Who are you, and how do I stay signed in? | username + password form when a dashboard password exists; falls back to the token form on token-only servers; states the session length; one error line, no user/password distinction |
 
 **Ask Guard** is a supporting side panel, not the primary workflow. It is
@@ -125,6 +125,10 @@ GET    /api/remediation              work items (team, state, owner, overdue fil
 GET    /api/remediation/summary      counts + automation status (disabled, with reason)
 GET    /api/remediation/{id} · PATCH one item: team, engineer, workflow state
 POST   /api/remediation/{id}/verify  record a verification scan (the only path to resolved)
+GET    /api/integrations/gitlab      configuration (the token is reported as token_set only)
+PUT    /api/integrations/gitlab      update; a blank token keeps the stored one
+POST   /api/integrations/gitlab/test connection checks — creates nothing
+POST   /api/integrations/gitlab/tickets  create (or reuse) an issue; see docs/GITLAB.md
 GET    /api/settings  · PUT          policy, offline default, release base
 POST   /api/ask                      deterministic answer + citations + grounding
 ```
