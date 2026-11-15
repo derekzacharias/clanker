@@ -540,6 +540,10 @@ reports record the non-default decisions in `metadata.detection_policy`.
 
 ## 12. Roadmap and known gaps
 
+Work that is planned but not implemented — including remediation ownership,
+ticketing and the automation design — is tracked in
+[docs/BACKLOG.md](BACKLOG.md).
+
 Implemented (Phase 1 + much of Phase 2):
 
 * endpoint inventory (Linux dpkg/rpm/apk, Python, npm, Ruby, macOS brew, Windows

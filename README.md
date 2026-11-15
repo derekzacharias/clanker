@@ -171,7 +171,8 @@ CLANKER_GUARD_RELEASE_BASE=https://github.com/derekzacharias/clanker-guard-agent
 ```
 
 See [docs/VULN.md](docs/VULN.md) for architecture, accuracy rules, coverage limits,
-the confidence model and the roadmap.
+the confidence model and the roadmap. Planned work lives in
+[docs/BACKLOG.md](docs/BACKLOG.md); deployment in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Install
 
