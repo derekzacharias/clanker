@@ -28,9 +28,9 @@
   --low-soft: #e6f4ec;
   --unknown: #5b6675;
   --unknown-soft: #eef1f5;
-  /* code panels read as inset: a shade darker than surface-2 in light mode */
-  --code-bg: #eef1f5;
-  --code-border: #dfe5ec;
+  /* Code surfaces: unmistakably a code block, not a tint of the page. */
+  --code-bg: #e6ebf1;
+  --code-border: #cdd5df;
   --focus: #2563eb;
   --radius: 0.65rem;
   --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.06);
@@ -62,9 +62,10 @@
   --low-soft: #11251a;
   --unknown: #94a3b8;
   --unknown-soft: #1a2130;
-  /* code panels sit a shade darker than the card in dark mode */
-  --code-bg: #0e141f;
-  --code-border: #263041;
+  /* In dark mode the panel is lighter than the app surface (#111722) so the block
+     reads as an inset code area rather than blending into the card. */
+  --code-bg: #293241;
+  --code-border: #465364;
   --focus: #60a5fa;
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-pop: 0 16px 40px rgb(0 0 0 / 0.55);
