@@ -27,7 +27,11 @@ func (s *Server) gitlabSettings() (ticketing.Settings, error) {
 	}
 	file, err := ticketing.Load(path)
 	if err != nil {
-		return ticketing.Settings{}, err
+		// Running the server as a different user than owns the file is the most likely
+		// cause, and the raw "permission denied" does not say what to do about it.
+		return ticketing.Settings{}, fmt.Errorf("%w (the server must be able to read %s; "+
+			"if the server was ever started as root, run `chown <server user> %s` and `chmod 600 %s`)",
+			err, path, path, path)
 	}
 	return ticketing.WithEnv(file, s.getenv), nil
 }

@@ -71,6 +71,11 @@ clanker vuln serve --gitlab-config /config/gitlab.json
 The default is `~/.config/clanker-guard/gitlab.json`, a `0600` file written atomically. In
 the container deployment it is mounted at `/config/gitlab.json` so it survives restarts.
 
+**Run the server as the file's owner.** The file is rewritten whenever settings change or a
+connection test runs, and a file created by a different user (for example a one-off `docker
+run` without `--user 1000:1000`) leaves the service unable to read it. The API says so
+explicitly and prints the `chown`/`chmod` that fixes it.
+
 ---
 
 ## 3. Creating a ticket
