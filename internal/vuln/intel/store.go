@@ -590,3 +590,29 @@ func (s *Store) AuditActions(ctx context.Context) ([]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// PruneRuns deletes stored assessments older than cutoff (RFC3339) and returns how many
+// went. Findings already derived from them stay: history is pruned, evidence in the work
+// items is not.
+func (s *Store) PruneRuns(ctx context.Context, cutoff string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM runs WHERE finished_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// BackupTo writes a consistent snapshot with VACUUM INTO.
+//
+// `cp` on a live SQLite database can capture a torn page; VACUUM INTO produces a file that
+// is guaranteed to open. The snapshot is chmod 0600 because it contains the whole estate.
+func (s *Store) BackupTo(ctx context.Context, path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists", path)
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}

@@ -794,6 +794,16 @@ export const api = {
   remediation: (params: { team?: string; state?: string; owner?: string; asset?: string; overdue?: boolean } = {}) =>
     request<{ items: RemediationItem[]; total: number }>(`/api/remediation${qs(params)}`),
   ownership: (asset: string) => request<Ownership>(`/api/ownership/${encodeURIComponent(asset)}`),
+  acceptRisk: (id: string, body: { reason: string; days?: number; until?: string }) =>
+    request<{ item: RemediationItem }>(`/api/remediation/${encodeURIComponent(id)}/accept`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  remediationGroups: () =>
+    request<{ items: RemediationGroup[]; total: number; findings: number }>("/api/remediation/groups"),
+  metrics: () => request<ProcessMetrics>("/api/metrics"),
+  runMaintenance: () => request<{ ok: boolean }>("/api/maintenance/run", { method: "POST" }),
+  backup: () => request<{ path: string; name: string }>("/api/maintenance/backup", { method: "POST" }),
   audit: (opts: { limit?: number; action?: string; actor?: string } = {}) =>
     request<{ items: AuditEntry[]; total: number; actions: string[] }>(
       `/api/audit${qs({ limit: opts.limit, action: opts.action, actor: opts.actor })}`,
@@ -889,6 +899,7 @@ export const api = {
     policy?: { fail_on: string; fail_on_kev: boolean };
     offline_default?: boolean;
     release_base?: string;
+    operations?: Record<string, string>;
   }) => request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
   feedback: (id: string, body: { verdict: Verdict; reason_code?: ReasonCode; reason_text?: string; analyst?: string }) =>
     request<FeedbackResponse>(`/api/vulnerabilities/${encodeURIComponent(id)}/feedback`, {
@@ -1078,10 +1089,46 @@ export interface RemediationItem {
   evidence: string;
   report_id: string;
   notes?: string;
+  verified_report_id?: string;
+  accept_reason?: string;
+  accepted_by?: string;
+  accept_expires_at?: string;
   first_seen: string;
   last_seen: string;
   updated_at: string;
   overdue: boolean;
+}
+
+/** One remediation unit: the findings on an asset that a single change closes. */
+export interface RemediationGroup {
+  key: string;
+  asset: string;
+  product: string;
+  fixed_version?: string;
+  team?: string;
+  owner?: string;
+  severity: string;
+  priority: string;
+  due_at?: string;
+  items: number;
+  critical: number;
+  overdue: number;
+  advisories: string[];
+  item_ids: string[];
+}
+
+export interface ProcessMetrics {
+  generated: string;
+  open: number;
+  overdue: number;
+  unassigned: number;
+  acceptances_due: number;
+  age_buckets: { label: string; count: number }[];
+  time_to_fix: { severity: string; resolved: number; median_days: number; p90_days: number }[];
+  reopened: number;
+  verified: number;
+  units: number;
+  findings: number;
 }
 
 export interface RemediationSummary {

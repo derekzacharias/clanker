@@ -123,7 +123,7 @@ func SoftwareInventoryCSV(reports []model.Report) ([]byte, error) {
 		return nil, err
 	}
 	for _, r := range rows {
-		if err := w.Write(r.cells); err != nil {
+		if err := w.Write(neutralise(r.cells)); err != nil {
 			return nil, err
 		}
 	}
@@ -183,4 +183,29 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// neutralise defuses spreadsheet formula injection.
+//
+// Package names, file paths and hostnames come from the scanned system or from an SBOM that
+// someone else produced. A cell beginning with =, +, - or @ is executed by Excel and Sheets,
+// so a crafted package name ("=HYPERLINK(...)") becomes a live formula the moment the
+// inventory export is opened. Prefixing a single quote is the standard, visible-only fix:
+// the text is unchanged for a reader who is not using a spreadsheet.
+func neutralise(cells []string) []string {
+	out := make([]string, len(cells))
+	for i, c := range cells {
+		trimmed := strings.TrimLeft(c, " \t\r\n")
+		if trimmed == "" {
+			out[i] = c
+			continue
+		}
+		switch trimmed[0] {
+		case '=', '+', '-', '@', '\t', '\r':
+			out[i] = "'" + c
+		default:
+			out[i] = c
+		}
+	}
+	return out
 }

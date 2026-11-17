@@ -54,7 +54,9 @@ export default function Settings() {
 
         <Tabs.Content value="general">
           <GeneralTab />
+          <GeneralOperations />
         </Tabs.Content>
+
         <Tabs.Content value="intelligence">
           <IntelligenceTab />
         </Tabs.Content>
@@ -779,4 +781,118 @@ function relativeSeconds(seconds?: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+/**
+ * Operational settings: the jobs that keep the data current and the exits that keep it
+ * recoverable. Deliberately small — three numbers and two buttons, all of which do
+ * something the server would otherwise only do when a human remembered.
+ */
+function GeneralOperations() {
+  const settings = useAsync(() => api.settings());
+  const { push } = useToast();
+  const [webhook, setWebhook] = useState("");
+  const [secret, setSecret] = useState("");
+  const [digestHours, setDigestHours] = useState(24);
+  const [refreshHours, setRefreshHours] = useState(24);
+  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const vals = settings.data as unknown as Record<string, unknown> | undefined;
+    if (!vals || loaded) return;
+    const ops = (vals.operations ?? {}) as Record<string, string>;
+    setWebhook(ops["notify.webhook_url"] ?? "");
+    setDigestHours(Number(ops["notify.digest_hours"] ?? "24") || 24);
+    setRefreshHours(Number(ops["feeds.refresh_hours"] ?? "24") || 24);
+    setLoaded(true);
+  }, [settings.data, loaded]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.saveSettings({
+        operations: {
+          "notify.webhook_url": webhook.trim(),
+          "notify.webhook_secret": secret.trim(),
+          "notify.digest_hours": String(digestHours),
+          "feeds.refresh_hours": String(refreshHours),
+        },
+      });
+      push("Operational settings saved");
+      settings.reload();
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Could not save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runSweep() {
+    setBusy("sweep");
+    try {
+      await api.runMaintenance();
+      push("Expired acceptances re-checked, history pruned, digest evaluated");
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Sweep failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function backupNow() {
+    setBusy("backup");
+    try {
+      const res = await api.backup();
+      push(`Snapshot written: ${res.name}`);
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Backup failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Card className="mt-3">
+      <CardHeader
+        title="Operations"
+        description="Scheduled freshness, the one channel that tells a human work is late, and a tested way to take a copy."
+      />
+      <CardBody className="space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Notification webhook" htmlFor="ops-webhook" hint="Receives a JSON digest when work is overdue. One message per interval, signed when a secret is set.">
+            <Input id="ops-webhook" value={webhook} onChange={(e) => setWebhook(e.target.value)} placeholder="https://hooks.example.com/clanker" />
+          </Field>
+          <Field label="Webhook signing secret" htmlFor="ops-secret" hint="Optional. Sent as X-Guard-Signature (HMAC-SHA256 of the body).">
+            <Input id="ops-secret" type="password" value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="off" />
+          </Field>
+          <Field label="Digest interval (hours)" htmlFor="ops-digest">
+            <Input id="ops-digest" type="number" min={1} max={168} value={digestHours} onChange={(e) => setDigestHours(Number(e.target.value))} />
+          </Field>
+          <Field label="Intelligence refresh (hours)" htmlFor="ops-feeds" hint="KEV and EPSS. Priority and SLAs depend on them staying current.">
+            <Input id="ops-feeds" type="number" min={1} max={168} value={refreshHours} onChange={(e) => setRefreshHours(Number(e.target.value))} />
+          </Field>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="primary" onClick={save} disabled={saving}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Check className="h-4 w-4" aria-hidden="true" />}
+            Save
+          </Button>
+          <Button onClick={runSweep} disabled={busy !== null}>
+            {busy === "sweep" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
+            Run maintenance now
+          </Button>
+          <Button onClick={backupNow} disabled={busy !== null}>
+            {busy === "backup" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Check className="h-4 w-4" aria-hidden="true" />}
+            Back up database
+          </Button>
+        </div>
+        <p className="text-xs text-muted">
+          The backup button needs a backup directory on the server (<span className="mono">--backup-dir</span>). History older
+          than the retention window is pruned automatically; work items keep their evidence.
+        </p>
+      </CardBody>
+    </Card>
+  );
 }

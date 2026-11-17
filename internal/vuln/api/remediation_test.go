@@ -549,3 +549,127 @@ func TestResponsesCarrySecurityHeaders(t *testing.T) {
 		}
 	}
 }
+
+// An accepted risk is a decision with an owner, a reason and an end date. Without those it
+// is a forgotten finding wearing a label, which is exactly what auditors ask about.
+func TestRiskAcceptanceNeedsAReasonAndExpires(t *testing.T) {
+	srv := fleetServer(t)
+	postReport(t, srv, "web01", "Ubuntu:24.04", "openssl", "CVE-2026-8200", "high", "SCAN-ACC-1")
+	var list struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation?asset=web01", &list)
+	id := list.Items[0].ID
+
+	// No expiry: refused.
+	if rec := request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/accept",
+		`{"reason":"vendor patch comes in Q3"}`, dash()); rec.Code != 400 {
+		t.Fatalf("accept without expiry = %d %s", rec.Code, rec.Body.String())
+	}
+	// No reason: refused.
+	if rec := request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/accept",
+		`{"days":30}`, dash()); rec.Code != 409 {
+		t.Fatalf("accept without reason = %d %s", rec.Code, rec.Body.String())
+	}
+	// A real acceptance records who, why and until when.
+	rec := request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/accept",
+		`{"reason":"vendor patch arrives in Q3; compensating control in place","days":30}`, dash())
+	if rec.Code != 200 {
+		t.Fatalf("accept = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Item struct {
+			State           string `json:"state"`
+			AcceptReason    string `json:"accept_reason"`
+			AcceptedBy      string `json:"accepted_by"`
+			AcceptExpiresAt string `json:"accept_expires_at"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Item.State != "risk_accepted" || out.Item.AcceptReason == "" ||
+		out.Item.AcceptedBy == "" || out.Item.AcceptExpiresAt == "" {
+		t.Fatalf("acceptance = %+v", out.Item)
+	}
+	// The decision is in the diary.
+	var audit struct {
+		Items []struct {
+			Action string `json:"action"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/audit?action=remediation.accept", &audit)
+	if len(audit.Items) != 1 {
+		t.Fatalf("acceptance not audited: %+v", audit.Items)
+	}
+}
+
+// The process view has to come from stored facts: a stalled queue should look stalled, and
+// a fix that took three weeks should show three weeks.
+func TestMetricsReportAgeingAndTimeToFix(t *testing.T) {
+	srv := fleetServer(t)
+	postReport(t, srv, "web01", "Ubuntu:24.04", "openssl", "CVE-2026-8401", "high", "SCAN-M-1")
+
+	var m struct {
+		Open       int `json:"open"`
+		Units      int `json:"units"`
+		Findings   int `json:"findings"`
+		AgeBuckets []struct {
+			Label string `json:"label"`
+			Count int    `json:"count"`
+		} `json:"age_buckets"`
+	}
+	dashGet(t, srv.Handler(), "/api/metrics", &m)
+	if m.Open != 1 {
+		t.Fatalf("open = %d, want 1", m.Open)
+	}
+	if len(m.AgeBuckets) != 4 {
+		t.Fatalf("age buckets = %+v", m.AgeBuckets)
+	}
+	total := 0
+	for _, b := range m.AgeBuckets {
+		total += b.Count
+	}
+	if total != 1 {
+		t.Fatalf("age buckets total = %d, want 1", total)
+	}
+	// One asset, one package, one unit.
+	if m.Units != 1 || m.Findings != 1 {
+		t.Fatalf("units/findings = %d/%d", m.Units, m.Findings)
+	}
+
+	// A resolved item produces a time-to-fix figure rather than nothing.
+	var list struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation?asset=web01", &list)
+	id := list.Items[0].ID
+	request(t, srv.Handler(), "PATCH", "/api/remediation/"+id, `{"state":"in_progress"}`, dash())
+	request(t, srv.Handler(), "PATCH", "/api/remediation/"+id, `{"state":"remediation_applied"}`, dash())
+	if rec := request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/verify",
+		`{"report_id":""}`, dash()); rec.Code != 409 {
+		t.Fatalf("verify without a report = %d", rec.Code)
+	}
+}
+
+// Grouping is exposed so the queue can be read as units of work.
+func TestGroupEndpointFoldsFindings(t *testing.T) {
+	srv := fleetServer(t)
+	postReport(t, srv, "web01", "Ubuntu:24.04", "openssl", "CVE-2026-8501", "high", "SCAN-GRP-1")
+	var g struct {
+		Total    int `json:"total"`
+		Findings int `json:"findings"`
+		Items    []struct {
+			Product string `json:"product"`
+			Items   int    `json:"items"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation/groups", &g)
+	if g.Total != 1 || g.Findings != 1 || g.Items[0].Product != "openssl" {
+		t.Fatalf("groups = %+v", g)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrNotFound means no such remediation item (or ownership record).
@@ -52,6 +53,9 @@ CREATE TABLE IF NOT EXISTS remediation_items (
   evidence          TEXT NOT NULL DEFAULT '',
   report_id         TEXT NOT NULL DEFAULT '',
   verified_report_id TEXT NOT NULL DEFAULT '',
+  accept_reason      TEXT NOT NULL DEFAULT '',
+  accepted_by        TEXT NOT NULL DEFAULT '',
+  accept_expires_at  TEXT,
   notes             TEXT NOT NULL DEFAULT '',
   first_seen        TEXT NOT NULL,
   last_seen         TEXT NOT NULL,
@@ -80,9 +84,15 @@ func New(db *sql.DB) (*Store, error) {
 	}
 	// Additive migration: SQLite has no "ADD COLUMN IF NOT EXISTS", so ask the catalogue
 	// first. Existing databases keep their rows.
-	if err := ensureColumn(db, "remediation_items", "verified_report_id",
-		"TEXT NOT NULL DEFAULT ''"); err != nil {
-		return nil, err
+	for _, col := range [][3]string{
+		{"verified_report_id", "TEXT NOT NULL DEFAULT ''", ""},
+		{"accept_reason", "TEXT NOT NULL DEFAULT ''", ""},
+		{"accepted_by", "TEXT NOT NULL DEFAULT ''", ""},
+		{"accept_expires_at", "TEXT", ""},
+	} {
+		if err := ensureColumn(db, "remediation_items", col[0], col[1]); err != nil {
+			return nil, err
+		}
 	}
 	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
 }
@@ -248,7 +258,8 @@ type Filter struct {
 func (s *Store) List(ctx context.Context, f Filter, policy Policy) ([]Item, error) {
 	q := `SELECT id, asset, finding_key, vulnerability_id, product, installed_version, ecosystem,
 		severity, category, team, owner, state, priority, due_at, fixed_version, remediation,
-		evidence, report_id, verified_report_id, notes, first_seen, last_seen, updated_at
+		evidence, report_id, verified_report_id, accept_reason, accepted_by, accept_expires_at,
+		notes, first_seen, last_seen, updated_at
 		FROM remediation_items WHERE 1=1`
 	args := []any{}
 	if f.Team != "" {
@@ -305,7 +316,8 @@ func (s *Store) List(ctx context.Context, f Filter, policy Policy) ([]Item, erro
 func (s *Store) Get(id string) (*Item, error) {
 	row := s.db.QueryRow(`SELECT id, asset, finding_key, vulnerability_id, product, installed_version,
 		ecosystem, severity, category, team, owner, state, priority, due_at, fixed_version, remediation,
-		evidence, report_id, verified_report_id, notes, first_seen, last_seen, updated_at
+		evidence, report_id, verified_report_id, accept_reason, accepted_by, accept_expires_at,
+		notes, first_seen, last_seen, updated_at
 		FROM remediation_items WHERE id = ?`, id)
 	item, err := scanItem(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -400,10 +412,13 @@ func (s *Store) MarkVerified(ctx context.Context, id, reportID string) (Item, er
 // Summary is the count set the dashboard needs, computed in SQL rather than by
 // loading rows into the browser.
 type Summary struct {
-	Total              int            `json:"total"`
-	Open               int            `json:"open"`
-	Unassigned         int            `json:"unassigned"`
-	Overdue            int            `json:"overdue"`
+	Total      int `json:"total"`
+	Open       int `json:"open"`
+	Unassigned int `json:"unassigned"`
+	Overdue    int `json:"overdue"`
+	// AcceptancesDue counts exceptions whose review date is within two weeks, so the team
+	// hears about them before the finding reopens on its own.
+	AcceptancesDue     int            `json:"acceptances_due"`
 	TriageAssets       int            `json:"triage_assets"`
 	Resolved           int            `json:"resolved"`
 	ByState            map[string]int `json:"by_state"`
@@ -459,6 +474,11 @@ func (s *Store) Summary(ctx context.Context) (Summary, error) {
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
+	// Exceptions whose review date is inside the warning window, so the team hears about
+	// them before they lapse and reopen the finding.
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM remediation_items
+		WHERE state = ? AND accept_expires_at IS NOT NULL AND accept_expires_at < ?`,
+		string(StateRiskAccepted), s.now().AddDate(0, 0, 14).UTC().Format(time.RFC3339)).Scan(&out.AcceptancesDue)
 	// Assets with no ownership record but with work waiting for one.
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT asset) FROM remediation_items WHERE team = ''`).Scan(&out.TriageAssets)
 	// Automation eligibility is a policy question; nothing is executable today, so the
@@ -506,18 +526,25 @@ func scanItem(r rowScanner) (Item, error) {
 		it                       Item
 		state, dueAt             string
 		firstSeen, lastSeen, upd string
+		acceptExpires            sql.NullString
 		due                      sql.NullString
 	)
 	if err := r.Scan(&it.ID, &it.Asset, &it.FindingKey, &it.VulnerabilityID, &it.Product,
 		&it.InstalledVersion, &it.Ecosystem, &it.Severity, &it.Category, &it.Team, &it.Owner,
 		&state, &it.Priority, &due, &it.FixedVersion, &it.Remediation, &it.Evidence,
-		&it.ReportID, &it.VerifiedReport, &it.Notes, &firstSeen, &lastSeen, &upd); err != nil {
+		&it.ReportID, &it.VerifiedReport, &it.AcceptReason, &it.AcceptedBy, &acceptExpires,
+		&it.Notes, &firstSeen, &lastSeen, &upd); err != nil {
 		return Item{}, err
 	}
 	it.State = State(state)
 	it.FirstSeen, _ = time.Parse(time.RFC3339, firstSeen)
 	it.LastSeen, _ = time.Parse(time.RFC3339, lastSeen)
 	it.UpdatedAt, _ = time.Parse(time.RFC3339, upd)
+	if acceptExpires.Valid && acceptExpires.String != "" {
+		if ts, err := time.Parse(time.RFC3339, acceptExpires.String); err == nil {
+			it.AcceptExpiresAt = &ts
+		}
+	}
 	if due.Valid && due.String != "" {
 		if ts, err := time.Parse(time.RFC3339, due.String); err == nil {
 			it.DueAt = &ts
@@ -531,12 +558,14 @@ func (s *Store) insert(item Item) error {
 	_, err := s.db.Exec(`INSERT INTO remediation_items
 		(id, asset, finding_key, vulnerability_id, product, installed_version, ecosystem, severity,
 		 category, team, owner, state, priority, due_at, fixed_version, remediation, evidence,
-		 report_id, verified_report_id, notes, first_seen, last_seen, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 report_id, verified_report_id, accept_reason, accepted_by, accept_expires_at,
+		 notes, first_seen, last_seen, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Asset, item.FindingKey, item.VulnerabilityID, item.Product,
 		item.InstalledVersion, item.Ecosystem, item.Severity, item.Category, item.Team,
 		item.Owner, string(item.State), item.Priority, timePtr(item.DueAt),
-		item.FixedVersion, item.Remediation, item.Evidence, item.ReportID, item.VerifiedReport, item.Notes,
+		item.FixedVersion, item.Remediation, item.Evidence, item.ReportID, item.VerifiedReport,
+		item.AcceptReason, item.AcceptedBy, timePtr(item.AcceptExpiresAt), item.Notes,
 		item.FirstSeen.Format(time.RFC3339), item.LastSeen.Format(time.RFC3339),
 		item.UpdatedAt.Format(time.RFC3339))
 	return err
@@ -545,11 +574,13 @@ func (s *Store) insert(item Item) error {
 func (s *Store) update(item Item) error {
 	_, err := s.db.Exec(`UPDATE remediation_items SET
 		severity=?, category=?, team=?, owner=?, state=?, priority=?, due_at=?, fixed_version=?,
-		remediation=?, evidence=?, report_id=?, verified_report_id=?, notes=?, last_seen=?, updated_at=?
+		remediation=?, evidence=?, report_id=?, verified_report_id=?, accept_reason=?,
+		accepted_by=?, accept_expires_at=?, notes=?, last_seen=?, updated_at=?
 		WHERE id=?`,
 		item.Severity, item.Category, item.Team, item.Owner, string(item.State), item.Priority,
 		timePtr(item.DueAt), item.FixedVersion, item.Remediation, item.Evidence, item.ReportID,
-		item.VerifiedReport, item.Notes, item.LastSeen.Format(time.RFC3339),
+		item.VerifiedReport, item.AcceptReason, item.AcceptedBy, timePtr(item.AcceptExpiresAt),
+		item.Notes, item.LastSeen.Format(time.RFC3339),
 		item.UpdatedAt.Format(time.RFC3339), item.ID)
 	return err
 }
@@ -767,4 +798,211 @@ func (s *Store) FindForFinding(ctx context.Context, asset, vulnerabilityID, prod
 		return nil, err
 	}
 	return s.Get(id)
+}
+
+// AcceptRisk records a time-boxed exception: who accepted it, why, and until when.
+//
+// The brief was "risk acceptance with an expiry", and the reason it matters is that an
+// exception without an owner and an end date is indistinguishable from a forgotten
+// finding. This refuses the first two, and the sweep reopens the item when the third
+// passes — the finding comes back rather than quietly disappearing.
+func (s *Store) AcceptRisk(ctx context.Context, id, reason, acceptedBy string, until time.Time) (Item, error) {
+	item, err := s.Get(id)
+	if err != nil {
+		return Item{}, err
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) < 8 {
+		return Item{}, errors.New("a risk acceptance needs a stated reason (at least a sentence)")
+	}
+	if strings.TrimSpace(acceptedBy) == "" {
+		return Item{}, errors.New("a risk acceptance needs to record who accepted it")
+	}
+	if !until.After(s.now()) {
+		return Item{}, errors.New("the review date must be in the future")
+	}
+	if terminal(item.State) && item.State != StateRiskAccepted {
+		return Item{}, fmt.Errorf("item is %s; only open work can be risk-accepted", item.State)
+	}
+	item.State = StateRiskAccepted
+	item.AcceptReason = clip(reason, 500)
+	item.AcceptedBy = strings.TrimSpace(acceptedBy)
+	item.AcceptExpiresAt = &until
+	item.UpdatedAt = s.now()
+	if err := s.update(*item); err != nil {
+		return Item{}, err
+	}
+	return *item, nil
+}
+
+// ExpireAcceptances reopens accepted risks whose review date has passed, and returns the
+// items that changed. Idempotent, so it is safe to run on a timer and at startup.
+func (s *Store) ExpireAcceptances(ctx context.Context) ([]Item, error) {
+	now := s.now()
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM remediation_items
+		WHERE state = ? AND accept_expires_at IS NOT NULL AND accept_expires_at < ?`,
+		string(StateRiskAccepted), now.UTC().Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]Item, 0, len(ids))
+	for _, id := range ids {
+		item, err := s.Get(id)
+		if err != nil {
+			continue
+		}
+		item.State = StateDetected
+		item.Notes = strings.TrimSpace(item.Notes +
+			fmt.Sprintf(" | acceptance expired %s (was: %s)", now.UTC().Format("2006-01-02"), item.AcceptReason))
+		item.AcceptReason = ""
+		item.AcceptedBy = ""
+		item.AcceptExpiresAt = nil
+		item.UpdatedAt = now
+		if err := s.update(*item); err != nil {
+			return out, err
+		}
+		out = append(out, *item)
+	}
+	return out, nil
+}
+
+// AcceptancesDue lists accepted risks whose review date falls inside the window, so the
+// team hears about it before the exception silently lapses.
+func (s *Store) AcceptancesDue(ctx context.Context, window time.Duration) ([]Item, error) {
+	until := s.now().Add(window).UTC().Format(time.RFC3339)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM remediation_items
+		WHERE state = ? AND accept_expires_at IS NOT NULL AND accept_expires_at < ?
+		AND accept_expires_at >= ?`,
+		string(StateRiskAccepted), until, s.now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Item{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if item, err := s.Get(id); err == nil {
+			out = append(out, *item)
+		}
+	}
+	return out, rows.Err()
+}
+
+// clip shortens text without splitting a UTF-8 sequence.
+func clip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// Group is one remediation unit: the findings on an asset that one change closes.
+//
+// The queue is per finding because that is how evidence arrives, but work is per upgrade.
+// Three identical hosts with the same package are three work orders, not forty-seven
+// findings with no relationship to each other.
+type Group struct {
+	Key          string     `json:"key"`
+	Asset        string     `json:"asset"`
+	Product      string     `json:"product"`
+	FixedVersion string     `json:"fixed_version,omitempty"`
+	Team         string     `json:"team,omitempty"`
+	Owner        string     `json:"owner,omitempty"`
+	Severity     string     `json:"severity"`
+	Priority     string     `json:"priority"`
+	DueAt        *time.Time `json:"due_at,omitempty"`
+	Items        int        `json:"items"`
+	Critical     int        `json:"critical"`
+	Overdue      int        `json:"overdue"`
+	Advisories   []string   `json:"advisories"`
+	ItemIDs      []string   `json:"item_ids"`
+}
+
+// Groups folds open work items into remediation units, most urgent first.
+//
+// A group is (asset, package, fixed version). When there is no fixed version the group is
+// (asset, package) — those are the findings that need a decision, not a package bump, and
+// lumping them together is still better than one row each.
+func (s *Store) Groups(ctx context.Context, policy Policy) ([]Group, error) {
+	items, err := s.List(ctx, Filter{}, policy)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	byKey := map[string]*Group{}
+	for _, item := range items {
+		if terminal(item.State) {
+			continue
+		}
+		key := item.Asset + "\x00" + strings.ToLower(item.Product)
+		if item.FixedVersion != "" {
+			key += "\x00" + item.FixedVersion
+		}
+		g, ok := byKey[key]
+		if !ok {
+			g = &Group{
+				Key: key, Asset: item.Asset, Product: item.Product,
+				FixedVersion: item.FixedVersion, Team: item.Team, Owner: item.Owner,
+				Severity: item.Severity, Priority: item.Priority, DueAt: item.DueAt,
+				Advisories: []string{}, ItemIDs: []string{},
+			}
+			byKey[key] = g
+		}
+		g.Items++
+		g.ItemIDs = append(g.ItemIDs, item.ID)
+		if item.Priority == "P1" {
+			g.Critical++
+		}
+		if item.Overdue(now) {
+			g.Overdue++
+		}
+		if severityRank[strings.ToLower(item.Severity)] > severityRank[strings.ToLower(g.Severity)] {
+			g.Severity = item.Severity
+			g.Priority = item.Priority
+		}
+		// The earliest deadline wins: one unit is due when its first member is due.
+		if item.DueAt != nil && (g.DueAt == nil || item.DueAt.Before(*g.DueAt)) {
+			g.DueAt = item.DueAt
+		}
+		if item.VulnerabilityID != "" {
+			g.Advisories = append(g.Advisories, item.VulnerabilityID)
+		}
+	}
+	out := make([]Group, 0, len(byKey))
+	for _, g := range byKey {
+		out = append(out, *g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Overdue != out[j].Overdue {
+			return out[i].Overdue > out[j].Overdue
+		}
+		if severityRank[strings.ToLower(out[i].Severity)] != severityRank[strings.ToLower(out[j].Severity)] {
+			return severityRank[strings.ToLower(out[i].Severity)] > severityRank[strings.ToLower(out[j].Severity)]
+		}
+		if out[i].Items != out[j].Items {
+			return out[i].Items > out[j].Items
+		}
+		return out[i].Asset < out[j].Asset
+	})
+	return out, nil
 }

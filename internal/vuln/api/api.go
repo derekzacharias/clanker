@@ -61,6 +61,12 @@ type Options struct {
 	GitLabPath string
 	// Getenv overrides os.Getenv for integration credentials (tests).
 	Getenv func(string) string
+	// RetentionDays prunes stored assessments older than this. Zero keeps everything.
+	RetentionDays int
+	// BackupDir is where POST /api/maintenance/backup writes a snapshot. Empty disables it.
+	BackupDir string
+	// DisableBackgroundJobs stops the maintenance ticker (tests and one-shot CLIs).
+	DisableBackgroundJobs bool
 	// Logger receives request and job logs.
 	Logger *slog.Logger
 	// Now is injectable for tests.
@@ -188,6 +194,9 @@ func New(opts Options) (*Server, error) {
 	// Existing deployments already hold assessments: route them into remediation work
 	// once, so the queue is not empty until the next scan. Idempotent by item id.
 	s.backfillRemediation()
+	// Expired exceptions, retention and the notification digest: the jobs that must not
+	// depend on somebody remembering to click something.
+	s.startMaintenance()
 	return s, nil
 }
 
@@ -255,11 +264,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/ownership/bulk", s.handleOwnershipBulk)
 	s.mux.HandleFunc("GET /api/remediation", s.handleRemediationList)
 	s.mux.HandleFunc("GET /api/remediation/summary", s.handleRemediationSummary)
+	s.mux.HandleFunc("GET /api/remediation/groups", s.handleRemediationGroups)
+	s.mux.HandleFunc("GET /api/metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /api/remediation/policy", s.handleRemediationPolicy)
 	s.mux.HandleFunc("PUT /api/remediation/policy", s.handleRemediationPolicy)
 	s.mux.HandleFunc("GET /api/remediation/{id}", s.handleRemediationGet)
 	s.mux.HandleFunc("PATCH /api/remediation/{id}", s.handleRemediationPatch)
 	s.mux.HandleFunc("POST /api/remediation/{id}/verify", s.handleRemediationVerify)
+	s.mux.HandleFunc("POST /api/remediation/{id}/accept", s.handleRemediationAccept)
 
 	// GitLab ticketing: configuration, connection test, and issues.
 	s.mux.HandleFunc("GET /api/integrations/gitlab", s.handleGitLabGet)
@@ -291,6 +303,8 @@ func (s *Server) routes() {
 	// Kept as an alias so existing tooling keeps working; both mint a new token.
 	s.mux.HandleFunc("POST /api/agents/enroll-token/rotate", s.handleEnrollTokenRotate)
 	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
+	s.mux.HandleFunc("POST /api/maintenance/run", s.handleMaintenanceRun)
+	s.mux.HandleFunc("POST /api/maintenance/backup", s.handleBackup)
 	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 	s.mux.HandleFunc("POST /api/ask", s.handleAsk)

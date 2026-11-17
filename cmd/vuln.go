@@ -533,6 +533,8 @@ func newVulnServeCmd() *cobra.Command {
 		releaseBase    string
 		authFile       string
 		gitlabFile     string
+		retentionDays  int
+		backupDir      string
 		sessionTTL     time.Duration
 		trustedProxies string
 		agentVersion   string
@@ -569,6 +571,8 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 				ReleaseBase:    releaseBase,
 				AuthPath:       authFile,
 				GitLabPath:     gitlabFile,
+				RetentionDays:  retentionDays,
+				BackupDir:      backupDir,
 				SessionTTL:     sessionTTL,
 				TrustedProxies: splitList(trustedProxies),
 				AgentVersion:   agentVersion,
@@ -607,6 +611,10 @@ The web assets are served from --web-dir (default web/dist). Build them once:
 	cmd.Flags().StringVar(&webDir, "web-dir", "web/dist", "directory containing the built web UI")
 	cmd.Flags().StringVar(&releaseBase, "release-base", "", "published agent artifact base URL (or CLANKER_GUARD_RELEASE_BASE)")
 	cmd.Flags().StringVar(&authFile, "auth-file", auth.DefaultPath(), "password credential file (empty disables password sign-in)")
+	cmd.Flags().IntVar(&retentionDays, "retention-days", envInt("CLANKER_GUARD_RETENTION_DAYS", 0),
+		"delete stored assessments older than this many days (0 keeps everything; work items keep their evidence)")
+	cmd.Flags().StringVar(&backupDir, "backup-dir", os.Getenv("CLANKER_GUARD_BACKUP_DIR"),
+		"directory for POST /api/maintenance/backup snapshots (empty disables the endpoint)")
 	cmd.Flags().StringVar(&gitlabFile, "gitlab-config", ticketing.DefaultConfigPath(),
 		"GitLab integration file (0600; holds the access token) or CLANKER_GUARD_GITLAB_FILE")
 	cmd.Flags().DurationVar(&sessionTTL, "session-ttl", auth.DefaultSessionTTL, "how long a browser sign-in stays valid")
@@ -1319,4 +1327,18 @@ func splitList(value string) []string {
 		}
 	}
 	return out
+}
+
+// envInt reads an integer default from the environment, falling back when it is absent or
+// unparseable. A bad value should not stop the server from starting.
+func envInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	var n int
+	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil {
+		return fallback
+	}
+	return n
 }

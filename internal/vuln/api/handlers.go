@@ -1172,6 +1172,12 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		// password_required mirrors whether `clanker vuln auth set-password` has
 		// been run; the Settings screen shows which sign-in methods exist.
 		"password_required": s.auth != nil,
+		"operations": map[string]string{
+			"notify.webhook_url":  vals["notify.webhook_url"],
+			"notify.digest_hours": vals["notify.digest_hours"],
+			"feeds.refresh_hours": vals["feeds.refresh_hours"],
+			"feeds.last_refresh":  vals["feeds.last_refresh"],
+		},
 		"auth": map[string]any{
 			"required":    s.authRequired(),
 			"session_ttl": s.opts.SessionTTL.String(),
@@ -1185,7 +1191,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Policy struct {
+		// Operations are the scheduled-job and notification knobs. Only known keys are
+		// stored: an unknown key would be accepted and then silently ignored.
+		Operations map[string]string `json:"operations"`
+		Policy     struct {
 			FailOn    string `json:"fail_on"`
 			FailOnKEV bool   `json:"fail_on_kev"`
 		} `json:"policy"`
@@ -1220,6 +1229,33 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = s.store.SetSetting(ctx, "release_base", body.ReleaseBase)
+	}
+	// Operations: an allowlist, because storing arbitrary keys from a request body turns
+	// the settings table into a scratch pad that later code might trust.
+	allowed := map[string]bool{
+		"notify.webhook_url":    true,
+		"notify.webhook_secret": true,
+		"notify.digest_hours":   true,
+		"feeds.refresh_hours":   true,
+	}
+	for k, v := range body.Operations {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "invalid_setting", "unknown operational setting: "+k)
+			return
+		}
+		if k == "notify.webhook_url" && strings.TrimSpace(v) != "" {
+			if !strings.HasPrefix(v, "https://") && !strings.HasPrefix(v, "http://") {
+				writeError(w, http.StatusBadRequest, "invalid_setting", "the notification webhook must be an http(s) URL")
+				return
+			}
+		}
+		if err := s.store.SetSetting(ctx, k, strings.TrimSpace(v)); err != nil {
+			writeError(w, http.StatusInternalServerError, "settings_error", err.Error())
+			return
+		}
+	}
+	if len(body.Operations) > 0 {
+		s.audit(r, "settings.operations", "", fmt.Sprintf("keys=%d", len(body.Operations)))
 	}
 	s.handleGetSettings(w, r)
 }

@@ -1,12 +1,14 @@
 import { useMemo, useState } from "react";
+import { Layers, Timer } from "lucide-react";
 import { useAsync } from "../lib/useApi";
-import { api, type RemediationItem, type RemediationState } from "../lib/api";
+import { api, type RemediationGroup, type RemediationItem, type RemediationState } from "../lib/api";
 import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { EmptyState, ErrorState, LoadingBlock } from "../components/ui/Feedback";
-import { Select } from "../components/ui/Field";
+import { Field, Input, Select } from "../components/ui/Field";
+import { Modal } from "../components/ui/Dialog";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 import { formatDate, relativeTime } from "../lib/format";
@@ -85,6 +87,10 @@ export default function Remediation() {
   const [state, setState] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [mineOnly, setMineOnly] = useState(false);
+  const [grouped, setGrouped] = useState(false);
+  const [accepting, setAccepting] = useState<RemediationItem | null>(null);
+  const [acceptReason, setAcceptReason] = useState("");
+  const [acceptDays, setAcceptDays] = useState(30);
   const { push } = useToast();
 
   const summary = useAsync(() => api.remediationSummary());
@@ -103,6 +109,9 @@ export default function Remediation() {
     [team, state, overdueOnly, mineOnly, me],
   );
 
+  const groups = useAsync(() => (grouped ? api.remediationGroups() : Promise.resolve(null)), [grouped]);
+  const metrics = useAsync(() => api.metrics(), []);
+
   const teams = useMemo(() => {
     const known = new Set<string>(ASSIGNABLE_TEAMS);
     (summary.data?.teams ?? []).forEach((t) => known.add(t));
@@ -117,6 +126,25 @@ export default function Remediation() {
       items.reload();
     } catch (err) {
       push(err instanceof Error ? err.message : "Could not assign this item to you");
+    }
+  }
+
+  async function submitAcceptance() {
+    if (!accepting) return;
+    try {
+      const res = await api.acceptRisk(accepting.id, { reason: acceptReason, days: acceptDays });
+      push(
+        `${accepting.vulnerability_id} accepted by ${res.item.accepted_by} until ${
+          res.item.accept_expires_at ? new Date(res.item.accept_expires_at).toLocaleDateString() : `${acceptDays} days`
+        }`,
+      );
+      setAccepting(null);
+      setAcceptReason("");
+      items.reload();
+      summary.reload();
+      metrics.reload();
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Could not record the acceptance");
     }
   }
 
@@ -161,6 +189,55 @@ export default function Remediation() {
         </div>
       ) : null}
 
+      {metrics.data ? (
+        <Card className="p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Timer className="h-4 w-4 text-muted" aria-hidden="true" />
+            <p className="text-sm font-medium">Is the programme getting better?</p>
+            <span className="ml-auto text-xs text-subtle">from stored evidence, not counters</span>
+          </div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div>
+              <p className="text-xs uppercase tracking-wide text-muted">Age of open work</p>
+              <ul className="mt-1 space-y-1 text-sm">
+                {(metrics.data.age_buckets ?? []).map((b) => (
+                  <li key={b.label} className="flex items-baseline justify-between gap-2">
+                    <span className="text-muted">{b.label}</span>
+                    <span className="num font-medium">{b.count}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-muted">Time to fix</p>
+              {(metrics.data.time_to_fix ?? []).length === 0 ? (
+                <p className="mt-1 text-sm text-muted">
+                  Nothing verified yet. This fills in as findings are closed by a later scan.
+                </p>
+              ) : (
+                <ul className="mt-1 space-y-1 text-sm">
+                  {(metrics.data.time_to_fix ?? []).map((t) => (
+                    <li key={t.severity} className="flex items-baseline justify-between gap-2">
+                      <span className="text-muted">
+                        {t.severity} <span className="text-subtle">({t.resolved} closed)</span>
+                      </span>
+                      <span className="num">
+                        {t.median_days}d median · {t.p90_days}d p90
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+          <p className="mt-3 text-xs text-subtle">
+            {metrics.data.units} remediation units for {metrics.data.findings} open findings ·{" "}
+            {metrics.data.acceptances_due} acceptance{metrics.data.acceptances_due === 1 ? "" : "s"} expiring within two weeks ·{" "}
+            {metrics.data.reopened} reopened
+          </p>
+        </Card>
+      ) : null}
+
       <Card>
         <CardHeader
           title="Work queue"
@@ -198,6 +275,10 @@ export default function Remediation() {
                 My work
               </Button>
             ) : null}
+            <Button variant={grouped ? "primary" : "secondary"} onClick={() => setGrouped((v) => !v)}>
+              <Layers className="h-4 w-4" aria-hidden="true" />
+              {grouped ? "Grouped by upgrade" : "Group by upgrade"}
+            </Button>
             <Button variant="ghost" onClick={() => { items.reload(); summary.reload(); }}>
               Refresh
             </Button>
@@ -220,7 +301,55 @@ export default function Remediation() {
             />
           ) : null}
 
-          {items.data && items.data.items.length > 0 ? (
+          {grouped && groups.data ? (
+            groups.data.items.length === 0 ? (
+              <EmptyState title="No open work to group" description="Units appear once findings are routed." />
+            ) : (
+              <TableWrap>
+                <Table caption="Remediation units">
+                  <thead>
+                    <tr>
+                      <Th>Upgrade</Th>
+                      <Th>Findings</Th>
+                      <Th>Worst severity</Th>
+                      <Th>Team</Th>
+                      <Th>Due</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {groups.data.items.map((g: RemediationGroup) => (
+                      <Tr key={g.key}>
+                        <Td>
+                          <span className="font-medium">{g.product}</span>
+                          {g.fixed_version ? (
+                            <span className="mono block text-xs text-muted">→ {g.fixed_version}</span>
+                          ) : (
+                            <span className="block text-xs text-high">no fixed version published</span>
+                          )}
+                          <span className="mono block text-xs text-subtle">{g.asset}</span>
+                        </Td>
+                        <Td className="text-xs">
+                          <span className="num font-medium">{g.items}</span>
+                          <span className="block text-subtle">{g.advisories.slice(0, 3).join(", ")}{g.advisories.length > 3 ? "…" : ""}</span>
+                        </Td>
+                        <Td>
+                          <Badge className={severityTone(g.severity)}>{g.severity}</Badge>
+                          <span className="ml-1 text-xs text-subtle">{g.priority}</span>
+                        </Td>
+                        <Td className="text-xs">{g.team || <span className="text-high">unassigned</span>}</Td>
+                        <Td className="text-xs">
+                          {g.due_at ? formatDate(g.due_at) : <span className="text-subtle">—</span>}
+                          {g.overdue > 0 ? <span className="block text-critical">{g.overdue} overdue</span> : null}
+                        </Td>
+                      </Tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </TableWrap>
+            )
+          ) : null}
+
+          {!grouped && items.data && items.data.items.length > 0 ? (
             <TableWrap>
               <Table caption="Remediation work items">
                 <thead>
@@ -259,6 +388,11 @@ export default function Remediation() {
                       </Td>
                       <Td>
                         <Badge className={stateTone(item.state)}>{STATE_LABEL[item.state] ?? item.state}</Badge>
+                        {item.accept_expires_at ? (
+                          <span className="mt-1 block text-xs text-subtle">
+                            by {item.accepted_by} · until {formatDate(item.accept_expires_at)}
+                          </span>
+                        ) : null}
                       </Td>
                       <Td className="text-xs">
                         {item.due_at ? (
@@ -290,6 +424,11 @@ export default function Remediation() {
                               Claim
                             </Button>
                           ) : null}
+                          {item.state !== "risk_accepted" ? (
+                            <Button size="sm" variant="ghost" onClick={() => setAccepting(item)}>
+                              Accept risk
+                            </Button>
+                          ) : null}
                         </div>
                       </Td>
                     </Tr>
@@ -300,6 +439,43 @@ export default function Remediation() {
           ) : null}
         </CardBody>
       </Card>
+
+      <Modal
+        open={accepting !== null}
+        onOpenChange={(open) => {
+          if (!open) setAccepting(null);
+        }}
+        title={accepting ? `Accept the risk for ${accepting.vulnerability_id}` : "Accept risk"}
+        description="An accepted risk keeps the finding visible, records who decided and why, and reopens automatically when the review date passes."
+      >
+        <div className="space-y-3">
+          <Field label="Reason" htmlFor="accept-reason" hint="What makes this acceptable, and what is covering it in the meantime?">
+            <Input
+              id="accept-reason"
+              value={acceptReason}
+              onChange={(e) => setAcceptReason(e.target.value)}
+              placeholder="e.g. vendor patch lands in Q3; host is isolated by a network rule"
+            />
+          </Field>
+          <Field label="Review in" htmlFor="accept-days">
+            <Select id="accept-days" value={String(acceptDays)} onChange={(e) => setAcceptDays(Number(e.target.value))}>
+              {[30, 60, 90, 180].map((d) => (
+                <option key={d} value={d}>
+                  {d} days
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <div className="flex items-center gap-2">
+            <Button variant="primary" onClick={submitAcceptance} disabled={acceptReason.trim().length < 8}>
+              Record acceptance
+            </Button>
+            <Button variant="ghost" onClick={() => setAccepting(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {summary.data ? (
         <p className="text-xs text-subtle">

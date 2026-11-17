@@ -170,3 +170,30 @@ func TestSoftwareInventoryCSVFallsBackToMetadataHost(t *testing.T) {
 		t.Fatalf("host fallback = %q, want metadata.host", rows[0][0])
 	}
 }
+
+// A package name comes from the scanned system or from an SBOM someone else wrote. A cell
+// that starts with a formula character is executed when the export is opened in Excel or
+// Sheets, so it must be defused without changing what a human reads.
+func TestInventoryExportNeutralisesFormulaInjection(t *testing.T) {
+	rows := [][]string{
+		{"web01", "=HYPERLINK(\"http://evil\",\"click\")", "1.0"},
+		{"web01", "+1+1", "1.0"},
+		{"web01", "-cmd|' /C calc'!A0", "1.0"},
+		{"web01", "@SUM(1+1)", "1.0"},
+		{"web01", "openssl", "1.0"},
+	}
+	out := neutralise(rows[0])
+	if !strings.HasPrefix(out[1], "'=") {
+		t.Fatalf("formula not neutralised: %q", out[1])
+	}
+	for _, row := range rows[1:] {
+		got := neutralise(row)[1]
+		if strings.ContainsAny(string(got[0]), "=+-@") {
+			t.Fatalf("cell %q still starts with a formula character", got)
+		}
+	}
+	// Ordinary values are untouched.
+	if got := neutralise(rows[4])[1]; got != "openssl" {
+		t.Fatalf("plain value changed: %q", got)
+	}
+}

@@ -132,16 +132,34 @@ type Item struct {
 	ReportID         string     `json:"report_id,omitempty"`
 	// VerifiedReport is the assessment whose absence of this finding resolved the item.
 	// It is the receipt: without one, "resolved" is only an assertion.
-	VerifiedReport string    `json:"verified_report_id,omitempty"`
-	Notes          string    `json:"notes,omitempty"`
-	FirstSeen      time.Time `json:"first_seen"`
-	LastSeen       time.Time `json:"last_seen"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	VerifiedReport string `json:"verified_report_id,omitempty"`
+	// Acceptance is the exception register: an accepted risk always has who, why and
+	// until when. An exception without an end date is just a forgotten finding.
+	AcceptReason    string     `json:"accept_reason,omitempty"`
+	AcceptedBy      string     `json:"accepted_by,omitempty"`
+	AcceptExpiresAt *time.Time `json:"accept_expires_at,omitempty"`
+	Notes           string     `json:"notes,omitempty"`
+	FirstSeen       time.Time  `json:"first_seen"`
+	LastSeen        time.Time  `json:"last_seen"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // Overdue reports whether the item is past due and still needs work.
 func (i Item) Overdue(now time.Time) bool {
 	return i.DueAt != nil && !terminal(i.State) && now.After(*i.DueAt)
+}
+
+// AcceptanceExpired reports whether an accepted risk has passed its review date.
+func (i Item) AcceptanceExpired(now time.Time) bool {
+	return i.State == StateRiskAccepted && i.AcceptExpiresAt != nil && now.After(*i.AcceptExpiresAt)
+}
+
+// AcceptanceEndsSoon reports an exception that needs review within the window.
+func (i Item) AcceptanceEndsSoon(now time.Time, window time.Duration) bool {
+	if i.State != StateRiskAccepted || i.AcceptExpiresAt == nil {
+		return false
+	}
+	return !now.After(*i.AcceptExpiresAt) && i.AcceptExpiresAt.Before(now.Add(window))
 }
 
 // Policy configures deadlines and routing. Zero values fall back to the documented
@@ -246,9 +264,18 @@ func (p Policy) days() map[string]int {
 	return p.Days
 }
 
-// Priority maps severity + KEV + exposure to an operational rank.
+// Priority maps severity, exploitation and what the asset is worth to an operational rank.
+//
+// Business criticality raises the rank but never the severity: a "high" finding on a
+// payment host is still high, it is simply worked sooner. Conflating the two is how severity
+// loses its meaning.
 func (p Policy) Priority(f model.Finding, own Ownership) string {
 	sev := p.EffectiveSeverity(f, own)
+	// A business-critical or internet-facing asset is stepped up one rank, once.
+	if sev != "critical" && (strings.EqualFold(own.Criticality, "critical") ||
+		strings.EqualFold(own.Criticality, "high")) {
+		sev = raise(sev)
+	}
 	switch sev {
 	case "critical":
 		return "P1"
@@ -471,3 +498,6 @@ func ValidateState(raw string) (State, error) {
 	}
 	return candidate, nil
 }
+
+// IsTerminal reports whether a state means "no further work expected".
+func IsTerminal(st State) bool { return terminal(st) }

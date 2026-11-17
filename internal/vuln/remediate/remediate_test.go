@@ -522,3 +522,100 @@ func TestAssetOverviewMergesOwnershipWithWork(t *testing.T) {
 		t.Fatalf("record-only asset = %+v, want 0 items and not triaged", got)
 	}
 }
+
+// The sweep is what makes an exception temporary: past its date the finding comes back
+// instead of disappearing.
+func TestExpiredAcceptanceReopensTheFinding(t *testing.T) {
+	st, clock := newStore(t)
+	ctx := context.Background()
+	item := Item{
+		ID: "REM-1", Asset: "web01", FindingKey: "k1", VulnerabilityID: "CVE-2026-1",
+		Product: "openssl", InstalledVersion: "1.0", Ecosystem: "Ubuntu", Severity: "high",
+		State: StateAssigned, Priority: "P2", FirstSeen: *clock, LastSeen: *clock, UpdatedAt: *clock,
+	}
+	if err := st.insert(item); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := st.AcceptRisk(ctx, item.ID, "waiting on the vendor patch window", "dana", clock.AddDate(0, 0, 10)); err != nil {
+		t.Fatalf("AcceptRisk: %v", err)
+	}
+	// Nothing due yet.
+	if expired, err := st.ExpireAcceptances(ctx); err != nil || len(expired) != 0 {
+		t.Fatalf("premature expiry: %v %v", expired, err)
+	}
+	*clock = clock.AddDate(0, 0, 11)
+	expired, err := st.ExpireAcceptances(ctx)
+	if err != nil {
+		t.Fatalf("ExpireAcceptances: %v", err)
+	}
+	if len(expired) != 1 || expired[0].State != StateDetected {
+		t.Fatalf("expired = %+v, want the item reopened as detected", expired)
+	}
+	got, _ := st.Get(item.ID)
+	if got.AcceptReason != "" || got.AcceptExpiresAt != nil {
+		t.Fatalf("cleared acceptance still carries its fields: %+v", got)
+	}
+}
+
+// Work is per upgrade, not per finding: three findings closed by one package update are one
+// unit, and the earliest deadline in the group is the unit's deadline.
+func TestGroupsFoldFindingsIntoOneRemediationUnit(t *testing.T) {
+	st, clock := newStore(t)
+	ctx := context.Background()
+	rep := model.Report{
+		ReportID: "SCAN-G-1",
+		Metadata: model.ScanMetadata{Host: "web01", Mode: "local"},
+		Findings: []model.Finding{
+			{Ecosystem: "Ubuntu", Product: "openssl", InstalledVersion: "3.0.1", VulnerabilityID: "CVE-1", Severity: "high", FixedVersion: "3.0.13"},
+			{Ecosystem: "Ubuntu", Product: "openssl", InstalledVersion: "3.0.1", VulnerabilityID: "CVE-2", Severity: "critical", FixedVersion: "3.0.13"},
+			{Ecosystem: "Ubuntu", Product: "openssl", InstalledVersion: "3.0.1", VulnerabilityID: "CVE-3", Severity: "medium", FixedVersion: "3.0.13"},
+			{Ecosystem: "Ubuntu", Product: "bash", InstalledVersion: "5.1", VulnerabilityID: "CVE-4", Severity: "low", FixedVersion: "5.2"},
+			{Ecosystem: "Ubuntu", Product: "tar", InstalledVersion: "1.34", VulnerabilityID: "CVE-5", Severity: "medium", FixedVersion: ""},
+		},
+	}
+	if _, _, _, err := st.Reconcile(rep, DefaultPolicy()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	groups, err := st.Groups(ctx, DefaultPolicy())
+	if err != nil {
+		t.Fatalf("Groups: %v", err)
+	}
+	// openssl, bash and tar: three units, not five findings.
+	if len(groups) != 3 {
+		t.Fatalf("groups = %d, want 3: %+v", len(groups), groups)
+	}
+	var openssl Group
+	for _, g := range groups {
+		if g.Product == "openssl" {
+			openssl = g
+		}
+	}
+	if openssl.Items != 3 || len(openssl.Advisories) != 3 {
+		t.Fatalf("openssl group = %+v", openssl)
+	}
+	// The group carries the worst severity, so it is not sorted by the mildest member.
+	if openssl.Severity != "critical" {
+		t.Fatalf("group severity = %q, want critical", openssl.Severity)
+	}
+	_ = clock
+}
+
+// Business criticality changes how soon work is picked up, never what the severity says.
+func TestCriticalAssetsArePrioritisedWithoutInflatingSeverity(t *testing.T) {
+	policy := DefaultPolicy()
+	f := model.Finding{Severity: "medium", VulnerabilityID: "CVE-9"}
+	plain := Ownership{}
+	critical := Ownership{Status: "owned", Team: "Platform", Criticality: "critical"}
+
+	if got := policy.Priority(f, plain); got != "P3" {
+		t.Fatalf("plain medium priority = %q, want P3", got)
+	}
+	if got := policy.Priority(f, critical); got != "P2" {
+		t.Fatalf("critical-asset medium priority = %q, want P2", got)
+	}
+	// The severity itself is unchanged: severity describes the vulnerability, priority
+	// describes when this organisation gets to it.
+	if got := policy.EffectiveSeverity(f, critical); got != "medium" {
+		t.Fatalf("effective severity = %q, want medium", got)
+	}
+}

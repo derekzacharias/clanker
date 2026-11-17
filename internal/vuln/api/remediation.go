@@ -263,6 +263,20 @@ func (s *Server) handleRemediationList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": out, "total": len(out)})
 }
 
+// handleRemediationGroups folds findings into remediation units.
+func (s *Server) handleRemediationGroups(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.remediate.Groups(r.Context(), s.currentPolicy(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "remediation_error", err.Error())
+		return
+	}
+	items := 0
+	for _, g := range groups {
+		items += g.Items
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": groups, "total": len(groups), "findings": items})
+}
+
 // handleRemediationSummary serves the dashboard counts, computed in SQL.
 func (s *Server) handleRemediationSummary(w http.ResponseWriter, r *http.Request) {
 	sum, err := s.remediate.Summary(r.Context())
@@ -439,6 +453,58 @@ func (s *Server) handleRemediationVerify(w http.ResponseWriter, r *http.Request)
 	s.log.Info("remediation verified", "id", updated.ID, "report", rec.ID,
 		"run_finished", finished.UTC().Format(time.RFC3339), "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"item": updated})
+}
+
+// handleRemediationAccept records a time-boxed risk acceptance.
+//
+// Accepting risk is a decision with an owner and a review date, not a state you can drop an
+// item into. The finding stays visible (the summary counts accepted risk separately) and
+// comes back when the date passes.
+func (s *Server) handleRemediationAccept(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+		Days   int    `json:"days"`
+		Until  string `json:"until"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is not valid JSON")
+		return
+	}
+	until := s.opts.Now().UTC().Truncate(24 * time.Hour)
+	switch {
+	case strings.TrimSpace(body.Until) != "":
+		parsed, err := time.Parse("2006-01-02", strings.TrimSpace(body.Until))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "until must be a date (YYYY-MM-DD)")
+			return
+		}
+		until = parsed
+	case body.Days > 0:
+		if body.Days > 365 {
+			writeError(w, http.StatusBadRequest, "invalid_request", "an acceptance cannot run longer than 365 days")
+			return
+		}
+		until = until.AddDate(0, 0, body.Days)
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"choose a review date: an accepted risk without an expiry is a forgotten finding")
+		return
+	}
+	item, err := s.remediate.AcceptRisk(r.Context(), r.PathValue("id"), body.Reason, s.actorName(r), until)
+	if err != nil {
+		if errors.Is(err, remediate.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "no such remediation item")
+			return
+		}
+		writeError(w, http.StatusConflict, "invalid_acceptance", err.Error())
+		return
+	}
+	s.audit(r, "remediation.accept", item.ID,
+		fmt.Sprintf("reason=%q until=%s vuln=%s asset=%s", item.AcceptReason,
+			until.UTC().Format("2006-01-02"), item.VulnerabilityID, item.Asset))
+	s.log.Info("risk accepted", "id", item.ID, "until", until.Format("2006-01-02"),
+		"by", item.AcceptedBy, "remote", s.clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"item": item})
 }
 
 // handleRemediationPolicy reads or writes the SLA and routing policy.
