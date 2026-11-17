@@ -347,6 +347,14 @@ func (s *Server) gitlabFinding(host assetInfo, hostFallback string, row *vulnRow
 		f.RemediationOrigin = "advisory"
 		f.RemediationSource = firstNonEmpty(row.Source, row.AdvisoryID)
 	}
+	// Access details come from the asset's ownership record; the runbook from that record or
+	// the organisation's template. Both are references only — no credentials.
+	if own, err := s.remediate.Ownership(row.Asset); err == nil {
+		f.Access = ticketing.AccessBlock{
+			Host: row.Asset, SSHUser: own.SSHUser, SSHHost: own.SSHHost,
+			SSHJump: own.SSHJump, Runbook: own.RunbookURL,
+		}
+	}
 	if item != nil {
 		f.FindingKey = item.FindingKey
 		f.EffectiveSeverity = item.Severity
@@ -362,7 +370,38 @@ func (s *Server) gitlabFinding(host assetInfo, hostFallback string, row *vulnRow
 	if f.FindingKey == "" {
 		f.FindingKey = remediate.FindingKey(row.Asset, modelFindingFor(row))
 	}
+	f.Runbook = s.renderRunbook(f)
 	return f
+}
+
+// renderRunbook expands the organisation's remediation template for this finding.
+//
+// The template is operator-authored markdown stored in settings; the placeholders are replaced
+// with values from the finding, and unknown placeholders are left visible rather than dropped
+// so a broken template is obvious in the preview instead of silently producing a hole.
+func (s *Server) renderRunbook(f ticketing.Finding) string {
+	raw := strings.TrimSpace(s.mustSettings()["runbook.template"])
+	if raw == "" {
+		return ""
+	}
+	pairs := [][2]string{
+		{"{{asset}}", firstNonEmpty(f.Asset, f.Hostname)},
+		{"{{hostname}}", firstNonEmpty(f.Hostname, f.Asset)},
+		{"{{team}}", f.Team},
+		{"{{owner}}", f.Owner},
+		{"{{product}}", f.Product},
+		{"{{installed_version}}", f.InstalledVersion},
+		{"{{fixed_version}}", f.FixedVersion},
+		{"{{cve}}", f.VulnerabilityID},
+		{"{{severity}}", strings.ToUpper(firstNonEmpty(f.EffectiveSeverity, f.Severity))},
+		{"{{ssh_command}}", f.Access.SSHCommand()},
+		{"{{runbook_url}}", f.Access.Runbook},
+	}
+	out := raw
+	for _, p := range pairs {
+		out = strings.ReplaceAll(out, p[0], p[1])
+	}
+	return out
 }
 
 // handleGitLabPreview renders the issue body without contacting GitLab.

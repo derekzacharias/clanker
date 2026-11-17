@@ -307,3 +307,59 @@ func TestLabelsMergeSeverityWithConfiguredOnes(t *testing.T) {
 		t.Fatalf("duplicate label in %q", got)
 	}
 }
+
+// The ticket must be usable by a developer: how to get on the box, what to run, how to check
+// it worked, how to undo it — and it must say so when it cannot be sure.
+func TestDescriptionCarriesAccessFixVerifyRollback(t *testing.T) {
+	f := testFinding()
+	f.Access = AccessBlock{Host: "web01", SSHUser: "deploy", SSHJump: "bastion.prod",
+		Runbook: "https://wiki.example/runbooks/openssl"}
+	f.Runbook = "1. Check the change window.\n2. Notify `#ops`."
+
+	body := RenderDescription(f)
+	for _, want := range []string{
+		"## Access",
+		"`ssh -J bastion.prod deploy@web01`",
+		"https://wiki.example/runbooks/openssl",
+		"## Fix (review before running)",
+		"sudo apt-get install --only-upgrade openssl=3.0.13-1ubuntu1",
+		"review it for this host first",
+		"## Team runbook",
+		"Check the change window",
+		"**Check the version after the change:**",
+		"dpkg-query -W",
+		"**Roll back if the change breaks something:**",
+		"sudo apt-get install openssl=3.0.2",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("ticket is missing %q:\n%s", want, body)
+		}
+	}
+	// The advisory text is still attributed, and still separate from the commands.
+	if !strings.Contains(body, "## Advisory guidance") {
+		t.Fatalf("advisory section missing:\n%s", body)
+	}
+}
+
+// When the recipe cannot be built, the ticket says why instead of leaving a developer to guess.
+func TestDescriptionExplainsAMissingRecipe(t *testing.T) {
+	f := testFinding()
+	f.FixedVersion = ""
+	f.Ecosystem = "AcmeOS:1"
+	body := RenderDescription(f)
+	if strings.Contains(body, "```sh") {
+		t.Fatalf("a command block was emitted without a recipe:\n%s", body)
+	}
+	if !strings.Contains(body, "## Fix") || !strings.Contains(body, "no command") {
+		t.Fatalf("missing explanation:\n%s", body)
+	}
+}
+
+// No access recorded means no access section: an empty "Connect:" line is worse than silence.
+func TestDescriptionOmitsAccessWhenNothingIsKnown(t *testing.T) {
+	f := testFinding()
+	f.Access = AccessBlock{Host: "web01"}
+	if body := RenderDescription(f); strings.Contains(body, "## Access") {
+		t.Fatalf("empty access section rendered:\n%s", body)
+	}
+}

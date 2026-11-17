@@ -619,3 +619,62 @@ func TestCriticalAssetsArePrioritisedWithoutInflatingSeverity(t *testing.T) {
 		t.Fatalf("effective severity = %q, want medium", got)
 	}
 }
+
+// An existing database must gain the access columns on open. The bug this pins: the columns
+// were added to the wrong table, so every ownership write failed with "no column named
+// ssh_user" only on databases created before the feature existed.
+func TestOpenMigratesAssetOwnerAccessColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "intel.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The schema as it existed before access details were added.
+	legacy := `CREATE TABLE asset_owners (
+		asset TEXT PRIMARY KEY, team TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT '',
+		service TEXT NOT NULL DEFAULT '', environment TEXT NOT NULL DEFAULT '',
+		criticality TEXT NOT NULL DEFAULT '', exposure TEXT NOT NULL DEFAULT '',
+		contact TEXT NOT NULL DEFAULT '', mechanism TEXT NOT NULL DEFAULT '',
+		maintenance_window TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual',
+		status TEXT NOT NULL DEFAULT 'owned', updated_at TEXT NOT NULL
+	);`
+	if _, err := db.Exec(legacy); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	st, err := New(db2Open(t, path))
+	if err != nil {
+		t.Fatalf("New on legacy database: %v", err)
+	}
+	own, err := st.SetOwnership(context.Background(), Ownership{
+		Asset: "web01", Team: "Infrastructure", SSHUser: "deploy", SSHJump: "bastion.prod",
+		RunbookURL: "https://wiki.example/x",
+	})
+	if err != nil {
+		t.Fatalf("SetOwnership after migration: %v", err)
+	}
+	if own.SSHUser != "deploy" || own.SSHJump != "bastion.prod" {
+		t.Fatalf("access fields not stored: %+v", own)
+	}
+	got, err := st.Ownership("web01")
+	if err != nil {
+		t.Fatalf("Ownership: %v", err)
+	}
+	if got.SSHUser != "deploy" || got.RunbookURL != "https://wiki.example/x" {
+		t.Fatalf("access fields not read back: %+v", got)
+	}
+}
+
+// db2Open opens a database file with the same pragmas the store uses.
+func db2Open(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	return db
+}

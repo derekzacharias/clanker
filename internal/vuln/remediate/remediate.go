@@ -95,19 +95,26 @@ func CanTransition(from, to State) bool {
 
 // Ownership is the responsibility recorded for one asset.
 type Ownership struct {
-	Asset             string    `json:"asset"`
-	Team              string    `json:"team,omitempty"`
-	Owner             string    `json:"owner,omitempty"`
-	Service           string    `json:"service,omitempty"`
-	Environment       string    `json:"environment,omitempty"`
-	Criticality       string    `json:"criticality,omitempty"` // low|medium|high|critical
-	Exposure          string    `json:"exposure,omitempty"`    // internal|internet
-	Contact           string    `json:"contact,omitempty"`     // escalation path
-	Mechanism         string    `json:"mechanism,omitempty"`   // manual|agent
-	MaintenanceWindow string    `json:"maintenance_window,omitempty"`
-	Source            string    `json:"source,omitempty"` // manual|cmdb|cloud_tag|repo|triage
-	Status            string    `json:"status"`           // owned|triage
-	UpdatedAt         time.Time `json:"updated_at"`
+	Asset             string `json:"asset"`
+	Team              string `json:"team,omitempty"`
+	Owner             string `json:"owner,omitempty"`
+	Service           string `json:"service,omitempty"`
+	Environment       string `json:"environment,omitempty"`
+	Criticality       string `json:"criticality,omitempty"` // low|medium|high|critical
+	Exposure          string `json:"exposure,omitempty"`    // internal|internet
+	Contact           string `json:"contact,omitempty"`     // escalation path
+	Mechanism         string `json:"mechanism,omitempty"`   // manual|agent
+	MaintenanceWindow string `json:"maintenance_window,omitempty"`
+	// Access describes how a person reaches the host, so a ticket can say it. These are
+	// references, never credentials: a username, a jump host, a runbook URL. No keys, no
+	// passwords, and nothing that would make this table a secret store.
+	SSHUser    string    `json:"ssh_user,omitempty"`
+	SSHHost    string    `json:"ssh_host,omitempty"` // empty means "the asset name"
+	SSHJump    string    `json:"ssh_jump,omitempty"` // bastion host, if one is required
+	RunbookURL string    `json:"runbook_url,omitempty"`
+	Source     string    `json:"source,omitempty"` // manual|cmdb|cloud_tag|repo|triage
+	Status     string    `json:"status"`           // owned|triage
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Item is one remediation work item.

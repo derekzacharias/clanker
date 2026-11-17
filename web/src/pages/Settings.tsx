@@ -819,6 +819,7 @@ function GeneralOperations() {
   const [secret, setSecret] = useState("");
   const [digestHours, setDigestHours] = useState(24);
   const [refreshHours, setRefreshHours] = useState(24);
+  const [runbookTemplate, setRunbookTemplate] = useState("");
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -830,6 +831,7 @@ function GeneralOperations() {
     setWebhook(ops["notify.webhook_url"] ?? "");
     setDigestHours(Number(ops["notify.digest_hours"] ?? "24") || 24);
     setRefreshHours(Number(ops["feeds.refresh_hours"] ?? "24") || 24);
+    setRunbookTemplate(ops["runbook.template"] ?? "");
     setLoaded(true);
   }, [settings.data, loaded]);
 
@@ -842,6 +844,7 @@ function GeneralOperations() {
           "notify.webhook_secret": secret.trim(),
           "notify.digest_hours": String(digestHours),
           "feeds.refresh_hours": String(refreshHours),
+          "runbook.template": runbookTemplate,
         },
       });
       push("Operational settings saved");
@@ -898,6 +901,21 @@ function GeneralOperations() {
             <Input id="ops-feeds" type="number" min={1} max={168} value={refreshHours} onChange={(e) => setRefreshHours(Number(e.target.value))} />
           </Field>
         </div>
+        <Field
+          label="Remediation runbook template"
+          htmlFor="ops-runbook"
+          hint="Included in every ticket as “Team runbook”. Placeholders: {{asset}} {{hostname}} {{team}} {{product}} {{installed_version}} {{fixed_version}} {{cve}} {{severity}} {{ssh_command}} {{runbook_url}}"
+        >
+          <textarea
+            id="ops-runbook"
+            value={runbookTemplate}
+            onChange={(e) => setRunbookTemplate(e.target.value)}
+            rows={4}
+            spellCheck={false}
+            className="mono w-full rounded-md border border-border bg-surface px-2.5 py-2 text-xs leading-relaxed text-fg"
+            placeholder={"1. Confirm the change window in #ops.\n2. Announce the change.\n3. Apply the fix and run the verification step.\n4. Re-scan from Clanker Guard, then close the ticket."}
+          />
+        </Field>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="primary" onClick={save} disabled={saving}>
             {saving ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Check className="h-4 w-4" aria-hidden="true" />}

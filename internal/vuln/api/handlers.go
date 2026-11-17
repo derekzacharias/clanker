@@ -1177,6 +1177,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"notify.digest_hours": vals["notify.digest_hours"],
 			"feeds.refresh_hours": vals["feeds.refresh_hours"],
 			"feeds.last_refresh":  vals["feeds.last_refresh"],
+			"runbook.template":    vals["runbook.template"],
 		},
 		"auth": map[string]any{
 			"required":    s.authRequired(),
@@ -1237,6 +1238,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		"notify.webhook_secret": true,
 		"notify.digest_hours":   true,
 		"feeds.refresh_hours":   true,
+		"runbook.template":      true,
 	}
 	for k, v := range body.Operations {
 		if !allowed[k] {

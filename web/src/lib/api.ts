@@ -974,6 +974,11 @@ export interface Ownership {
   contact?: string;
   mechanism?: string;
   maintenance_window?: string;
+  /** Connection details for a person, not credentials: user, host override, jump host. */
+  ssh_user?: string;
+  ssh_host?: string;
+  ssh_jump?: string;
+  runbook_url?: string;
   source?: string;
   status: "owned" | "triage";
   updated_at: string;
@@ -1085,6 +1090,11 @@ export interface AssetOwnershipRow {
   contact?: string;
   mechanism?: string;
   maintenance_window?: string;
+  /** Connection details for a person, not credentials: user, host override, jump host. */
+  ssh_user?: string;
+  ssh_host?: string;
+  ssh_jump?: string;
+  runbook_url?: string;
   source?: string;
   /** "owned" or "triage" when a record exists; absent when nobody has decided yet. */
   status?: string;

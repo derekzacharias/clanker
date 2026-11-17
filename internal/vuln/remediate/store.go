@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS asset_owners (
   contact            TEXT NOT NULL DEFAULT '',
   mechanism          TEXT NOT NULL DEFAULT '',
   maintenance_window TEXT NOT NULL DEFAULT '',
+  ssh_user           TEXT NOT NULL DEFAULT '',
+  ssh_host           TEXT NOT NULL DEFAULT '',
+  ssh_jump           TEXT NOT NULL DEFAULT '',
+  runbook_url        TEXT NOT NULL DEFAULT '',
   source             TEXT NOT NULL DEFAULT 'manual',
   status             TEXT NOT NULL DEFAULT 'owned',
   updated_at         TEXT NOT NULL
@@ -84,14 +88,27 @@ func New(db *sql.DB) (*Store, error) {
 	}
 	// Additive migration: SQLite has no "ADD COLUMN IF NOT EXISTS", so ask the catalogue
 	// first. Existing databases keep their rows.
-	for _, col := range [][3]string{
-		{"verified_report_id", "TEXT NOT NULL DEFAULT ''", ""},
-		{"accept_reason", "TEXT NOT NULL DEFAULT ''", ""},
-		{"accepted_by", "TEXT NOT NULL DEFAULT ''", ""},
-		{"accept_expires_at", "TEXT", ""},
-	} {
-		if err := ensureColumn(db, "remediation_items", col[0], col[1]); err != nil {
-			return nil, err
+	// Additive migrations, table by table. Existing databases keep their rows; new ones
+	// already have the columns from the schema above.
+	migrations := map[string][][2]string{
+		"remediation_items": {
+			{"verified_report_id", "TEXT NOT NULL DEFAULT ''"},
+			{"accept_reason", "TEXT NOT NULL DEFAULT ''"},
+			{"accepted_by", "TEXT NOT NULL DEFAULT ''"},
+			{"accept_expires_at", "TEXT"},
+		},
+		"asset_owners": {
+			{"ssh_user", "TEXT NOT NULL DEFAULT ''"},
+			{"ssh_host", "TEXT NOT NULL DEFAULT ''"},
+			{"ssh_jump", "TEXT NOT NULL DEFAULT ''"},
+			{"runbook_url", "TEXT NOT NULL DEFAULT ''"},
+		},
+	}
+	for table, cols := range migrations {
+		for _, col := range cols {
+			if err := ensureColumn(db, table, col[0], col[1]); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
@@ -165,16 +182,19 @@ func (s *Store) SetOwnership(ctx context.Context, own Ownership) (Ownership, err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO asset_owners
 		(asset, team, owner, service, environment, criticality, exposure, contact, mechanism,
-		 maintenance_window, source, status, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 maintenance_window, ssh_user, ssh_host, ssh_jump, runbook_url, source, status, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(asset) DO UPDATE SET
 		 team=excluded.team, owner=excluded.owner, service=excluded.service,
 		 environment=excluded.environment, criticality=excluded.criticality,
 		 exposure=excluded.exposure, contact=excluded.contact, mechanism=excluded.mechanism,
-		 maintenance_window=excluded.maintenance_window, source=excluded.source,
+		 maintenance_window=excluded.maintenance_window,
+		 ssh_user=excluded.ssh_user, ssh_host=excluded.ssh_host, ssh_jump=excluded.ssh_jump,
+		 runbook_url=excluded.runbook_url, source=excluded.source,
 		 status=excluded.status, updated_at=excluded.updated_at`,
 		own.Asset, own.Team, own.Owner, own.Service, own.Environment, own.Criticality,
-		own.Exposure, own.Contact, own.Mechanism, own.MaintenanceWindow, own.Source,
+		own.Exposure, own.Contact, own.Mechanism, own.MaintenanceWindow,
+		own.SSHUser, own.SSHHost, own.SSHJump, own.RunbookURL, own.Source,
 		own.Status, now.Format(time.RFC3339)); err != nil {
 		return Ownership{}, err
 	}
@@ -199,10 +219,12 @@ func (s *Store) Ownership(asset string) (Ownership, error) {
 		updated string
 	)
 	err := s.db.QueryRow(`SELECT asset, team, owner, service, environment, criticality, exposure,
-		contact, mechanism, maintenance_window, source, status, updated_at
+		contact, mechanism, maintenance_window, ssh_user, ssh_host, ssh_jump, runbook_url,
+		source, status, updated_at
 		FROM asset_owners WHERE asset = ?`, strings.TrimSpace(asset)).
 		Scan(&o.Asset, &o.Team, &o.Owner, &o.Service, &o.Environment, &o.Criticality, &o.Exposure,
-			&o.Contact, &o.Mechanism, &o.MaintenanceWindow, &o.Source, &o.Status, &updated)
+			&o.Contact, &o.Mechanism, &o.MaintenanceWindow,
+			&o.SSHUser, &o.SSHHost, &o.SSHJump, &o.RunbookURL, &o.Source, &o.Status, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Ownership{Asset: asset, Status: "triage", Source: "triage"}, nil
 	}
@@ -216,7 +238,8 @@ func (s *Store) Ownership(asset string) (Ownership, error) {
 // ListOwnership returns every recorded owner, optionally only the triage queue.
 func (s *Store) ListOwnership(ctx context.Context, triageOnly bool) ([]Ownership, error) {
 	q := `SELECT asset, team, owner, service, environment, criticality, exposure, contact,
-		mechanism, maintenance_window, source, status, updated_at FROM asset_owners`
+		mechanism, maintenance_window, ssh_user, ssh_host, ssh_jump, runbook_url, source,
+		status, updated_at FROM asset_owners`
 	if triageOnly {
 		q += ` WHERE status = 'triage'`
 	}
@@ -233,7 +256,8 @@ func (s *Store) ListOwnership(ctx context.Context, triageOnly bool) ([]Ownership
 			updated string
 		)
 		if err := rows.Scan(&o.Asset, &o.Team, &o.Owner, &o.Service, &o.Environment, &o.Criticality,
-			&o.Exposure, &o.Contact, &o.Mechanism, &o.MaintenanceWindow, &o.Source, &o.Status, &updated); err != nil {
+			&o.Exposure, &o.Contact, &o.Mechanism, &o.MaintenanceWindow,
+			&o.SSHUser, &o.SSHHost, &o.SSHJump, &o.RunbookURL, &o.Source, &o.Status, &updated); err != nil {
 			return nil, err
 		}
 		o.UpdatedAt, _ = time.Parse(time.RFC3339, updated)

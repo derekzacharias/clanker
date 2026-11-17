@@ -6,9 +6,11 @@ import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { EmptyState, ErrorState, LoadingBlock } from "../components/ui/Feedback";
-import { Input, Select } from "../components/ui/Field";
+import { Field, Input, Select } from "../components/ui/Field";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
+import { Modal } from "../components/ui/Dialog";
+import { Terminal } from "lucide-react";
 import { relativeTime } from "../lib/format";
 
 /**
@@ -40,6 +42,12 @@ export default function Ownership() {
   const [selected, setSelected] = useState<string[]>([]);
   const [bulkTeam, setBulkTeam] = useState("");
   const [bulkOwner, setBulkOwner] = useState("");
+  // Access editor: how a developer reaches the host, so the ticket can say it.
+  const [editing, setEditing] = useState<AssetOwnershipRow | null>(null);
+  const [sshUser, setSSHUser] = useState("");
+  const [sshHost, setSSHHost] = useState("");
+  const [sshJump, setSSHJump] = useState("");
+  const [runbook, setRunbook] = useState("");
   const [saving, setSaving] = useState(false);
   const { push } = useToast();
 
@@ -83,6 +91,35 @@ export default function Ownership() {
       reload();
     } catch (err) {
       push(err instanceof Error ? err.message : `Could not save ${asset}`);
+    }
+  }
+
+  function openAccess(row: AssetOwnershipRow) {
+    setEditing(row);
+    setSSHUser(row.ssh_user ?? "");
+    setSSHHost(row.ssh_host ?? "");
+    setSSHJump(row.ssh_jump ?? "");
+    setRunbook(row.runbook_url ?? "");
+  }
+
+  async function saveAccess() {
+    if (!editing) return;
+    const row = editing;
+    try {
+      await api.saveOwnership(row.asset, {
+        team: row.team ?? "",
+        owner: row.owner ?? "",
+        exposure: row.exposure ?? "",
+        ssh_user: sshUser.trim(),
+        ssh_host: sshHost.trim(),
+        ssh_jump: sshJump.trim(),
+        runbook_url: runbook.trim(),
+      });
+      push(`Access details saved for ${row.asset}`);
+      setEditing(null);
+      reload();
+    } catch (err) {
+      push(err instanceof Error ? err.message : `Could not save access for ${row.asset}`);
     }
   }
 
@@ -233,6 +270,7 @@ export default function Ownership() {
                     <Th>Team</Th>
                     <Th>Engineer</Th>
                     <Th>Exposure</Th>
+                    <Th>Access</Th>
                     <Th>Updated</Th>
                   </tr>
                 </thead>
@@ -318,6 +356,17 @@ export default function Ownership() {
                           <option value="internet">internet</option>
                         </Select>
                       </Td>
+                      <Td>
+                        <Button size="sm" variant="ghost" onClick={() => openAccess(row)}>
+                          <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+                          Access
+                        </Button>
+                        <span className="block max-w-[12rem] truncate text-xs text-subtle">
+                          {row.ssh_user
+                            ? `ssh ${row.ssh_user}@${row.ssh_host || row.asset}${row.ssh_jump ? ` via ${row.ssh_jump}` : ""}`
+                            : "not recorded"}
+                        </span>
+                      </Td>
                       <Td className="whitespace-nowrap text-xs text-muted">
                         {row.status && row.updated_at ? (
                           relativeTime(row.updated_at)
@@ -333,6 +382,52 @@ export default function Ownership() {
           )}
         </CardBody>
       </Card>
+
+      <Modal
+        open={editing !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditing(null);
+        }}
+        title={editing ? `Access for ${editing.asset}` : "Access"}
+        description="How a person reaches this host. These are references, never credentials, and they are printed into remediation tickets so the owner does not have to ask."
+      >
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="SSH user" htmlFor="acc-user" hint="e.g. deploy">
+              <Input id="acc-user" value={sshUser} onChange={(e) => setSSHUser(e.target.value)} autoComplete="off" />
+            </Field>
+            <Field label="Host override" htmlFor="acc-host" hint="Leave empty to use the asset name.">
+              <Input id="acc-host" value={sshHost} onChange={(e) => setSSHHost(e.target.value)} autoComplete="off" />
+            </Field>
+            <Field label="Jump host" htmlFor="acc-jump" hint="Bastion, if the host is not directly reachable.">
+              <Input id="acc-jump" value={sshJump} onChange={(e) => setSSHJump(e.target.value)} autoComplete="off" />
+            </Field>
+            <Field label="Runbook URL" htmlFor="acc-runbook" hint="Your team's procedure for this kind of host.">
+              <Input id="acc-runbook" value={runbook} onChange={(e) => setRunbook(e.target.value)} autoComplete="off" />
+            </Field>
+          </div>
+          <div className="rounded-md border border-border bg-surface-2 p-2 text-xs">
+            <span className="text-muted">Ticket will show: </span>
+            <code className="mono">
+              {sshUser.trim()
+                ? `ssh ${sshJump.trim() ? `-J ${sshJump.trim()} ` : ""}${sshUser.trim()}@${sshHost.trim() || editing?.asset || ""}`
+                : "no connection line (no user recorded)"}
+            </code>
+          </div>
+          <p className="text-xs text-muted">
+            Never store a password or key here. The field goes into a ticket body, which is readable by anyone with
+            access to the project.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button variant="primary" onClick={saveAccess}>
+              Save access
+            </Button>
+            <Button variant="ghost" onClick={() => setEditing(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <p className="text-xs text-subtle">
         Assigning an asset routes its unowned work to that team and starts its SLA clock. Exposure{" "}

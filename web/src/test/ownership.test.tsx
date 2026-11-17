@@ -113,3 +113,37 @@ describe("ownership inventory", () => {
     });
   });
 });
+
+// A ticket is only useful to a developer if it says how to reach the box. The access editor is
+// where that reference is recorded — and it explicitly refuses to be a secret store.
+describe("asset access details", () => {
+  it("records how to reach the host and shows the exact ssh line", async () => {
+    const calls = mockFetch();
+    render(
+      <ToastProvider>
+        <Ownership />
+      </ToastProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("odd01")).toBeInTheDocument());
+
+    const row = screen.getByText("odd01").closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: /Access/ }));
+    fireEvent.change(screen.getByLabelText("SSH user"), { target: { value: "deploy" } });
+    fireEvent.change(screen.getByLabelText("Jump host"), { target: { value: "bastion.prod" } });
+    fireEvent.change(screen.getByLabelText("Runbook URL"), { target: { value: "https://wiki.example/x" } });
+
+    // The dialog previews the line that will be printed in the ticket.
+    expect(await screen.findByText("ssh -J bastion.prod deploy@odd01")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Save access/ }));
+
+    await waitFor(() => {
+      const put = calls.find((c) => c.method === "PUT" && c.url === "/api/ownership/odd01");
+      expect(put).toBeDefined();
+      expect(JSON.parse(String(put?.body))).toMatchObject({
+        ssh_user: "deploy",
+        ssh_jump: "bastion.prod",
+        runbook_url: "https://wiki.example/x",
+      });
+    });
+  });
+});

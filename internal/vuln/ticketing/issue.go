@@ -46,6 +46,11 @@ type Finding struct {
 	Owner    string
 	DueAt    string
 	Priority string
+	// Access is how a person reaches the host (SSH target, jump host, runbook).
+	// References only: no credentials are ever stored or printed.
+	Access AccessBlock
+	// Runbook is the team's own procedure, already rendered with this finding's values.
+	Runbook string
 }
 
 // Evidence is one scanner observation.
@@ -174,7 +179,57 @@ func RenderDescription(f Finding) string {
 		}
 	}
 
-	b.WriteString("\n## Recommended Remediation\n\n")
+	if f.Access.HasAccess() {
+		b.WriteString("\n## Access\n\n")
+		fmt.Fprintf(&b, "- **Host:** %s\n", firstNonEmpty(f.Access.Host, f.Asset, "not recorded"))
+		if cmd := f.Access.SSHCommand(); cmd != "" {
+			fmt.Fprintf(&b, "- **Connect:** `%s`\n", cmd)
+			if f.Access.SSHJump != "" {
+				fmt.Fprintf(&b, "- **Jump host:** %s\n", f.Access.SSHJump)
+			}
+			b.WriteString("- **Privileges:** sudo is required for the steps below\n")
+		}
+		if f.Access.Runbook != "" {
+			fmt.Fprintf(&b, "- **Runbook:** %s\n", f.Access.Runbook)
+		}
+	}
+
+	recipe := RecipeFor(f)
+	if recipe.Supported && len(recipe.Fix) > 0 {
+		b.WriteString("\n## Fix (review before running)\n\n```sh\n")
+		for _, line := range recipe.Fix {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("```\n\n")
+		fmt.Fprintf(&b, "_Manager: %s. Generated from the advisory's fixed version — review it for this host first: "+
+			"pinned versions, private mirrors and configuration management can all make a manual step the wrong step._\n", recipe.Manager)
+		if recipe.Caution != "" {
+			b.WriteString("\n" + recipe.Caution + "\n")
+		}
+		if len(recipe.Verify) > 0 {
+			b.WriteString("\n**Check the version after the change:**\n\n```sh\n")
+			for _, line := range recipe.Verify {
+				b.WriteString(line + "\n")
+			}
+			b.WriteString("```\n")
+		}
+		if len(recipe.Rollback) > 0 {
+			b.WriteString("\n**Roll back if the change breaks something:**\n\n```sh\n")
+			for _, line := range recipe.Rollback {
+				b.WriteString(line + "\n")
+			}
+			b.WriteString("```\n")
+		}
+	} else if recipe.Caution != "" {
+		b.WriteString("\n## Fix\n\n" + recipe.Caution + "\n")
+	}
+
+	if strings.TrimSpace(f.Runbook) != "" {
+		b.WriteString("\n## Team runbook\n\n")
+		b.WriteString(strings.TrimSpace(f.Runbook) + "\n")
+	}
+
+	b.WriteString("\n## Advisory guidance\n\n")
 	b.WriteString(remediationSection(f))
 
 	b.WriteString("\n## Verification\n\n")

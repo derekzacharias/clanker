@@ -216,6 +216,10 @@ func (s *Server) handleOwnershipPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Asset = r.PathValue("host")
+	if err := validateAccess(body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_access", err.Error())
+		return
+	}
 	own, err := s.remediate.SetOwnership(r.Context(), body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "ownership_error", err.Error())
@@ -534,4 +538,52 @@ func (s *Server) handleRemediationPolicy(w http.ResponseWriter, r *http.Request)
 	}
 	s.log.Info("remediation policy updated", "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, policy)
+}
+
+// validateAccess keeps the ownership record to references.
+//
+// The connection fields end up in a ticket that a developer pastes into a shell, so they are
+// restricted to characters that are valid in a hostname or username; anything else is refused
+// rather than escaped. Passwords and keys are refused outright — this table is not a secret
+// store, and a "password" field here would be a breach waiting for a backup.
+func validateAccess(o remediate.Ownership) error {
+	check := func(label, value string, max int) error {
+		v := strings.TrimSpace(value)
+		if v == "" {
+			return nil
+		}
+		if len(v) > max {
+			return fmt.Errorf("%s is too long (max %d characters)", label, max)
+		}
+		for _, r := range v {
+			if r <= 0x20 || r == 0x7f || strings.ContainsRune("'\"`;$|&<>()", r) {
+				return fmt.Errorf("%s contains characters that are not valid in a hostname or user name", label)
+			}
+		}
+		return nil
+	}
+	if err := check("ssh_user", o.SSHUser, 64); err != nil {
+		return err
+	}
+	if err := check("ssh_host", o.SSHHost, 255); err != nil {
+		return err
+	}
+	if err := check("ssh_jump", o.SSHJump, 255); err != nil {
+		return err
+	}
+	if v := strings.TrimSpace(o.RunbookURL); v != "" {
+		if !strings.HasPrefix(v, "https://") && !strings.HasPrefix(v, "http://") {
+			return errors.New("runbook_url must be an http(s) URL")
+		}
+		if len(v) > 500 {
+			return errors.New("runbook_url is too long")
+		}
+	}
+	for _, sensitive := range []string{o.SSHUser, o.SSHHost, o.SSHJump} {
+		lower := strings.ToLower(sensitive)
+		if strings.HasPrefix(lower, "password=") || strings.HasPrefix(lower, "passwd=") || strings.Contains(lower, "private_key") {
+			return errors.New("access fields must not contain credentials; store a reference to the secret, not the secret")
+		}
+	}
+	return nil
 }
