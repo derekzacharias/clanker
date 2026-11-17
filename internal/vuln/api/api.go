@@ -215,6 +215,11 @@ func (s *Server) Listen(addr string) error {
 		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// A request body is small (reports are the exception, capped separately), and a
+		// claim hold is at most 30s, so the write deadline has to clear that.
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 90 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	s.log.Info("clanker guard api listening", "addr", addr, "web_dir", s.opts.WebDir)
 	return srv.ListenAndServe()
@@ -285,6 +290,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/agents/enroll-token", s.handleEnrollTokenRotate)
 	// Kept as an alias so existing tooling keeps working; both mint a new token.
 	s.mux.HandleFunc("POST /api/agents/enroll-token/rotate", s.handleEnrollTokenRotate)
+	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
 	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 	s.mux.HandleFunc("POST /api/ask", s.handleAsk)
@@ -309,6 +315,17 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		// The app serves only its own bundle: no third-party scripts, no inline script.
+		// style-src allows inline styles because Radix sets them as attributes.
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; "+
+				"base-uri 'self'; form-action 'self'")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		if requestIsHTTPS(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 
 		// Liveness and the sign-in endpoints are unauthenticated on purpose: the
 		// login page has to reach them before a session exists. None of them

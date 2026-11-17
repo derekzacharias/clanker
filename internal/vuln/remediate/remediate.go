@@ -130,10 +130,13 @@ type Item struct {
 	Remediation      string     `json:"remediation,omitempty"`
 	Evidence         string     `json:"evidence,omitempty"`
 	ReportID         string     `json:"report_id,omitempty"`
-	Notes            string     `json:"notes,omitempty"`
-	FirstSeen        time.Time  `json:"first_seen"`
-	LastSeen         time.Time  `json:"last_seen"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	// VerifiedReport is the assessment whose absence of this finding resolved the item.
+	// It is the receipt: without one, "resolved" is only an assertion.
+	VerifiedReport string    `json:"verified_report_id,omitempty"`
+	Notes          string    `json:"notes,omitempty"`
+	FirstSeen      time.Time `json:"first_seen"`
+	LastSeen       time.Time `json:"last_seen"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // Overdue reports whether the item is past due and still needs work.

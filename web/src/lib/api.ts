@@ -794,6 +794,10 @@ export const api = {
   remediation: (params: { team?: string; state?: string; owner?: string; asset?: string; overdue?: boolean } = {}) =>
     request<{ items: RemediationItem[]; total: number }>(`/api/remediation${qs(params)}`),
   ownership: (asset: string) => request<Ownership>(`/api/ownership/${encodeURIComponent(asset)}`),
+  audit: (opts: { limit?: number; action?: string; actor?: string } = {}) =>
+    request<{ items: AuditEntry[]; total: number; actions: string[] }>(
+      `/api/audit${qs({ limit: opts.limit, action: opts.action, actor: opts.actor })}`,
+    ),
   gitlabConfig: () => request<GitLabConfig>("/api/integrations/gitlab"),
   saveGitLab: (body: {
     enabled?: boolean;
@@ -953,6 +957,17 @@ export interface Ownership {
 
 /** One line of the ownership inventory: an asset, its record (if any), and its work. */
 /** GitLab ticket tracked by Clanker Guard. GitLab remains the source of truth for state. */
+/** One durable record of who did what. */
+export interface AuditEntry {
+  seq: number;
+  at: string;
+  actor: string;
+  action: string;
+  target?: string;
+  detail?: string;
+  remote?: string;
+}
+
 export interface GitLabTicket {
   id: string;
   finding_key: string;

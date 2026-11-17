@@ -6,6 +6,7 @@ import { useAsync } from "../lib/useApi";
 import { useQueryParam } from "../lib/router";
 import Improvement from "./Improvement";
 import { GitLabSettings } from "../components/GitLabSettings";
+import { AuditLog } from "../components/AuditLog";
 import { formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -18,7 +19,7 @@ import { Switch } from "../components/ui/Switch";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 
-const TABS = ["general", "intelligence", "agents", "integrations", "improvement", "access"] as const;
+const TABS = ["general", "intelligence", "agents", "integrations", "improvement", "access", "audit"] as const;
 
 export default function Settings() {
   const tabParam = useQueryParam("tab");
@@ -39,6 +40,7 @@ export default function Settings() {
             ["integrations", "Integrations"],
             ["improvement", "Continuous improvement"],
             ["access", "Access"],
+            ["audit", "Audit log"],
           ].map(([value, label]) => (
             <Tabs.Trigger
               key={value}
@@ -67,6 +69,18 @@ export default function Settings() {
             />
             <CardBody>
               <GitLabSettings />
+            </CardBody>
+          </Card>
+        </Tabs.Content>
+
+        <Tabs.Content value="audit">
+          <Card>
+            <CardHeader
+              title="Audit log"
+              description="Durable record of changes made through the dashboard. Survives log rotation."
+            />
+            <CardBody>
+              <AuditLog />
             </CardBody>
           </Card>
         </Tabs.Content>

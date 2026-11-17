@@ -185,6 +185,8 @@ func (s *Server) handleGitLabPut(w http.ResponseWriter, r *http.Request) {
 			"could not save the GitLab configuration: "+err.Error())
 		return
 	}
+	s.audit(r, "gitlab.config", settings.URL,
+		fmt.Sprintf("enabled=%t project=%d token_set=%t", settings.Enabled, settings.ProjectID, settings.Token != ""))
 	s.log.Info("gitlab configuration updated", "enabled", settings.Enabled, "url", settings.URL,
 		"project_id", settings.ProjectID, "token_set", settings.Token != "", "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, s.gitlabView(settings))
@@ -534,6 +536,8 @@ func (s *Server) handleGitLabCreateTicket(w http.ResponseWriter, r *http.Request
 		writeError(w, gitlabStatus(err), "gitlab_error", humanGitLabError(err))
 		return
 	}
+	s.audit(r, "ticket.create", res.Ticket.ID,
+		fmt.Sprintf("issue=#%d created=%t reused=%t asset=%s vuln=%s", res.Ticket.IssueIID, res.Created, res.Reused, f.Asset, f.VulnerabilityID))
 	s.log.Info("gitlab ticket request completed", "ticket", res.Ticket.ID, "issue_iid", res.Ticket.IssueIID,
 		"created", res.Created, "reused", res.Reused, "asset", f.Asset, "vulnerability", f.VulnerabilityID,
 		"remote", s.clientIP(r))

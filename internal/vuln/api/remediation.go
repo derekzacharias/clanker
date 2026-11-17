@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -181,6 +183,7 @@ func (s *Server) handleOwnershipBulk(w http.ResponseWriter, r *http.Request) {
 		}
 		updated = append(updated, asset)
 	}
+	s.audit(r, "ownership.bulk", team, fmt.Sprintf("assets=%s", strings.Join(updated, ",")))
 	s.log.Info("asset ownership assigned in bulk", "team", team, "assets", len(updated),
 		"failed", len(failed), "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -213,6 +216,8 @@ func (s *Server) handleOwnershipPut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ownership_error", err.Error())
 		return
 	}
+	s.audit(r, "ownership.set", own.Asset,
+		fmt.Sprintf("team=%q owner=%q exposure=%q status=%s", own.Team, own.Owner, own.Exposure, own.Status))
 	s.log.Info("asset ownership recorded", "asset", own.Asset, "team", own.Team, "status", own.Status, "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, own)
 }
@@ -322,18 +327,105 @@ func (s *Server) handleRemediationPatch(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "invalid_transition", err.Error())
 		return
 	}
+	var changes []string
+	if body.Team != nil {
+		changes = append(changes, fmt.Sprintf("team=%q", item.Team))
+	}
+	if body.Owner != nil {
+		changes = append(changes, fmt.Sprintf("owner=%q", item.Owner))
+	}
+	if body.State != nil {
+		changes = append(changes, fmt.Sprintf("state=%s", item.State))
+	}
+	s.audit(r, "remediation.update", item.ID, strings.Join(changes, " "))
 	s.log.Info("remediation item updated", "id", item.ID, "state", item.State, "team", item.Team, "remote", s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"item": item})
 }
 
-// handleRemediationVerify marks an item resolved from a later assessment. The
-// verification itself is the evidence — never a manual "done".
+// handleRemediationVerify marks an item resolved from a later assessment.
+//
+// The assessment is the evidence, so it is checked rather than taken on trust: the report
+// must exist, cover this asset, be newer than the last time the finding was seen, and no
+// longer contain it. Without those checks "resolved" is a string the caller made up, and
+// the whole point of the workflow — that closure means something — evaporates.
 func (s *Server) handleRemediationVerify(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ReportID string `json:"report_id"`
 	}
-	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body)
-	item, err := s.remediate.MarkVerified(r.Context(), r.PathValue("id"), body.ReportID)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is not valid JSON")
+		return
+	}
+	item, err := s.remediate.Get(r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, remediate.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "no such remediation item")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "remediation_error", err.Error())
+		return
+	}
+	reportID := strings.TrimSpace(body.ReportID)
+	if reportID == "" {
+		// Convenience without slack: "the latest assessment for this asset" still has to
+		// satisfy every check below.
+		rec, _, err := s.store.LatestReportFor(r.Context(), item.Asset)
+		if err != nil {
+			writeError(w, http.StatusConflict, "verification_report_missing",
+				"name an assessment that no longer reports this finding; none is stored for "+item.Asset)
+			return
+		}
+		reportID = rec.ID
+	}
+	rec, rep, err := s.store.AssessmentByID(r.Context(), reportID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "verification_report_missing",
+			fmt.Sprintf("no stored assessment with id %q: verification needs a report that exists", reportID))
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(rep.Metadata.Host), strings.TrimSpace(item.Asset)) {
+		writeError(w, http.StatusConflict, "verification_wrong_asset",
+			fmt.Sprintf("assessment %s covers %s, not %s", rec.ID, rep.Metadata.Host, item.Asset))
+		return
+	}
+	for _, f := range rep.Findings {
+		if remediate.FindingKey(item.Asset, f) == item.FindingKey {
+			writeError(w, http.StatusConflict, "verification_still_present",
+				fmt.Sprintf("assessment %s still reports this finding, so it is not resolved", rec.ID))
+			return
+		}
+	}
+	// "Newer" is measured report-to-report, not against the server clock: the agent stamps
+	// its own finished_at, and comparing that to server time would fail every scan from a
+	// host whose clock runs slightly behind — a false accusation of stale evidence.
+	finished := rec.FinishedAt
+	if finished.IsZero() {
+		finished = rep.Metadata.StartedAt
+	}
+	switch prevRec, _, prevErr := s.store.AssessmentByID(r.Context(), item.ReportID); {
+	case prevErr == nil:
+		prevFinished := prevRec.FinishedAt
+		if prevFinished.IsZero() {
+			prevFinished = finished.Add(-time.Second)
+		}
+		if !finished.After(prevFinished) {
+			writeError(w, http.StatusConflict, "verification_report_older",
+				fmt.Sprintf("assessment %s finished %s, not after the assessment that reported this finding (%s, %s); run a new scan",
+					rec.ID, finished.UTC().Format(time.RFC3339), prevRec.ID, prevFinished.UTC().Format(time.RFC3339)))
+			return
+		}
+	default:
+		// The reporting assessment is no longer stored (pruned or imported): the only
+		// defensible check left is that this is the newest assessment we hold for the asset.
+		latest, _, err := s.store.LatestReportFor(r.Context(), item.Asset)
+		if err != nil || latest.ID != rec.ID {
+			writeError(w, http.StatusConflict, "verification_report_older",
+				fmt.Sprintf("assessment %s is not the newest stored assessment for %s; run a new scan",
+					rec.ID, item.Asset))
+			return
+		}
+	}
+	updated, err := s.remediate.MarkVerified(r.Context(), item.ID, rec.ID)
 	if err != nil {
 		if errors.Is(err, remediate.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "no such remediation item")
@@ -342,8 +434,11 @@ func (s *Server) handleRemediationVerify(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, "not_verifiable", err.Error())
 		return
 	}
-	s.log.Info("remediation verified", "id", item.ID, "report", body.ReportID, "remote", s.clientIP(r))
-	writeJSON(w, http.StatusOK, map[string]any{"item": item})
+	s.audit(r, "remediation.verify", updated.ID,
+		fmt.Sprintf("resolved by assessment %s (asset %s, %s)", rec.ID, updated.Asset, updated.VulnerabilityID))
+	s.log.Info("remediation verified", "id", updated.ID, "report", rec.ID,
+		"run_finished", finished.UTC().Format(time.RFC3339), "remote", s.clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"item": updated})
 }
 
 // handleRemediationPolicy reads or writes the SLA and routing policy.

@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS remediation_items (
   remediation       TEXT NOT NULL DEFAULT '',
   evidence          TEXT NOT NULL DEFAULT '',
   report_id         TEXT NOT NULL DEFAULT '',
+  verified_report_id TEXT NOT NULL DEFAULT '',
   notes             TEXT NOT NULL DEFAULT '',
   first_seen        TEXT NOT NULL,
   last_seen         TEXT NOT NULL,
@@ -77,11 +78,43 @@ func New(db *sql.DB) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("initialise remediation tables: %w", err)
 	}
+	// Additive migration: SQLite has no "ADD COLUMN IF NOT EXISTS", so ask the catalogue
+	// first. Existing databases keep their rows.
+	if err := ensureColumn(db, "remediation_items", "verified_report_id",
+		"TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 // SetClock is for tests.
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
+
+// ensureColumn adds a column to an existing table when it is missing.
+func ensureColumn(db *sql.DB, table, column, ddl string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, ddl)); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}
 
 // SetOwnership records (or replaces) the responsibility for an asset.
 //
@@ -215,7 +248,8 @@ type Filter struct {
 func (s *Store) List(ctx context.Context, f Filter, policy Policy) ([]Item, error) {
 	q := `SELECT id, asset, finding_key, vulnerability_id, product, installed_version, ecosystem,
 		severity, category, team, owner, state, priority, due_at, fixed_version, remediation,
-		evidence, report_id, notes, first_seen, last_seen, updated_at FROM remediation_items WHERE 1=1`
+		evidence, report_id, verified_report_id, notes, first_seen, last_seen, updated_at
+		FROM remediation_items WHERE 1=1`
 	args := []any{}
 	if f.Team != "" {
 		q += ` AND team = ?`
@@ -271,7 +305,8 @@ func (s *Store) List(ctx context.Context, f Filter, policy Policy) ([]Item, erro
 func (s *Store) Get(id string) (*Item, error) {
 	row := s.db.QueryRow(`SELECT id, asset, finding_key, vulnerability_id, product, installed_version,
 		ecosystem, severity, category, team, owner, state, priority, due_at, fixed_version, remediation,
-		evidence, report_id, notes, first_seen, last_seen, updated_at FROM remediation_items WHERE id = ?`, id)
+		evidence, report_id, verified_report_id, notes, first_seen, last_seen, updated_at
+		FROM remediation_items WHERE id = ?`, id)
 	item, err := scanItem(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -346,8 +381,14 @@ func (s *Store) MarkVerified(ctx context.Context, id, reportID string) (Item, er
 	if item.State != StatePendingVerification && item.State != StateApplied {
 		return Item{}, fmt.Errorf("item is %s; verification resolves items that have been remediated", item.State)
 	}
+	// The receipt is mandatory. The caller is responsible for having checked the report's
+	// contents and date; storing the id makes the claim auditable afterwards.
+	if strings.TrimSpace(reportID) == "" {
+		return Item{}, errors.New("verification needs the id of the assessment that no longer reports this finding")
+	}
 	now := s.now()
 	item.State = StateResolved
+	item.VerifiedReport = strings.TrimSpace(reportID)
 	item.UpdatedAt = now
 	item.Notes = strings.TrimSpace(item.Notes + " | verified resolved in " + reportID)
 	if err := s.update(*item); err != nil {
@@ -470,7 +511,7 @@ func scanItem(r rowScanner) (Item, error) {
 	if err := r.Scan(&it.ID, &it.Asset, &it.FindingKey, &it.VulnerabilityID, &it.Product,
 		&it.InstalledVersion, &it.Ecosystem, &it.Severity, &it.Category, &it.Team, &it.Owner,
 		&state, &it.Priority, &due, &it.FixedVersion, &it.Remediation, &it.Evidence,
-		&it.ReportID, &it.Notes, &firstSeen, &lastSeen, &upd); err != nil {
+		&it.ReportID, &it.VerifiedReport, &it.Notes, &firstSeen, &lastSeen, &upd); err != nil {
 		return Item{}, err
 	}
 	it.State = State(state)
@@ -490,12 +531,12 @@ func (s *Store) insert(item Item) error {
 	_, err := s.db.Exec(`INSERT INTO remediation_items
 		(id, asset, finding_key, vulnerability_id, product, installed_version, ecosystem, severity,
 		 category, team, owner, state, priority, due_at, fixed_version, remediation, evidence,
-		 report_id, notes, first_seen, last_seen, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 report_id, verified_report_id, notes, first_seen, last_seen, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Asset, item.FindingKey, item.VulnerabilityID, item.Product,
 		item.InstalledVersion, item.Ecosystem, item.Severity, item.Category, item.Team,
 		item.Owner, string(item.State), item.Priority, timePtr(item.DueAt),
-		item.FixedVersion, item.Remediation, item.Evidence, item.ReportID, item.Notes,
+		item.FixedVersion, item.Remediation, item.Evidence, item.ReportID, item.VerifiedReport, item.Notes,
 		item.FirstSeen.Format(time.RFC3339), item.LastSeen.Format(time.RFC3339),
 		item.UpdatedAt.Format(time.RFC3339))
 	return err
@@ -504,11 +545,12 @@ func (s *Store) insert(item Item) error {
 func (s *Store) update(item Item) error {
 	_, err := s.db.Exec(`UPDATE remediation_items SET
 		severity=?, category=?, team=?, owner=?, state=?, priority=?, due_at=?, fixed_version=?,
-		remediation=?, evidence=?, report_id=?, notes=?, last_seen=?, updated_at=?
+		remediation=?, evidence=?, report_id=?, verified_report_id=?, notes=?, last_seen=?, updated_at=?
 		WHERE id=?`,
 		item.Severity, item.Category, item.Team, item.Owner, string(item.State), item.Priority,
 		timePtr(item.DueAt), item.FixedVersion, item.Remediation, item.Evidence, item.ReportID,
-		item.Notes, item.LastSeen.Format(time.RFC3339), item.UpdatedAt.Format(time.RFC3339), item.ID)
+		item.VerifiedReport, item.Notes, item.LastSeen.Format(time.RFC3339),
+		item.UpdatedAt.Format(time.RFC3339), item.ID)
 	return err
 }
 

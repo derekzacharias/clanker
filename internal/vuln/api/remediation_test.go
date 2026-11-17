@@ -352,3 +352,200 @@ func TestFindingDetailCarriesItsRemediationState(t *testing.T) {
 		t.Fatal("a freshly created item cannot be overdue")
 	}
 }
+
+// "Resolved" is the one state the whole process trusts, so verifying it must be as strict
+// as the claim: a real assessment, for this asset, newer than the last sighting, that no
+// longer reports the finding.
+func TestVerificationRefusesAnythingButARealReceipt(t *testing.T) {
+	srv := fleetServer(t)
+	// One enrollment, several assessments: the agent identity is the host, so re-enrolling
+	// the same name is (correctly) refused.
+	_, token := enrollAgent(t, srv, "web01")
+	base := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	post := func(reportID, product, vuln string, finished time.Time) {
+		t.Helper()
+		rep := model.Report{
+			SchemaVersion: "1",
+			ReportID:      reportID,
+			Metadata: model.ScanMetadata{
+				ToolVersion: "test", StartedAt: finished.Add(-time.Minute), FinishedAt: &finished,
+				Mode: "local", Host: "web01",
+			},
+			Findings: []model.Finding{{
+				Asset: "web01", Ecosystem: "Ubuntu:24.04", Product: product,
+				InstalledVersion: "1.0.0", VulnerabilityID: vuln, Severity: "high",
+				Affected: model.ApplicabilityConfirmed, Confidence: model.ConfidenceHigh,
+			}},
+		}
+		payload, err := report.MarshalJSON(rep)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if rec := request(t, srv.Handler(), "POST", "/api/agents/report", string(payload), agentHeaders(token)); rec.Code != 200 {
+			t.Fatalf("report %s = %d: %s", reportID, rec.Code, rec.Body.String())
+		}
+	}
+	post("SCAN-V-1", "openssl", "CVE-2026-8001", base)
+
+	var list struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation?asset=web01", &list)
+	if len(list.Items) != 1 {
+		t.Fatalf("items = %+v", list.Items)
+	}
+	id := list.Items[0].ID
+	// Move to a state that verification may resolve.
+	if rec := request(t, srv.Handler(), "PATCH", "/api/remediation/"+id,
+		`{"state":"in_progress"}`, dash()); rec.Code != 200 {
+		t.Fatalf("patch = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := request(t, srv.Handler(), "PATCH", "/api/remediation/"+id,
+		`{"state":"remediation_applied"}`, dash()); rec.Code != 200 {
+		t.Fatalf("patch applied = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 1. An invented report id.
+	rec := request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/verify",
+		`{"report_id":"SCAN-MADE-UP"}`, dash())
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "verification_report_missing") {
+		t.Fatalf("invented report = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. The report that reported the finding: it cannot also clear it.
+	rec = request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/verify",
+		`{"report_id":"SCAN-V-1"}`, dash())
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "verification_still_present") {
+		t.Fatalf("report that still contains the finding = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 3. A report for a different asset.
+	postReport(t, srv, "web02", "Ubuntu:24.04", "openssl", "CVE-2026-8002", "high", "SCAN-V-2")
+	rec = request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/verify",
+		`{"report_id":"SCAN-V-2"}`, dash())
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "verification_wrong_asset") {
+		t.Fatalf("wrong asset = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. No report at all.
+	rec = request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/verify", `{}`, dash())
+	if rec.Code != 409 {
+		t.Fatalf("missing report id = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 5. A genuine later scan that no longer reports it resolves the item, and the receipt
+	//    is stored so the claim can be checked afterwards.
+	post("SCAN-V-3", "curl", "CVE-2026-9999", base.Add(24*time.Hour))
+	rec = request(t, srv.Handler(), "POST", "/api/remediation/"+id+"/verify",
+		`{"report_id":"SCAN-V-3"}`, dash())
+	if rec.Code != 200 {
+		t.Fatalf("valid verification = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Item struct {
+			State          string `json:"state"`
+			VerifiedReport string `json:"verified_report_id"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Item.State != "resolved" || out.Item.VerifiedReport != "SCAN-V-3" {
+		t.Fatalf("verified item = %+v", out.Item)
+	}
+	// The diary records who resolved it and with what evidence.
+	var audit struct {
+		Items []struct {
+			Action string `json:"action"`
+			Detail string `json:"detail"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/audit?action=remediation.verify", &audit)
+	if len(audit.Items) != 1 || !strings.Contains(audit.Items[0].Detail, "SCAN-V-3") {
+		t.Fatalf("audit = %+v", audit.Items)
+	}
+}
+
+// The diary is the answer to "who changed this, and when" — it must exist for the actions
+// that matter and survive the log.
+func TestAuditLogRecordsStateChanges(t *testing.T) {
+	srv := fleetServer(t)
+	postReport(t, srv, "web01", "Ubuntu:24.04", "openssl", "CVE-2026-8100", "high", "SCAN-A-1")
+
+	if rec := request(t, srv.Handler(), "PUT", "/api/ownership/web01",
+		`{"team":"Payments","owner":"dana"}`, dash()); rec.Code != 200 {
+		t.Fatalf("ownership = %d", rec.Code)
+	}
+	var list struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation?asset=web01", &list)
+	if rec := request(t, srv.Handler(), "PATCH", "/api/remediation/"+list.Items[0].ID,
+		`{"owner":"sam"}`, dash()); rec.Code != 200 {
+		t.Fatalf("patch = %d", rec.Code)
+	}
+
+	var audit struct {
+		Items []struct {
+			Action string `json:"action"`
+			Target string `json:"target"`
+			Actor  string `json:"actor"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	dashGet(t, srv.Handler(), "/api/audit", &audit)
+	seen := map[string]bool{}
+	for _, e := range audit.Items {
+		seen[e.Action] = true
+		if e.Actor == "" {
+			t.Fatalf("audit entry has no actor: %+v", e)
+		}
+	}
+	for _, want := range []string{"ownership.set", "remediation.update"} {
+		if !seen[want] {
+			t.Fatalf("audit is missing %q: %+v", want, audit.Items)
+		}
+	}
+	if audit.Total < 2 {
+		t.Fatalf("audit total = %d", audit.Total)
+	}
+
+	// Filtering works, so the page is usable when the diary grows.
+	var filtered struct {
+		Items []struct {
+			Action string `json:"action"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/audit?action=ownership.set", &filtered)
+	if len(filtered.Items) == 0 {
+		t.Fatal("action filter returned nothing")
+	}
+	for _, e := range filtered.Items {
+		if e.Action != "ownership.set" {
+			t.Fatalf("filter leaked %q", e.Action)
+		}
+	}
+}
+
+// Security headers are the second line of defence when something else goes wrong.
+func TestResponsesCarrySecurityHeaders(t *testing.T) {
+	srv := fleetServer(t)
+	rec := request(t, srv.Handler(), "GET", "/api/health", "", nil)
+	for header, want := range map[string]string{
+		"Content-Security-Policy":    "default-src 'self'",
+		"X-Content-Type-Options":     "nosniff",
+		"X-Frame-Options":            "SAMEORIGIN",
+		"Referrer-Policy":            "same-origin",
+		"Permissions-Policy":         "camera=()",
+		"Cross-Origin-Opener-Policy": "same-origin",
+	} {
+		got := rec.Header().Get(header)
+		if !strings.Contains(got, want) {
+			t.Fatalf("%s = %q, want it to contain %q", header, got, want)
+		}
+	}
+}

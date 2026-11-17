@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite (no cgo): the agent must cross-compile
@@ -82,6 +84,18 @@ CREATE TABLE IF NOT EXISTS settings (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+  seq    INTEGER PRIMARY KEY AUTOINCREMENT,
+  at     TEXT NOT NULL,
+  actor  TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  remote TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action, at);
+
 CREATE TABLE IF NOT EXISTS runs (
   id          TEXT PRIMARY KEY,
   host        TEXT NOT NULL,
@@ -111,7 +125,114 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("initialise cache: %w", err)
 	}
+	// The cache holds hostnames, installed packages, findings and token hashes. Its files
+	// are readable only by the account running the service; umask is not a security
+	// boundary we should be relying on.
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(f, 0o600); err != nil && !os.IsNotExist(err) {
+			db.Close()
+			return nil, fmt.Errorf("restrict permissions on %s: %w", f, err)
+		}
+	}
 	return &Store{db: db, Path: path}, nil
+}
+
+// AuditEntry is one durable record of who did what.
+//
+// Log lines rotate; this does not. Anything that changes ownership, workflow state,
+// configuration or an external system goes here, so "who accepted this risk, and when"
+// is answerable months later.
+type AuditEntry struct {
+	Seq    int64  `json:"seq"`
+	At     string `json:"at"`
+	Actor  string `json:"actor"`
+	Action string `json:"action"`
+	Target string `json:"target,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	Remote string `json:"remote,omitempty"`
+}
+
+// AppendAudit records one action. It never fails the caller's request: an audit write
+// that cannot be stored is loud in the log, but refusing the work because the diary page
+// is full would be worse.
+func (s *Store) AppendAudit(ctx context.Context, e AuditEntry) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_log (at, actor, action, target, detail, remote)
+		VALUES (?,?,?,?,?,?)`, e.At, e.Actor, e.Action, e.Target, e.Detail, e.Remote)
+	return err
+}
+
+// ListAudit returns the newest entries first.
+func (s *Store) ListAudit(ctx context.Context, limit int, action, actor string) ([]AuditEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := `SELECT seq, at, actor, action, target, detail, remote FROM audit_log`
+	var (
+		where []string
+		args  []any
+	)
+	if action != "" {
+		where = append(where, "action = ?")
+		args = append(args, action)
+	}
+	if actor != "" {
+		where = append(where, "actor = ?")
+		args = append(args, actor)
+	}
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY seq DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AuditEntry{}
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.Seq, &e.At, &e.Actor, &e.Action, &e.Target, &e.Detail, &e.Remote); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AssessmentByID returns a stored assessment by its id (the receipt for a verification).
+func (s *Store) AssessmentByID(ctx context.Context, id string) (model.RunRecord, model.Report, error) {
+	var recPayload, reportPayload string
+	err := s.db.QueryRowContext(ctx, `SELECT record, report FROM runs WHERE id = ?`, id).
+		Scan(&recPayload, &reportPayload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.RunRecord{}, model.Report{}, fmt.Errorf("no assessment with id %q", id)
+	}
+	if err != nil {
+		return model.RunRecord{}, model.Report{}, err
+	}
+	var rec model.RunRecord
+	if err := json.Unmarshal([]byte(recPayload), &rec); err != nil {
+		return model.RunRecord{}, model.Report{}, err
+	}
+	var rep model.Report
+	if err := json.Unmarshal([]byte(reportPayload), &rep); err != nil {
+		return model.RunRecord{}, model.Report{}, err
+	}
+	return rec, rep, nil
+}
+
+// LatestReportFor returns the newest stored assessment for a host.
+func (s *Store) LatestReportFor(ctx context.Context, host string) (model.RunRecord, model.Report, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM runs WHERE host = ? ORDER BY finished_at DESC LIMIT 1`, host).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.RunRecord{}, model.Report{}, fmt.Errorf("no assessment stored for %q", host)
+	}
+	if err != nil {
+		return model.RunRecord{}, model.Report{}, err
+	}
+	return s.AssessmentByID(ctx, id)
 }
 
 // DB exposes the underlying handle for subsystems that own their own tables
@@ -450,4 +571,22 @@ func normalizeKey(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// AuditActions lists the distinct actions recorded, for the filter menu.
+func (s *Store) AuditActions(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT action FROM audit_log ORDER BY action`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
