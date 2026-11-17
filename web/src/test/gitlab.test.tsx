@@ -136,7 +136,7 @@ describe("GitLab ticket creation", () => {
     fireEvent.click(create);
 
     // The preview comes from the server, so the operator sees exactly what will be sent.
-    await waitFor(() => expect(screen.getByLabelText("Description")).toHaveValue(CONFIG_TITLE_DESCRIPTION));
+    await waitFor(() => expect(screen.getByLabelText("Issue description markdown")).toHaveValue(CONFIG_TITLE_DESCRIPTION));
     expect(screen.getByLabelText("Title")).toHaveValue("[HIGH] CVE-2026-1234 | openssl | web01");
 
     fireEvent.click(screen.getByRole("button", { name: /^Create Ticket$/ }));

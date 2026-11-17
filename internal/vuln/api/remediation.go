@@ -571,6 +571,9 @@ func validateAccess(o remediate.Ownership) error {
 	if err := check("ssh_jump", o.SSHJump, 255); err != nil {
 		return err
 	}
+	if o.SSHPort != 0 && (o.SSHPort < 1 || o.SSHPort > 65535) {
+		return errors.New("ssh_port must be between 1 and 65535 (0 means the default)")
+	}
 	if v := strings.TrimSpace(o.RunbookURL); v != "" {
 		if !strings.HasPrefix(v, "https://") && !strings.HasPrefix(v, "http://") {
 			return errors.New("runbook_url must be an http(s) URL")

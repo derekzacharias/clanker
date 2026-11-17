@@ -352,7 +352,7 @@ func (s *Server) gitlabFinding(host assetInfo, hostFallback string, row *vulnRow
 	if own, err := s.remediate.Ownership(row.Asset); err == nil {
 		f.Access = ticketing.AccessBlock{
 			Host: row.Asset, SSHUser: own.SSHUser, SSHHost: own.SSHHost,
-			SSHJump: own.SSHJump, Runbook: own.RunbookURL,
+			SSHJump: own.SSHJump, SSHPort: own.SSHPort, Runbook: own.RunbookURL,
 		}
 	}
 	if item != nil {
@@ -411,9 +411,13 @@ func (s *Server) handleGitLabPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	labels := ticketing.Labels(settings.Labels, f)
+	plan, description := ticketing.Compose(f)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"title":       ticketing.Title(f),
-		"description": ticketing.RenderDescription(f),
+		"description": description,
+		// The same plan the markdown came from, so the preview can render the work order
+		// (system table, numbered steps, copy buttons) without re-parsing Markdown.
+		"plan":        plan,
 		"labels":      labels,
 		"label_field": ticketing.LabelString(labels),
 		"project_id":  settings.ProjectID,
@@ -535,15 +539,17 @@ func (s *Server) handleGitLabCreateTicket(w http.ResponseWriter, r *http.Request
 	if len(body.Labels) > 0 {
 		labels = ticketing.Labels(append(settings.Labels, body.Labels...), f)
 	}
+	plan, _ := ticketing.Compose(f)
 	creator := &ticketing.Creator{
-		Store:        s.tickets,
-		Client:       client,
-		ProjectID:    projectID,
-		ProjectPath:  project.PathWithNamespace,
-		Labels:       settings.Labels,
-		CreatedBy:    s.actorName(r),
-		AssigneeName: settings.Assignee,
-		Log:          s.log,
+		Store:             s.tickets,
+		RemediationStatus: string(plan.Status),
+		Client:            client,
+		ProjectID:         projectID,
+		ProjectPath:       project.PathWithNamespace,
+		Labels:            settings.Labels,
+		CreatedBy:         s.actorName(r),
+		AssigneeName:      settings.Assignee,
+		Log:               s.log,
 	}
 	assigneeID := body.AssigneeID
 	assigneeName := settings.Assignee

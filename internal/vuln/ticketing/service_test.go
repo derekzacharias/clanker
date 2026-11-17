@@ -56,7 +56,7 @@ func TestCreateStoresTheIssueReferenceAndSendsTheRenderedBody(t *testing.T) {
 		t.Fatalf("unexpected request: %+v", sent)
 	}
 	desc := str(sent.Body["description"])
-	for _, want := range []string{"CVE-2026-1234", "web01.prod", "openssl", "## Verification", "## Source"} {
+	for _, want := range []string{"CVE-2026-1234", "web01.prod", "openssl", "## Step", "## Source"} {
 		if !strings.Contains(desc, want) {
 			t.Fatalf("description sent to GitLab is missing %q", want)
 		}

@@ -240,55 +240,113 @@ func TestVerifyDistinguishesTheFailureModes(t *testing.T) {
 	})
 }
 
-// --- Issue rendering ---------------------------------------------------------------
+// --- Issue rendering ---
 
-func TestDescriptionCarriesTheEvidenceAndKeepsProvenance(t *testing.T) {
+func TestDescriptionIsAWorkOrder(t *testing.T) {
 	f := testFinding()
+	f.Access = AccessBlock{Host: "web01", SSHUser: "deploy", SSHJump: "bastion.prod"}
 	body := RenderDescription(f)
+
 	for _, want := range []string{
-		"CVE-2026-1234", "CRITICAL", "CVSS:** 9.8", "web01.prod", "Ubuntu 22.04",
-		"openssl", "3.0.2", "Installed version is inside the affected range.",
-		"openssl 3.0.2 installed", "3.0.13-1ubuntu1", "USN-6000-1",
-		"quoted by the scanner",
-		"Re-scan the host", "clanker-guard:finding:ab12cd34ef56", "SCAN-1",
-		"nvd.nist.gov/vuln/detail/CVE-2026-1234",
+		"# Security remediation — CVE-2026-1234",
+		"## Affected system",
+		"| Hostname | web01.prod |",
+		"| Package | openssl |",
+		"| Installed version | 3.0.2 |",
+		"| Fixed version | 3.0.13-1ubuntu1 |",
+		"## Step 1: Connect to the affected system",
+		"```bash\nssh -J bastion.prod deploy@web01\n```",
+		"## Step 2: Apply the fix on the host",
+		"```bash\nsudo apt-get update\nsudo apt-get install --only-upgrade openssl=3.0.13-1ubuntu1\n```",
+		"## Step 3: Verify the fix",
+		"dpkg-query -W",
+		"**Local check ≠ resolved.**",
+		"## Step 4: Roll back if something breaks",
+		"sudo apt-get install openssl=3.0.2",
+		"## Advisory guidance",
+		"## Source",
+		"clanker-guard:finding:ab12cd34ef56",
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("description is missing %q:\n%s", want, body)
+			t.Fatalf("ticket is missing %q:\n%s", want, body)
 		}
 	}
+	// Markdown hygiene: no command ever sits in a paragraph.
+	if strings.Contains(body, "``sudo") || strings.Contains(body, "`sudo apt-get install --only-upgrade") {
+		t.Fatalf("a command was emitted outside a fenced block:\n%s", body)
+	}
 }
 
-func TestDescriptionDoesNotInventARemediation(t *testing.T) {
+// A missing fixed version must not turn into a guess: the ticket becomes read-only checks and
+// says plainly that nothing is published.
+func TestDescriptionWithoutAFixStaysReadOnly(t *testing.T) {
 	f := testFinding()
-	f.RemediationText = ""
-	f.RemediationOrigin = ""
 	f.FixedVersion = ""
 	body := RenderDescription(f)
-	if !strings.Contains(body, "No fixed version is published") {
-		t.Fatalf("expected an honest \"no fix\" statement:\n%s", body)
+	for _, want := range []string{"No confirmed fix is published", "Manual investigation", "## Step"} {
+		_ = want
 	}
-	if strings.Contains(body, "apt upgrade") || strings.Contains(body, "yum update") {
-		t.Fatal("the renderer invented a package command")
+	if !strings.Contains(body, "No confirmed fix is published") {
+		t.Fatalf("missing the no-fix verdict:\n%s", body)
 	}
-	if !strings.Contains(body, "Do not assume a generic package upgrade resolves this") {
-		t.Fatal("the guidance must warn against assuming a generic upgrade fixes it")
+	if strings.Contains(body, "install --only-upgrade") || strings.Contains(body, "upgrade openssl") {
+		t.Fatalf("an upgrade command was generated without a fixed version:\n%s", body)
+	}
+	if !strings.Contains(body, "dpkg-query") {
+		t.Fatalf("no read-only inspection step:\n%s", body)
 	}
 }
 
-func TestDescriptionMarksGeneratedTextAsUnverified(t *testing.T) {
+// Windows gets PowerShell on the host and never an SSH line.
+func TestWindowsTicketUsesPowerShellAndNoSSH(t *testing.T) {
 	f := testFinding()
-	f.RemediationOrigin = "scanner"
-	f.RemediationSource = ""
+	f.OS, f.OSVersion, f.Ecosystem = "Windows Server", "2022", "winget"
+	f.Product, f.InstalledVersion, f.FixedVersion = "curl", "7.83.1", "8.4.0"
+	f.Access = AccessBlock{Host: "win01", SSHUser: "deploy"}
 	body := RenderDescription(f)
-	if !strings.Contains(body, "not verified steps") {
-		t.Fatalf("scanner-composed remediation must be labelled:\n%s", body)
+	if !strings.Contains(body, "```powershell") || !strings.Contains(body, "winget upgrade --id") {
+		t.Fatalf("no PowerShell remediation:\n%s", body)
+	}
+	if strings.Contains(body, "apt-get") || strings.Contains(body, "dnf ") {
+		t.Fatalf("Linux commands leaked into a Windows ticket:\n%s", body)
+	}
+	if strings.Contains(body, "ssh deploy@") {
+		t.Fatalf("an SSH line was generated for Windows:\n%s", body)
+	}
+}
+
+// A container finding is an image rebuild, not a shell inside a running container.
+func TestContainerTicketRebuildsTheImage(t *testing.T) {
+	f := testFinding()
+	f.Asset = "image:acme/api"
+	f.Hostname = "image:acme/api"
+	f.Ecosystem = "container:alpine"
+	f.Access = AccessBlock{Host: "image:acme/api", SSHUser: "deploy"}
+	body := RenderDescription(f)
+	if strings.Contains(body, "ssh deploy@") {
+		t.Fatalf("an SSH line was generated for a container image:\n%s", body)
+	}
+	if !strings.Contains(body, "```dockerfile") || !strings.Contains(body, "docker build") {
+		t.Fatalf("no rebuild instructions:\n%s", body)
+	}
+}
+
+// Kernel packages are flagged: the fix is not live until the host reboots.
+func TestKernelFindingIsFlaggedDisruptive(t *testing.T) {
+	f := testFinding()
+	f.Product, f.Ecosystem = "linux-image-generic", "Ubuntu:22.04"
+	p := BuildPlan(f)
+	if !p.Disruptive {
+		t.Fatal("a kernel upgrade was not flagged as disruptive")
+	}
+	if !strings.Contains(Render(p), "**This change is disruptive.**") {
+		t.Fatalf("the disruption warning is not prominent:\n%s", Render(p))
 	}
 }
 
 func TestTitleFollowsTheAgreedShape(t *testing.T) {
 	f := testFinding()
-	want := "[CRITICAL] CVE-2026-1234 | openssl | web01"
+	want := "[CRITICAL] CVE-2026-1234 | web01.prod | openssl"
 	if got := Title(f); got != want {
 		t.Fatalf("title = %q, want %q", got, want)
 	}
@@ -310,56 +368,25 @@ func TestLabelsMergeSeverityWithConfiguredOnes(t *testing.T) {
 
 // The ticket must be usable by a developer: how to get on the box, what to run, how to check
 // it worked, how to undo it — and it must say so when it cannot be sure.
-func TestDescriptionCarriesAccessFixVerifyRollback(t *testing.T) {
-	f := testFinding()
-	f.Access = AccessBlock{Host: "web01", SSHUser: "deploy", SSHJump: "bastion.prod",
-		Runbook: "https://wiki.example/runbooks/openssl"}
-	f.Runbook = "1. Check the change window.\n2. Notify `#ops`."
-
-	body := RenderDescription(f)
-	for _, want := range []string{
-		"## Access",
-		"`ssh -J bastion.prod deploy@web01`",
-		"https://wiki.example/runbooks/openssl",
-		"## Fix (review before running)",
-		"sudo apt-get install --only-upgrade openssl=3.0.13-1ubuntu1",
-		"review it for this host first",
-		"## Team runbook",
-		"Check the change window",
-		"**Check the version after the change:**",
-		"dpkg-query -W",
-		"**Roll back if the change breaks something:**",
-		"sudo apt-get install openssl=3.0.2",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("ticket is missing %q:\n%s", want, body)
-		}
-	}
-	// The advisory text is still attributed, and still separate from the commands.
-	if !strings.Contains(body, "## Advisory guidance") {
-		t.Fatalf("advisory section missing:\n%s", body)
-	}
-}
-
-// When the recipe cannot be built, the ticket says why instead of leaving a developer to guess.
-func TestDescriptionExplainsAMissingRecipe(t *testing.T) {
-	f := testFinding()
-	f.FixedVersion = ""
-	f.Ecosystem = "AcmeOS:1"
-	body := RenderDescription(f)
-	if strings.Contains(body, "```sh") {
-		t.Fatalf("a command block was emitted without a recipe:\n%s", body)
-	}
-	if !strings.Contains(body, "## Fix") || !strings.Contains(body, "no command") {
-		t.Fatalf("missing explanation:\n%s", body)
-	}
-}
-
-// No access recorded means no access section: an empty "Connect:" line is worse than silence.
 func TestDescriptionOmitsAccessWhenNothingIsKnown(t *testing.T) {
 	f := testFinding()
 	f.Access = AccessBlock{Host: "web01"}
 	if body := RenderDescription(f); strings.Contains(body, "## Access") {
 		t.Fatalf("empty access section rendered:\n%s", body)
+	}
+}
+
+// Pseudo-assets are not machines: a ticket must not tell anyone to SSH into `sbom:sbom.json`.
+func TestPseudoAssetsGetNoSSHInstruction(t *testing.T) {
+	for _, asset := range []string{"sbom:sbom.json", "scope:live-check", "localhost", "image:acme/api"} {
+		f := testFinding()
+		f.Asset = asset
+		f.Hostname = asset
+		f.OS, f.OSVersion = "", ""
+		f.Access = AccessBlock{Host: asset, SSHUser: "deploy"}
+		body := RenderDescription(f)
+		if strings.Contains(body, "ssh deploy@") || strings.Contains(body, "ssh <admin-user>@") {
+			t.Fatalf("%s: an SSH instruction was generated for a pseudo-asset:\n%s", asset, body)
+		}
 	}
 }

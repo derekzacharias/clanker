@@ -3,6 +3,7 @@ package ticketing
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -92,165 +93,45 @@ func ecosystemFamily(ecosystem string) (family string, installedBy string) {
 	return "", ""
 }
 
-// RecipeFor builds the fix/verify/rollback block for a finding.
-//
-// Inputs are the ones the ticket already has: package, installed version, fixed version and
-// ecosystem. If any of them is missing or looks unsafe, the result is an unsupported recipe
-// with the reason, and the ticket renders guidance instead of commands.
+// RecipeFor is a flattened view of the plan, kept for callers that want the commands without
+// the surrounding work order. The plan is the source of truth; this only reshapes it.
 func RecipeFor(f Finding) Recipe {
-	pkg := strings.TrimSpace(f.Product)
-	fixed := strings.TrimSpace(f.FixedVersion)
-	installed := strings.TrimSpace(f.InstalledVersion)
+	p := BuildPlan(f)
+	r := Recipe{Manager: p.Manager, Caution: p.Reason}
+	r.Supported = p.Status == StatusVerified || p.Status == StatusReview
 
-	if pkg == "" {
-		return Recipe{Caution: "The scanner did not record a package name, so no command is suggested."}
-	}
-	family, manager := ecosystemFamily(f.Ecosystem)
-	if family == "" {
-		return Recipe{Caution: fmt.Sprintf("No package manager is known for ecosystem %q, so no command is suggested. Follow the advisory or the team runbook.", f.Ecosystem)}
-	}
-	if fixed == "" {
-		return Recipe{Manager: manager, Caution: "The advisory publishes no fixed version, so no upgrade command is suggested. Check the advisory for a fix or mitigation."}
-	}
-	if !safe(pkg) || !safeVersion(fixed) || (installed != "" && !safeVersion(installed)) {
-		return Recipe{Manager: manager, Caution: "The package or version string contains characters this generator will not put in a shell command. Use the advisory or the runbook."}
-	}
-
-	switch family {
-	case "deb":
-		r := Recipe{
-			Supported: true, Manager: "apt",
-			Fix:    []string{"sudo apt-get update", fmt.Sprintf("sudo apt-get install --only-upgrade %s=%s", pkg, fixed)},
-			Verify: []string{fmt.Sprintf("dpkg-query -W -f='${Version}\\n' %s", pkg)},
-			Caution: "Assumes the fixed version is published in a repository this host already uses. " +
-				"If apt reports that the version is unavailable, the distribution has not shipped it yet — " +
-				"check the advisory for a backport or mitigation instead of forcing it.",
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("sudo apt-get install %s=%s", pkg, installed)}
-		}
-		return r
-	case "rpm":
-		r := Recipe{
-			Supported: true, Manager: "dnf",
-			Fix:    []string{"sudo dnf --refresh upgrade " + pkg},
-			Verify: []string{fmt.Sprintf("rpm -q --qf '%%{VERSION}-%%{RELEASE}\\n' %s", pkg)},
-			Caution: fmt.Sprintf("Upgrades to the newest version the enabled repositories carry (advisory fixed version: %s). "+
-				"If the host pins versions, use `sudo dnf upgrade %s-%s` or your config management instead.", fixed, pkg, fixed),
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("sudo dnf downgrade %s-%s", pkg, installed)}
-		}
-		return r
-	case "apk":
-		r := Recipe{
-			Supported: true, Manager: "apk",
-			Fix:     []string{"sudo apk update", fmt.Sprintf("sudo apk add --upgrade %s=%s", pkg, fixed)},
-			Verify:  []string{fmt.Sprintf("apk info -v %s", pkg)},
-			Caution: "Alpine pins exact versions in its repositories; if the version is not offered, run `sudo apk upgrade` and re-scan.",
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("sudo apk add %s=%s", pkg, installed)}
-		}
-		return r
-	case "zypper":
-		return Recipe{
-			Supported: true, Manager: "zypper",
-			Fix:     []string{"sudo zypper refresh", "sudo zypper update " + pkg},
-			Verify:  []string{fmt.Sprintf("rpm -q %s", pkg)},
-			Caution: "Updates to the version the enabled repositories carry.",
-		}
-	case "brew":
-		return Recipe{
-			Supported: true, Manager: "brew",
-			Fix:     []string{"brew update", "brew upgrade " + pkg},
-			Verify:  []string{fmt.Sprintf("brew info %s | head -1", pkg)},
-			Caution: "Homebrew does not pin versions by default; the newest formula is installed.",
-		}
-	case "pip":
-		r := Recipe{
-			Supported: true, Manager: "pip",
-			Fix:     []string{fmt.Sprintf("python3 -m pip install --upgrade '%s==%s'", pkg, fixed)},
-			Verify:  []string{fmt.Sprintf("python3 -m pip show %s | grep -i '^Version:'", pkg)},
-			Caution: "Installs into the interpreter the command resolves to. Inside a virtualenv, drop `sudo` and use the environment's pip; the application may pin this dependency in a lockfile that must be updated instead.",
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("python3 -m pip install '%s==%s'", pkg, installed)}
-		}
-		return r
-	case "npm":
-		r := Recipe{
-			Supported: true, Manager: "npm",
-			Fix:     []string{fmt.Sprintf("npm install --save-exact %s@%s", pkg, fixed)},
-			Verify:  []string{fmt.Sprintf("npm ls %s --depth=0", pkg)},
-			Caution: "Run this in the project that depends on the package, not globally, unless the host genuinely uses a global install. Commit the resulting lockfile.",
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("npm install --save-exact %s@%s", pkg, installed)}
-		}
-		return r
-	case "gem":
-		r := Recipe{
-			Supported: true, Manager: "gem",
-			Fix:     []string{fmt.Sprintf("gem update %s --version %s", pkg, fixed)},
-			Verify:  []string{fmt.Sprintf("gem list %s --exact", pkg)},
-			Caution: "If the application uses Bundler, update the Gemfile and run `bundle update` instead.",
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("gem install %s --version %s", pkg, installed)}
-		}
-		return r
-	case "cargo":
-		r := Recipe{
-			Supported: true, Manager: "cargo",
-			Fix:     []string{fmt.Sprintf("cargo update -p %s --precise %s", pkg, fixed)},
-			Verify:  []string{fmt.Sprintf("cargo tree -p %s | head -5", pkg)},
-			Caution: "Updates Cargo.lock; the project still has to be rebuilt and redeployed.",
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("cargo update -p %s --precise %s", pkg, installed)}
-		}
-		return r
-	case "gomod":
-		r := Recipe{
-			Supported: true, Manager: "go",
-			Fix:     []string{fmt.Sprintf("go get %s@v%s", pkg, strings.TrimPrefix(fixed, "v"))},
-			Verify:  []string{"go list -m all | grep " + pkg},
-			Caution: "Updates go.mod for the module you run this in; rebuild and redeploy afterwards.",
-		}
-		if installed != "" {
-			r.Rollback = []string{fmt.Sprintf("go get %s@v%s", pkg, strings.TrimPrefix(installed, "v"))}
-		}
-		return r
-	case "maven":
-		return Recipe{
-			Supported: true, Manager: "maven",
-			Fix:     []string{},
-			Verify:  []string{fmt.Sprintf("mvn dependency:tree -Dincludes=%s", pkg)},
-			Caution: fmt.Sprintf("Maven dependencies are declared in the project's pom.xml: set the version to %s there and rebuild. No command is suggested because it would edit a build file.", fixed),
-		}
-	case "nuget":
-		return Recipe{
-			Supported: true, Manager: "nuget",
-			Fix:     []string{fmt.Sprintf("dotnet add package %s --version %s", pkg, fixed)},
-			Verify:  []string{fmt.Sprintf("dotnet list package | grep -i %s", pkg)},
-			Caution: "Run in the project directory; commit the updated project file.",
-		}
-	case "image":
-		return Recipe{
-			Supported: false, Manager: "image",
-			Caution: fmt.Sprintf("This finding is inside a container image. Rebuild the image with %s %s and redeploy the container — patching a running container does not change the image it will restart from.", pkg, fixed),
+	// The fix commands are the ones in the "apply" step: connection and inspection steps are
+	// not a fix.
+	for _, st := range p.Steps {
+		if strings.HasPrefix(st.Title, "Apply") || strings.HasPrefix(st.Title, "Upgrade") {
+			for _, c := range st.Commands {
+				r.Fix = append(r.Fix, c.Lines...)
+			}
 		}
 	}
-	return Recipe{Caution: "No recipe is defined for this ecosystem."}
+	for _, c := range p.Verify {
+		r.Verify = append(r.Verify, c.Lines...)
+	}
+	for _, c := range p.Rollback {
+		r.Rollback = append(r.Rollback, c.Lines...)
+	}
+	if len(p.Warnings) > 0 {
+		if r.Caution != "" {
+			r.Caution += " "
+		}
+		r.Caution += strings.Join(p.Warnings, " ")
+	}
+	return r
 }
 
 // AccessBlock is how a person reaches the host, rendered into the ticket.
 type AccessBlock struct {
-	Host      string
-	SSHUser   string
-	SSHHost   string
-	SSHJump   string
+	Host    string
+	SSHUser string
+	SSHHost string
+	SSHJump string
+	// SSHPort is the nonstandard port, 0 meaning the default.
+	SSHPort   int
 	Runbook   string
 	Privilege string
 }
@@ -270,10 +151,11 @@ func (a AccessBlock) SSHCommand() string {
 	if host == "" || !safe(host) {
 		return ""
 	}
+	port := portSuffix(strconv.Itoa(a.SSHPort))
 	if jump := strings.TrimSpace(a.SSHJump); jump != "" && safe(jump) {
-		return fmt.Sprintf("ssh -J %s %s@%s", jump, a.SSHUser, host)
+		return fmt.Sprintf("ssh%s -J %s %s@%s", port, jump, a.SSHUser, host)
 	}
-	return fmt.Sprintf("ssh %s@%s", a.SSHUser, host)
+	return fmt.Sprintf("ssh%s %s@%s", port, a.SSHUser, host)
 }
 
 // HasAccess reports whether anything useful can be said about reaching the host.

@@ -46,6 +46,7 @@ export default function Ownership() {
   const [editing, setEditing] = useState<AssetOwnershipRow | null>(null);
   const [sshUser, setSSHUser] = useState("");
   const [sshHost, setSSHHost] = useState("");
+  const [sshPort, setSSHPort] = useState("");
   const [sshJump, setSSHJump] = useState("");
   const [runbook, setRunbook] = useState("");
   const [saving, setSaving] = useState(false);
@@ -98,6 +99,7 @@ export default function Ownership() {
     setEditing(row);
     setSSHUser(row.ssh_user ?? "");
     setSSHHost(row.ssh_host ?? "");
+    setSSHPort(row.ssh_port ? String(row.ssh_port) : "");
     setSSHJump(row.ssh_jump ?? "");
     setRunbook(row.runbook_url ?? "");
   }
@@ -111,6 +113,7 @@ export default function Ownership() {
         owner: row.owner ?? "",
         exposure: row.exposure ?? "",
         ssh_user: sshUser.trim(),
+        ssh_port: sshPort.trim() === "" ? 0 : Number(sshPort),
         ssh_host: sshHost.trim(),
         ssh_jump: sshJump.trim(),
         runbook_url: runbook.trim(),
@@ -363,7 +366,9 @@ export default function Ownership() {
                         </Button>
                         <span className="block max-w-[12rem] truncate text-xs text-subtle">
                           {row.ssh_user
-                            ? `ssh ${row.ssh_user}@${row.ssh_host || row.asset}${row.ssh_jump ? ` via ${row.ssh_jump}` : ""}`
+                            ? `ssh ${row.ssh_user}@${row.ssh_host || row.asset}${row.ssh_jump ? ` via ${row.ssh_jump}` : ""}${
+                                row.ssh_port && row.ssh_port !== 22 ? ` :${row.ssh_port}` : ""
+                              }`
                             : "not recorded"}
                         </span>
                       </Td>
@@ -399,6 +404,9 @@ export default function Ownership() {
             <Field label="Host override" htmlFor="acc-host" hint="Leave empty to use the asset name.">
               <Input id="acc-host" value={sshHost} onChange={(e) => setSSHHost(e.target.value)} autoComplete="off" />
             </Field>
+            <Field label="SSH port" htmlFor="acc-port" hint="Leave empty for 22.">
+              <Input id="acc-port" inputMode="numeric" value={sshPort} onChange={(e) => setSSHPort(e.target.value)} />
+            </Field>
             <Field label="Jump host" htmlFor="acc-jump" hint="Bastion, if the host is not directly reachable.">
               <Input id="acc-jump" value={sshJump} onChange={(e) => setSSHJump(e.target.value)} autoComplete="off" />
             </Field>
@@ -410,7 +418,9 @@ export default function Ownership() {
             <span className="text-muted">Ticket will show: </span>
             <code className="mono">
               {sshUser.trim()
-                ? `ssh ${sshJump.trim() ? `-J ${sshJump.trim()} ` : ""}${sshUser.trim()}@${sshHost.trim() || editing?.asset || ""}`
+                ? `ssh${sshPort.trim() && sshPort.trim() !== "22" ? ` -p ${sshPort.trim()}` : ""}${
+                    sshJump.trim() ? ` -J ${sshJump.trim()}` : ""
+                  } ${sshUser.trim()}@${sshHost.trim() || editing?.asset || ""}`
                 : "no connection line (no user recorded)"}
             </code>
           </div>

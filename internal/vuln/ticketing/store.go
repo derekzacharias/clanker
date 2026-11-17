@@ -22,21 +22,24 @@ var ErrTicketNotFound = errors.New("no such ticket")
 // read so the dashboard can show it without a request per render, and a stale value is
 // always recognisable by LastSyncedAt.
 type Ticket struct {
-	ID              string     `json:"id"`
-	FindingKey      string     `json:"finding_key"`
-	Asset           string     `json:"asset"`
-	VulnerabilityID string     `json:"vulnerability_id"`
-	ProjectID       int        `json:"project_id"`
-	ProjectPath     string     `json:"project_path,omitempty"`
-	IssueIID        int        `json:"issue_iid"`
-	IssueURL        string     `json:"issue_url"`
-	Title           string     `json:"title"`
-	Labels          string     `json:"labels,omitempty"`
-	State           string     `json:"state"`
-	Assignee        string     `json:"assignee,omitempty"`
-	CreatedBy       string     `json:"created_by,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	LastSyncedAt    *time.Time `json:"last_synced_at,omitempty"`
+	ID              string `json:"id"`
+	FindingKey      string `json:"finding_key"`
+	Asset           string `json:"asset"`
+	VulnerabilityID string `json:"vulnerability_id"`
+	ProjectID       int    `json:"project_id"`
+	ProjectPath     string `json:"project_path,omitempty"`
+	IssueIID        int    `json:"issue_iid"`
+	IssueURL        string `json:"issue_url"`
+	Title           string `json:"title"`
+	Labels          string `json:"labels,omitempty"`
+	State           string `json:"state"`
+	Assignee        string `json:"assignee,omitempty"`
+	CreatedBy       string `json:"created_by,omitempty"`
+	// RemediationStatus is what the plan said when the issue was filed (verified, review,
+	// no_fix, ...). It is a snapshot: the finding may change while the ticket waits.
+	RemediationStatus string     `json:"remediation_status,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	LastSyncedAt      *time.Time `json:"last_synced_at,omitempty"`
 	// Pending is true while a creation is in flight or ended ambiguously. It is what
 	// stops a retry from opening a second issue.
 	Pending bool `json:"pending"`
@@ -91,6 +94,14 @@ func (s *Store) ensureSchema() error {
 			return fmt.Errorf("prepare ticket table: %w", err)
 		}
 	}
+	// Existing installs predate these columns, so they are added after the table exists.
+	for _, col := range [][2]string{
+		{"remediation_status", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn("gitlab_tickets", col[0], col[1]); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -126,10 +137,11 @@ func (s *Store) Reserve(ctx context.Context, t Ticket) (Ticket, bool, error) {
 	t.IssueIID = 0
 	_, err = s.db.ExecContext(ctx, `INSERT INTO gitlab_tickets
 		(id, finding_key, asset, vulnerability_id, project_id, project_path, issue_iid, issue_url,
-		 title, labels, state, assignee, created_by, created_at, note)
-		VALUES (?,?,?,?,?,?,0,'',?,?,'pending',?,?,?,?)`,
+		 title, labels, state, assignee, created_by, remediation_status, created_at, note)
+		VALUES (?,?,?,?,?,?,0,'',?,?,'pending',?,?,?,?,?)`,
 		t.ID, t.FindingKey, t.Asset, t.VulnerabilityID, t.ProjectID, t.ProjectPath,
-		t.Title, t.Labels, t.Assignee, t.CreatedBy, t.CreatedAt.Format(time.RFC3339), t.Note)
+		t.Title, t.Labels, t.Assignee, t.CreatedBy, t.RemediationStatus,
+		t.CreatedAt.Format(time.RFC3339), t.Note)
 	if err != nil {
 		// A concurrent insert of the same pair: return what that one reserved.
 		if existing, getErr := s.get(ctx, t.FindingKey, t.ProjectID); getErr == nil {
@@ -253,8 +265,8 @@ func (s *Store) get(ctx context.Context, findingKey string, projectID int) (Tick
 
 const ticketColumns = `SELECT id, finding_key, asset, vulnerability_id, project_id,
 	COALESCE(project_path,''), issue_iid, issue_url, title, COALESCE(labels,''), state,
-	COALESCE(assignee,''), COALESCE(created_by,''), created_at, COALESCE(last_synced_at,''),
-	COALESCE(note,'') FROM gitlab_tickets`
+	COALESCE(assignee,''), COALESCE(created_by,''), COALESCE(remediation_status,''),
+	created_at, COALESCE(last_synced_at,''), COALESCE(note,'') FROM gitlab_tickets`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -270,7 +282,7 @@ func scanTicket(sc scanner) (Ticket, error) {
 	)
 	if err := sc.Scan(&t.ID, &t.FindingKey, &t.Asset, &t.VulnerabilityID, &project, &t.ProjectPath,
 		&iid, &t.IssueURL, &t.Title, &t.Labels, &t.State, &t.Assignee, &t.CreatedBy,
-		&created, &synced, &t.Note); err != nil {
+		&t.RemediationStatus, &created, &synced, &t.Note); err != nil {
 		return Ticket{}, err
 	}
 	t.ProjectID = project
@@ -290,4 +302,28 @@ func stateOrOpened(state string) string {
 		return "opened"
 	}
 	return state
+}
+
+// ensureColumn adds a column to an existing table when the catalogue says it is missing.
+func (s *Store) ensureColumn(table, column, ddl string) error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, ddl))
+	return err
 }

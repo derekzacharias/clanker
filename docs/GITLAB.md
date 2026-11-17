@@ -88,6 +88,64 @@ explicitly and prints the `chown`/`chmod` that fixes it.
 The preview is rendered by the server (`POST /api/integrations/gitlab/preview`), so what the
 operator edits is exactly what would be sent, and the text is not assembled twice.
 
+### How the remediation plan is determined
+
+The ticket is a work order, not a vulnerability report. It is built in two stages: a structured
+plan (`internal/vuln/ticketing/plan.go`), then Markdown (`render.go`). The preview renders the
+same plan, so what you see before filing is what GitLab stores.
+
+**Step one: classify the asset.** The ecosystem label the scanner recorded decides the tool,
+before the OS does — a PyPI finding on an Ubuntu host is an application dependency (fix the
+project, redeploy), not an `apt upgrade`. Container images are detected first of all, because
+`container:alpine` is an Alpine package *inside an image* and patching a running container is
+not a fix.
+
+| Asset | Tool | What the ticket says |
+|---|---|---|
+| Ubuntu / Debian | `apt` | only the named package, pinned to the advisory's fixed version |
+| RHEL / Rocky / Alma / Fedora / Amazon | `dnf` | `dnf upgrade --refresh <pkg>`; no downgrade is generated |
+| Alpine | `apk` | exact version from the repositories |
+| SUSE | `zypper` | package update |
+| macOS | `brew` | newest formula, flagged as such |
+| Windows | `winget` + PowerShell | run on the host; no SSH is assumed |
+| PyPI / npm / RubyGems / Cargo / Go / NuGet | the language tool | change the project, then rebuild and redeploy |
+| Maven | none | editing a build file is a project change, not a shell step |
+| Container image | `dockerfile` | rebuild, push, redeploy — never `exec` into the container |
+| Anything else | none | read-only inspection and "manual investigation required" |
+
+**Step two: decide whether a command is defensible.** A recipe is produced only when the
+package manager is known *and* the advisory publishes a fixed version. Otherwise the plan's
+status is `no_fix`, `unsupported` or `needs_investigation`, and the ticket contains inspection
+commands and an explanation instead of a guess.
+
+**Step three: validate the values.** Package names and versions are restricted to characters
+that cannot break a shell word (`[A-Za-z0-9._+@~:/-]`, starting alphanumeric). Anything else —
+a quote, a space, `$`, a backtick, `;` — means *no command is generated*, not "escaped and
+hoped for". The same check applies to SSH users and hosts. Credential-shaped values are refused
+outright: this data is printed into a ticket body and copied into backups.
+
+**Step four: add the context a change needs.** Kernel packages (reboot), service-bearing
+packages (restart), and major-version jumps are flagged. Disruptive changes are called out at
+the top of the issue, not buried in the middle. Rollback is generated only where a previous
+version can be pinned; on RHEL-family hosts no downgrade is suggested, because a downgrade can
+leave the system unsupported.
+
+**What is never generated:** commands for an asset type that does not support them (SSH for a
+container image or a Windows host), upgrades without a published fixed version, and anything
+executed on your behalf. Clanker Guard renders text; an administrator decides, connects and runs.
+
+### Verification and resolution are different things
+
+Every ticket separates them. Step 3 prints local checks (`dpkg-query`, `rpm -q --changelog`,
+`apt-cache policy`) and then says plainly:
+
+> **Local check ≠ resolved.** … Clanker Guard only changes the finding to resolved after a later
+> scan no longer reports it.
+
+A successful command never closes a finding. `POST /api/remediation/{id}/verify` requires an
+assessment that exists, covers that asset, post-dates the last sighting, and no longer contains
+the finding.
+
 ### What goes into the issue
 
 CVE and aliases, reported and effective severity (with the reason for any escalation), CVSS

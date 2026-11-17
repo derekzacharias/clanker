@@ -844,7 +844,15 @@ export const api = {
       `/api/integrations/gitlab/users${qs({ search })}`,
     ),
   gitlabPreview: (findingId: string) =>
-    request<{ title: string; description: string; labels: string[]; label_field: string; project_id: number; finding_key: string }>(
+    request<{
+      title: string;
+      description: string;
+      plan: RemediationPlan;
+      labels: string[];
+      label_field: string;
+      project_id: number;
+      finding_key: string;
+    }>(
       "/api/integrations/gitlab/preview",
       { method: "POST", body: JSON.stringify({ finding_id: findingId }) },
     ),
@@ -976,6 +984,7 @@ export interface Ownership {
   maintenance_window?: string;
   /** Connection details for a person, not credentials: user, host override, jump host. */
   ssh_user?: string;
+  ssh_port?: number;
   ssh_host?: string;
   ssh_jump?: string;
   runbook_url?: string;
@@ -1014,6 +1023,51 @@ export interface AuditEntry {
   remote?: string;
 }
 
+/** Structured remediation plan: the same content the ticket body is rendered from. */
+export interface RemediationCommand {
+  lang: string;
+  lines: string[];
+}
+
+export interface RemediationStep {
+  title: string;
+  detail?: string;
+  commands?: RemediationCommand[];
+  disruptive?: boolean;
+}
+
+export interface RemediationPlan {
+  status: "verified" | "requires_review" | "no_fix" | "unsupported" | "needs_investigation";
+  confidence: string;
+  reason?: string;
+  system: {
+    hostname: string;
+    asset_id: string;
+    ip?: string;
+    os?: string;
+    os_version?: string;
+    distro?: string;
+    arch?: string;
+    ssh_managed: boolean;
+  };
+  access: { host?: string; ssh_user?: string; ssh_host?: string; ssh_jump?: string; runbook?: string };
+  cve: string;
+  severity: string;
+  package?: string;
+  installed_version?: string;
+  fixed_version?: string;
+  advisory?: string;
+  manager?: string;
+  steps: RemediationStep[];
+  verify?: RemediationCommand[];
+  verify_note?: string;
+  rollback?: RemediationCommand[];
+  rollback_note?: string;
+  prerequisites?: string[];
+  warnings?: string[];
+  disruptive: boolean;
+}
+
 export interface GitLabTicket {
   id: string;
   finding_key: string;
@@ -1029,6 +1083,8 @@ export interface GitLabTicket {
   state: string;
   assignee?: string;
   created_by?: string;
+  /** Plan verdict when the issue was filed (verified, requires_review, no_fix, ...). */
+  remediation_status?: string;
   created_at: string;
   last_synced_at?: string;
   pending: boolean;
@@ -1092,6 +1148,7 @@ export interface AssetOwnershipRow {
   maintenance_window?: string;
   /** Connection details for a person, not credentials: user, host override, jump host. */
   ssh_user?: string;
+  ssh_port?: number;
   ssh_host?: string;
   ssh_jump?: string;
   runbook_url?: string;

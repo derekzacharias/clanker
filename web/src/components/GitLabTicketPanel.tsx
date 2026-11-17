@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { CheckCircle2, ExternalLink, Loader2, Plug, RefreshCw, XCircle } from "lucide-react";
 import { api, type GitLabConfig, type GitLabProject, type GitLabTicket, type GitLabVerifyResult } from "../lib/api";
+import { RemediationPreview } from "./RemediationPreview";
 import { useAsync } from "../lib/useApi";
 import { Banner } from "./ui/Feedback";
 import { Button } from "./ui/Button";
@@ -85,6 +86,9 @@ export function GitLabTicketPanel({
                   {t.state === "closed" ? "Closed" : "Open"}
                 </span>
                 {t.assignee ? <span className="text-xs text-muted">Assigned to {t.assignee}</span> : null}
+                {t.remediation_status ? (
+                  <span className="text-xs text-muted">remediation: {t.remediation_status.replace(/_/g, " ")}</span>
+                ) : null}
                 <span className="ml-auto text-xs text-subtle">
                   {t.last_synced_at ? `checked ${relativeTime(t.last_synced_at)}` : "not checked yet"}
                 </span>
@@ -255,16 +259,25 @@ function TicketComposer({
         </p>
       ) : null}
 
-      <Field label="Description" htmlFor="gl-description" hint="Markdown, exactly as it will be posted.">
+      {preview.data?.plan ? <RemediationPreview plan={preview.data.plan} /> : null}
+
+      <details className="rounded-md border border-border bg-surface p-2">
+        <summary className="cursor-pointer text-xs font-medium text-muted">
+          Advanced: edit the Markdown that will be posted
+        </summary>
+        <p className="mt-1 text-xs text-subtle">
+          The preview above is rendered from the same plan. Editing here replaces the body exactly as typed.
+        </p>
         <textarea
           id="gl-description"
+          aria-label="Issue description markdown"
           value={effectiveDescription}
           onChange={(e) => setDescription(e.target.value)}
-          rows={10}
+          rows={14}
           spellCheck={false}
-          className="mono w-full rounded-md border border-border bg-surface px-2.5 py-2 text-xs leading-relaxed text-fg"
+          className="mono mt-2 w-full rounded-md border border-border bg-surface-2 px-2.5 py-2 text-xs leading-relaxed text-fg"
         />
-      </Field>
+      </details>
 
       {error ? (
         <Banner tone="danger" title="GitLab did not accept the ticket">

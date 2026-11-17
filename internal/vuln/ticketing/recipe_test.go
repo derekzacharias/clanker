@@ -16,14 +16,14 @@ func TestRecipesPerEcosystem(t *testing.T) {
 	}{
 		{"Ubuntu:22.04", "openssl", "3.0.2", "3.0.13-1ubuntu1", "apt", "apt-get install --only-upgrade openssl=3.0.13-1ubuntu1", true},
 		{"Debian:12", "libssl3", "3.0.11", "3.0.13-1~deb12u1", "apt", "libssl3=3.0.13-1~deb12u1", true},
-		{"RHEL:9", "openssl", "3.0.7", "3.0.7-27", "dnf", "dnf --refresh upgrade openssl", true},
+		{"RHEL:9", "openssl", "3.0.7", "3.0.7-27", "dnf", "dnf upgrade --refresh openssl", true},
 		{"Alpine:v3.21", "libxslt", "1.1.42-r2", "1.1.42-r3", "apk", "apk add --upgrade libxslt=1.1.42-r3", true},
 		{"PyPI", "requests", "2.31.0", "2.32.4", "pip", "pip install --upgrade 'requests==2.32.4'", true},
 		{"npm", "lodash", "4.17.20", "4.17.21", "npm", "npm install --save-exact lodash@4.17.21", true},
 		{"Go", "golang.org/x/net", "0.10.0", "0.23.0", "go", "go get golang.org/x/net@v0.23.0", true},
 		{"crates.io", "tokio", "1.20.0", "1.24.2", "cargo", "cargo update -p tokio --precise 1.24.2", true},
 		{"RubyGems", "rack", "2.2.3", "2.2.8", "gem", "gem update rack --version 2.2.8", true},
-		{"container:alpine", "openssl", "3.0.2", "3.0.13", "image", "", false},
+		{"container:alpine", "openssl", "3.0.2", "3.0.13", "image", "", true},
 		{"AcmeOS:1", "blob", "1.0", "1.1", "", "", false},
 	}
 	for _, tc := range cases {
@@ -43,8 +43,13 @@ func TestRecipesPerEcosystem(t *testing.T) {
 			if len(r.Verify) == 0 {
 				t.Fatalf("%s: no verification command", tc.eco)
 			}
-			if len(r.Rollback) == 0 {
+			// RPM-family hosts deliberately get no downgrade command: a downgrade can leave the
+			// system in an unsupported state, so the ticket says so instead.
+			if r.Manager != "dnf" && r.Manager != "zypper" && r.Manager != "image" && len(r.Rollback) == 0 {
 				t.Fatalf("%s: no rollback command", tc.eco)
+			}
+			if r.Manager == "dnf" && len(r.Rollback) > 0 {
+				t.Fatalf("%s: generated an unsafe downgrade", tc.eco)
 			}
 		}
 	}
@@ -99,5 +104,22 @@ func TestAccessBlockProducesAConnectionLine(t *testing.T) {
 	unsafe := AccessBlock{Host: "web01", SSHUser: "deploy;curl evil"}
 	if got := unsafe.SSHCommand(); got != "" {
 		t.Fatalf("unsafe user produced a command: %q", got)
+	}
+}
+
+// A nonstandard port must appear in the command an administrator pastes; the default must not
+// add noise.
+func TestSSHCommandHonoursNonstandardPort(t *testing.T) {
+	withPort := AccessBlock{Host: "web01", SSHUser: "deploy", SSHPort: 2222}
+	if got := withPort.SSHCommand(); got != "ssh -p 2222 deploy@web01" {
+		t.Fatalf("port = %q", got)
+	}
+	viaJump := AccessBlock{Host: "web01", SSHUser: "deploy", SSHPort: 2222, SSHJump: "bastion"}
+	if got := viaJump.SSHCommand(); got != "ssh -p 2222 -J bastion deploy@web01" {
+		t.Fatalf("port + jump = %q", got)
+	}
+	defaultPort := AccessBlock{Host: "web01", SSHUser: "deploy", SSHPort: 22}
+	if got := defaultPort.SSHCommand(); got != "ssh deploy@web01" {
+		t.Fatalf("default port should not be printed: %q", got)
 	}
 }

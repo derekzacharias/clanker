@@ -109,6 +109,7 @@ type Ownership struct {
 	// references, never credentials: a username, a jump host, a runbook URL. No keys, no
 	// passwords, and nothing that would make this table a secret store.
 	SSHUser    string    `json:"ssh_user,omitempty"`
+	SSHPort    int       `json:"ssh_port,omitempty"`
 	SSHHost    string    `json:"ssh_host,omitempty"` // empty means "the asset name"
 	SSHJump    string    `json:"ssh_jump,omitempty"` // bastion host, if one is required
 	RunbookURL string    `json:"runbook_url,omitempty"`

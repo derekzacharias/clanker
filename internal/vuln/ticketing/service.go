@@ -25,7 +25,9 @@ type Creator struct {
 	// record, because ids are meaningless to a human reading the ticket row.
 	AssigneeID   int
 	AssigneeName string
-	Log          *slog.Logger
+	// RemediationStatus is the plan's verdict at filing time, stored for traceability.
+	RemediationStatus string
+	Log               *slog.Logger
 
 	// inflight serialises creations for the same (finding, project) inside this process.
 	// The unique index in the store stops two rows; this stops two issues. A deployment
@@ -93,15 +95,16 @@ func (c *Creator) Create(ctx context.Context, f Finding, input IssueInput) (Crea
 	defer unlock()
 
 	reserved, fresh, err := c.Store.Reserve(ctx, Ticket{
-		FindingKey:      f.FindingKey,
-		Asset:           f.Asset,
-		VulnerabilityID: f.VulnerabilityID,
-		ProjectID:       c.ProjectID,
-		ProjectPath:     c.ProjectPath,
-		Title:           input.Title,
-		Labels:          input.Labels,
-		Assignee:        c.AssigneeName,
-		CreatedBy:       c.CreatedBy,
+		FindingKey:        f.FindingKey,
+		Asset:             f.Asset,
+		VulnerabilityID:   f.VulnerabilityID,
+		ProjectID:         c.ProjectID,
+		ProjectPath:       c.ProjectPath,
+		Title:             input.Title,
+		Labels:            input.Labels,
+		Assignee:          c.AssigneeName,
+		CreatedBy:         c.CreatedBy,
+		RemediationStatus: c.RemediationStatus,
 	})
 	if err != nil {
 		return CreateResult{}, err

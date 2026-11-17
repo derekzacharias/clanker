@@ -319,7 +319,7 @@ func TestGitLabPreviewRendersWithoutContactingGitLab(t *testing.T) {
 	if !strings.Contains(preview.Title, "CVE-2026-1234") || !strings.Contains(preview.Title, "web01") {
 		t.Fatalf("title = %q", preview.Title)
 	}
-	for _, want := range []string{"## Affected System", "Ubuntu 22.04", "openssl 3.0.2", "## Verification", "Clanker Guard"} {
+	for _, want := range []string{"## Affected system", "Ubuntu 22.04", "openssl", "3.0.2", "## Step 3: Verify the fix", "Clanker Guard"} {
 		if !strings.Contains(preview.Description, want) {
 			t.Fatalf("description is missing %q:\n%s", want, preview.Description)
 		}
