@@ -16,12 +16,21 @@ import (
 // — refusing to assign work because the diary is unavailable — trades a missing record for
 // a stuck queue.
 func (s *Server) audit(r *http.Request, action, target, detail string) {
+	s.auditAs(r, s.actorName(r), action, target, detail)
+}
+
+// auditAs records an action under an explicit actor.
+//
+// Needed where the actor is not yet the authenticated caller: a sign-in happens before the
+// session cookie exists, so deriving the name from the request there would attribute the
+// login to "api-token" and leave the diary unable to answer who signed in.
+func (s *Server) auditAs(r *http.Request, actor, action, target, detail string) {
 	if s.store == nil {
 		return
 	}
 	err := s.store.AppendAudit(r.Context(), intel.AuditEntry{
 		At:     time.Now().UTC().Format(time.RFC3339),
-		Actor:  s.actorName(r),
+		Actor:  actor,
 		Action: action,
 		Target: target,
 		Detail: detail,

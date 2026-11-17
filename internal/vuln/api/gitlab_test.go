@@ -78,7 +78,7 @@ func gitlabServer(t *testing.T) (*Server, *fakeGitLabAPI, string) {
 	fake := &fakeGitLabAPI{}
 	gl := httptest.NewServer(fake.handler())
 	t.Cleanup(gl.Close)
-	srv, err := New(Options{
+	srv, err := New(Options{DisableBackgroundJobs: true,
 		CachePath:   filepath.Join(t.TempDir(), "intel.db"),
 		ToolVersion: "0.1.0",
 		Token:       "dash-token",

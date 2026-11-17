@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
+	"github.com/bgdnvk/clanker/internal/vuln/remediate"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
 )
 
@@ -215,8 +216,22 @@ func (s *Server) notifyDigest(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	if sum.Overdue == 0 && sum.AcceptancesDue == 0 {
+	// Nothing late and nothing new means nothing to say.
+	if sum.Overdue == 0 && sum.AcceptancesDue == 0 && len(s.newCriticalSince(settings["notify.last_sent"])) == 0 &&
+		len(s.silentAgents(time.Now().UTC())) == 0 {
 		return
+	}
+	// Events, not just totals: what changed since the last message is what makes someone
+	// act. Each list is bounded, because a notification is a nudge, not a report.
+	events := map[string]any{}
+	if newCritical := s.newCriticalSince(settings["notify.last_sent"]); len(newCritical) > 0 {
+		events["new_critical"] = newCritical
+	}
+	if quiet := s.silentAgents(time.Now().UTC()); len(quiet) > 0 {
+		events["agents_silent"] = quiet
+	}
+	if due := s.acceptancesDue(); len(due) > 0 {
+		events["acceptances_expiring"] = due
 	}
 	payload := map[string]any{
 		"source":          "clanker-guard",
@@ -226,6 +241,7 @@ func (s *Server) notifyDigest(ctx context.Context) {
 		"open":            sum.Open,
 		"triage":          sum.TriageAssets,
 		"acceptances_due": sum.AcceptancesDue,
+		"events":          events,
 	}
 	body, _ := json.Marshal(payload)
 	if err := postWebhook(ctx, raw, body, settings["notify.webhook_secret"]); err != nil {
@@ -254,4 +270,91 @@ func (s *Server) digestDue(settings map[string]string) bool {
 		}
 	}
 	return time.Since(ts) >= time.Duration(hours)*time.Hour
+}
+
+// newCriticalSince lists critical work first seen after the last digest.
+//
+// Bounded to five: the message should say "three new critical findings on web01", not
+// reproduce the queue. Hostnames and advisory ids only — no versions, no evidence.
+func (s *Server) newCriticalSince(since string) []map[string]string {
+	if s.remediate == nil {
+		return nil
+	}
+	cutoff := time.Time{}
+	if since != "" {
+		if ts, err := time.Parse(time.RFC3339, since); err == nil {
+			cutoff = ts
+		}
+	}
+	items, err := s.remediate.List(context.Background(), remediate.Filter{Severity: "critical", Limit: 200}, s.currentPolicy(nil))
+	if err != nil {
+		return nil
+	}
+	out := []map[string]string{}
+	for _, it := range items {
+		if !it.FirstSeen.After(cutoff) {
+			continue
+		}
+		out = append(out, map[string]string{
+			"asset": it.Asset, "vulnerability": it.VulnerabilityID, "priority": it.Priority,
+		})
+		if len(out) == 5 {
+			break
+		}
+	}
+	return out
+}
+
+// silentAgents lists enrolled endpoints that have not been heard from recently.
+//
+// An agent that stopped reporting is the failure mode that makes a dashboard lie: the
+// findings look unchanged because nothing is arriving.
+func (s *Server) silentAgents(now time.Time) []map[string]string {
+	if s.fleet == nil {
+		return nil
+	}
+	agents, err := s.fleet.List(context.Background())
+	if err != nil {
+		return nil
+	}
+	out := []map[string]string{}
+	for _, a := range agents {
+		if a.Revoked || a.LastSeen == nil || a.LastSeen.IsZero() {
+			continue
+		}
+		if now.Sub(*a.LastSeen) < 24*time.Hour {
+			continue
+		}
+		out = append(out, map[string]string{
+			"host": a.Host, "last_seen": a.LastSeen.UTC().Format(time.RFC3339),
+		})
+		if len(out) == 10 {
+			break
+		}
+	}
+	return out
+}
+
+// acceptancesDue lists exceptions inside their warning window.
+func (s *Server) acceptancesDue() []map[string]string {
+	if s.remediate == nil {
+		return nil
+	}
+	items, err := s.remediate.AcceptancesDue(context.Background(), 14*24*time.Hour)
+	if err != nil {
+		return nil
+	}
+	out := []map[string]string{}
+	for _, it := range items {
+		entry := map[string]string{"asset": it.Asset, "vulnerability": it.VulnerabilityID,
+			"accepted_by": it.AcceptedBy}
+		if it.AcceptExpiresAt != nil {
+			entry["until"] = it.AcceptExpiresAt.UTC().Format("2006-01-02")
+		}
+		out = append(out, entry)
+		if len(out) == 10 {
+			break
+		}
+	}
+	return out
 }

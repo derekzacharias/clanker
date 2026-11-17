@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -119,5 +120,41 @@ func TestNotificationDigestFiresOncePerInterval(t *testing.T) {
 	srv.notifyDigest(t.Context())
 	if atomic.LoadInt32(&hits) != 1 {
 		t.Fatalf("digest fired again inside its interval (hits=%d)", hits)
+	}
+}
+
+// A digest that only reports totals tells nobody what changed. The events are the part that
+// makes someone act: new critical work, an agent that went quiet, an exception about to lapse.
+func TestDigestCarriesEventsWithoutLeakingDetail(t *testing.T) {
+	var payload map[string]any
+	var body []byte
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hook.Close()
+
+	srv := fleetServer(t)
+	postReport(t, srv, "web01", "Ubuntu:24.04", "openssl", "CVE-2026-8600", "critical", "SCAN-EV-1")
+	if err := srv.store.SetSetting(t.Context(), "notify.webhook_url", hook.URL); err != nil {
+		t.Fatal(err)
+	}
+	// Overdue so the digest has a reason to exist at all.
+	srv.remediate.SetClock(func() time.Time { return time.Now().UTC().AddDate(0, 0, 30) })
+	srv.notifyDigest(t.Context())
+	if payload == nil {
+		t.Fatal("no digest was sent")
+	}
+	events, ok := payload["events"].(map[string]any)
+	if !ok {
+		t.Fatalf("digest has no events: %+v", payload)
+	}
+	if _, ok := events["new_critical"]; !ok {
+		t.Fatalf("new critical work was not reported: %+v", events)
+	}
+	// The message must not become an inventory export: no versions, no evidence text.
+	if strings.Contains(string(body), "InstalledVersion") || strings.Contains(string(body), "evidence") {
+		t.Fatalf("digest carried finding detail: %s", body)
 	}
 }

@@ -62,6 +62,7 @@ what was and was not covered.`,
 		newVulnAgentCmd(),
 		newVulnServeCmd(),
 		newVulnAuthCmd(),
+		newVulnDBCmd(),
 		newVulnSBOMCmd(),
 		newVulnFeedbackCmd(),
 		newVulnImproveCmd(),
@@ -689,6 +690,9 @@ to read it from a pipe so it never enters shell history:
 				return err
 			}
 			fmt.Printf("password set for %q\n  file: %s\n", st.Username(), st.Path())
+			if users := st.Users(); len(users) > 1 {
+				fmt.Printf("  accounts: %d (see `clanker vuln auth status`)\n", len(users))
+			}
 			if generate {
 				fmt.Printf("  password: %s\n", password)
 				fmt.Fprintln(os.Stderr, "store it in a password manager now — it is not saved in plain text anywhere.")
@@ -702,6 +706,73 @@ to read it from a pipe so it never enters shell history:
 	setPassword.Flags().BoolVar(&fromStdin, "password-stdin", false, "read the password from stdin instead of prompting")
 	setPassword.Flags().BoolVar(&generate, "generate", false, "generate a strong password and print it once")
 	setPassword.Flags().IntVar(&length, "length", 24, "length of the generated password")
+
+	var (
+		addFile     string
+		addUsername string
+		addRole     string
+	)
+	add := &cobra.Command{
+		Use:   "add-user",
+		Short: "Create an account with a role (viewer, operator or admin)",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			path := authFileOrDefault(addFile)
+			role, err := auth.ParseRole(addRole)
+			if err != nil {
+				return err
+			}
+			st, err := auth.Load(path)
+			if errors.Is(err, auth.ErrNotConfigured) {
+				return fmt.Errorf("no credential file yet: run `clanker vuln auth set-password` first")
+			}
+			if err != nil {
+				return err
+			}
+			password, err := resolvePassword(fromStdin, generate, length)
+			if err != nil {
+				return err
+			}
+			user, err := st.AddUser(addUsername, password, role)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("added %s with role %s\n", user.Username, user.Role)
+			return nil
+		},
+	}
+	add.Flags().StringVar(&addFile, "file", "", "credential file (default: user config dir/clanker-guard/auth.json)")
+	add.Flags().StringVar(&addUsername, "username", "", "account name")
+	add.Flags().StringVar(&addRole, "role", "viewer", "viewer, operator or admin")
+	add.Flags().BoolVar(&fromStdin, "password-stdin", false, "read the password from stdin instead of prompting")
+	add.Flags().BoolVar(&generate, "generate", false, "generate a strong password and print it once")
+	add.Flags().IntVar(&length, "length", 24, "length of the generated password")
+	cmd.AddCommand(add)
+
+	setRole := &cobra.Command{
+		Use:   "role <username> <role>",
+		Short: "Change an account's role",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			path := authFileOrDefault(file)
+			st, err := auth.Load(path)
+			if err != nil {
+				return err
+			}
+			role, err := auth.ParseRole(args[1])
+			if err != nil {
+				return err
+			}
+			user, err := st.SetRole(args[0], role)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s is now %s\n", user.Username, user.Role)
+			return nil
+		},
+	}
+	setRole.Flags().StringVar(&file, "file", "", "credential file")
+	cmd.AddCommand(setRole)
 
 	status := &cobra.Command{
 		Use:   "status",
@@ -719,7 +790,15 @@ to read it from a pipe so it never enters shell history:
 			if err != nil {
 				return err
 			}
-			fmt.Printf("user:     %s\n", st.Username())
+			users := st.Users()
+			fmt.Printf("accounts: %d\n", len(users))
+			for _, u := range users {
+				state := ""
+				if u.Disabled {
+					state = " (disabled)"
+				}
+				fmt.Printf("  %-20s %s%s\n", u.Username, u.Role, state)
+			}
 			fmt.Printf("file:     %s\n", st.Path())
 			fmt.Printf("updated:  %s\n", st.UpdatedAt().Format(time.RFC3339))
 			if mode, insecure := st.InsecurePerms(); insecure {

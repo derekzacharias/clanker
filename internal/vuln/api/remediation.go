@@ -23,7 +23,12 @@ import (
 
 // currentPolicy reads the configurable SLA/routing policy from settings.
 func (s *Server) currentPolicy(r *http.Request) remediate.Policy {
-	vals, err := s.store.Settings(r.Context())
+	// r may be nil: background jobs ask for the policy without a request in hand.
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	vals, err := s.store.Settings(ctx)
 	if err != nil {
 		s.log.Warn("read remediation policy", "err", err)
 		return remediate.DefaultPolicy()

@@ -19,7 +19,7 @@ import (
 // fleet flow needs.
 func fleetServer(t *testing.T) *Server {
 	t.Helper()
-	srv, err := New(Options{
+	srv, err := New(Options{DisableBackgroundJobs: true,
 		CachePath:   filepath.Join(t.TempDir(), "intel.db"),
 		ToolVersion: "0.1.0",
 		Token:       "dash-token",

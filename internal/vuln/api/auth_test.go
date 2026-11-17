@@ -97,7 +97,7 @@ func sessionCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 func TestUnauthenticatedServerStaysOpen(t *testing.T) {
 	// Loopback development with neither a password nor a token: unchanged
 	// behaviour, every route reachable.
-	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db")})
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestSessionSurvivesServerRestart(t *testing.T) {
 
 	// A restart reads the same credential file: the signing key persisted, so the
 	// browser is still signed in. This is the whole point of the login page.
-	restarted, err := New(Options{
+	restarted, err := New(Options{DisableBackgroundJobs: true,
 		CachePath:  filepath.Join(t.TempDir(), "intel.db"),
 		AuthPath:   authPath,
 		SessionTTL: 2 * time.Hour,
@@ -279,7 +279,7 @@ func TestChangingPasswordSignsOutExistingSessions(t *testing.T) {
 	if _, err := auth.Write(authPath, "admin", "a-brand-new-password"); err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), AuthPath: authPath, Now: clk.Now})
+	rotated, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db"), AuthPath: authPath, Now: clk.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestCrossSiteStateChangeIsRefused(t *testing.T) {
 }
 
 func TestAPITokenStillWorks(t *testing.T) {
-	srv, err := New(Options{
+	srv, err := New(Options{DisableBackgroundJobs: true,
 		CachePath: filepath.Join(t.TempDir(), "intel.db"),
 		Token:     "s3cret-token",
 	})
@@ -407,7 +407,7 @@ func TestAPITokenStillWorks(t *testing.T) {
 }
 
 func TestLoginIsRefusedWhenNoPasswordIsConfigured(t *testing.T) {
-	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), Token: "s3cret-token"})
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db"), Token: "s3cret-token"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestLoginIsRefusedWhenNoPasswordIsConfigured(t *testing.T) {
 }
 
 func TestNonLoopbackListenRequiresCredentials(t *testing.T) {
-	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db")})
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestPasswordAuthenticationSatisfiesTheListenGuard(t *testing.T) {
 // the real client — but only when the peer really is the proxy, or any client could
 // forge X-Forwarded-For and escape the login limiter.
 func TestClientIPBehindATrustedProxy(t *testing.T) {
-	srv, err := New(Options{
+	srv, err := New(Options{DisableBackgroundJobs: true,
 		CachePath:      filepath.Join(t.TempDir(), "intel.db"),
 		TrustedProxies: []string{"10.0.0.5", "172.16.0.0/12"},
 	})
@@ -493,7 +493,7 @@ func TestClientIPBehindATrustedProxy(t *testing.T) {
 }
 
 func TestInvalidTrustedProxyIsRejected(t *testing.T) {
-	if _, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), TrustedProxies: []string{"nonsense"}}); err == nil {
+	if _, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db"), TrustedProxies: []string{"nonsense"}}); err == nil {
 		t.Fatal("an invalid trusted-proxy entry must fail startup, not be ignored")
 	}
 }

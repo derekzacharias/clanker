@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CheckCircle2, ExternalLink, Loader2, Plug, RefreshCw, XCircle } from "lucide-react";
 import { api, type GitLabConfig, type GitLabProject, type GitLabTicket, type GitLabVerifyResult } from "../lib/api";
 import { useAsync } from "../lib/useApi";
@@ -31,6 +31,11 @@ export function GitLabTicketPanel({
   const [error, setError] = useState<string | null>(null);
 
   const known = tickets ?? [];
+  // Tickets go stale as soon as someone else touches them in GitLab. On open, refresh once
+  // per mount when the cached state is old, so the panel shows the current status instead of
+  // yesterday's — without hammering the API on every render.
+  const refreshed = useRef(false);
+  const staleBefore = Date.now() - 10 * 60 * 1000;
   const cfg = config.data;
   const ready = Boolean(cfg?.ready);
   const configured = Boolean(cfg?.url);
@@ -44,6 +49,19 @@ export function GitLabTicketPanel({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not refresh the ticket status");
     }
+  }
+
+  const stale = known.some((t) => !t.last_synced_at || new Date(t.last_synced_at).getTime() < staleBefore);
+  if (!refreshed.current && configured && known.length > 0 && stale) {
+    refreshed.current = true;
+    const first = known[0];
+    api
+      .refreshGitLabTicket(first.id)
+      .then((res) => setTickets((prev) => (prev ?? []).map((t) => (t.id === res.ticket.id ? res.ticket : t))))
+      .catch(() => {
+        // A failed background refresh is not worth an error banner: the Refresh status
+        // button is still there, and it will say what went wrong.
+      });
   }
 
   if (config.loading) return null;

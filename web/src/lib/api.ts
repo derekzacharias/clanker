@@ -568,6 +568,8 @@ export interface AuthSession {
   authenticated: boolean;
   required: boolean;
   username?: string;
+  /** Current role, read from the server on each probe. */
+  role?: "viewer" | "operator" | "admin" | "";
   expires_at?: string;
   session_ttl?: string;
   methods: { password: boolean; token: boolean };
@@ -804,6 +806,17 @@ export const api = {
   metrics: () => request<ProcessMetrics>("/api/metrics"),
   runMaintenance: () => request<{ ok: boolean }>("/api/maintenance/run", { method: "POST" }),
   backup: () => request<{ path: string; name: string }>("/api/maintenance/backup", { method: "POST" }),
+  accessMe: () => request<AccessMe>("/api/access/me"),
+  users: () => request<{ items: Account[]; total: number; note?: string }>("/api/users"),
+  createUser: (body: { username: string; password: string; role: string }) =>
+    request<{ user: Account }>("/api/users", { method: "POST", body: JSON.stringify(body) }),
+  updateUser: (username: string, body: { role?: string; disabled?: boolean; password?: string }) =>
+    request<{ user: Account }>(`/api/users/${encodeURIComponent(username)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteUser: (username: string) =>
+    request<{ deleted: string }>(`/api/users/${encodeURIComponent(username)}`, { method: "DELETE" }),
   audit: (opts: { limit?: number; action?: string; actor?: string } = {}) =>
     request<{ items: AuditEntry[]; total: number; actions: string[] }>(
       `/api/audit${qs({ limit: opts.limit, action: opts.action, actor: opts.actor })}`,
@@ -969,6 +982,23 @@ export interface Ownership {
 /** One line of the ownership inventory: an asset, its record (if any), and its work. */
 /** GitLab ticket tracked by Clanker Guard. GitLab remains the source of truth for state. */
 /** One durable record of who did what. */
+/** One dashboard account. Password hashes never leave the server. */
+export interface Account {
+  username: string;
+  role: "viewer" | "operator" | "admin";
+  disabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccessMe {
+  authenticated: boolean;
+  username: string;
+  role: "" | "viewer" | "operator" | "admin";
+  permissions: { read: boolean; write: boolean; admin: boolean };
+  accounts: number;
+}
+
 export interface AuditEntry {
   seq: number;
   at: string;

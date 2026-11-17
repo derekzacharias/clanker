@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"golang.org/x/crypto/bcrypt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,7 @@ func TestWriteThenLoad(t *testing.T) {
 	if st.Username() != "admin" {
 		t.Fatalf("Username = %q, want admin", st.Username())
 	}
-	if !st.Verify("admin", testPassword) {
+	if _, ok := st.Verify("admin", testPassword); !ok {
 		t.Fatal("Verify rejected the password that was just written")
 	}
 	if _, insecure := st.InsecurePerms(); insecure {
@@ -130,16 +131,21 @@ func TestValidateCredentials(t *testing.T) {
 
 func TestVerify(t *testing.T) {
 	st := newStore(t)
-	if !st.Verify("admin", testPassword) {
+	if _, ok := st.Verify("admin", testPassword); !ok {
 		t.Fatal("correct credentials rejected")
 	}
-	if st.Verify("admin", "wrong-password-here") {
+	if _, ok := st.Verify("admin", "wrong-password-here"); ok {
 		t.Fatal("wrong password accepted")
 	}
-	if st.Verify("Admin", testPassword) {
-		t.Fatal("username comparison must be exact")
+	// Usernames are case-insensitive on purpose: "Admin" and "admin" are the same person,
+	// and caps lock should not look like a wrong password. The stored name keeps its case.
+	if u, ok := st.Verify("Admin", testPassword); !ok || u.Username != "admin" {
+		t.Fatal("case-insensitive sign-in should succeed and return the stored name")
 	}
-	if st.Verify("admin", strings.Repeat("a", MaxPasswordBytes+10)) {
+	if _, err := st.AddUser("ADMIN", "another-long-password", RoleViewer); !errors.Is(err, ErrUserExists) {
+		t.Fatalf("duplicate differing only by case = %v, want ErrUserExists", err)
+	}
+	if _, ok := st.Verify("admin", strings.Repeat("a", MaxPasswordBytes+10)); ok {
 		t.Fatal("over-long password accepted")
 	}
 }
@@ -251,7 +257,7 @@ func TestSessionKeyRotationInvalidatesSessions(t *testing.T) {
 	if _, err := reloaded.Session(value, now); !errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("reloaded store accepted a pre-rotation session: %v", err)
 	}
-	if !reloaded.Verify("admin", "another-long-password") {
+	if _, ok := reloaded.Verify("admin", "another-long-password"); !ok {
 		t.Fatal("reloaded store rejected the new password")
 	}
 }
@@ -305,5 +311,182 @@ func randomKey() string {
 func validHash(t *testing.T) string {
 	t.Helper()
 	st := newStore(t)
-	return st.cred.PasswordHash
+	u, ok := st.users["admin"]
+	if !ok {
+		t.Fatal("admin account missing")
+	}
+	return u.PasswordHash
+}
+
+// A deployment that upgrades must not lose its login: the old single-credential file becomes
+// one administrator, the file is rewritten in the new shape, and the same password works.
+func TestLegacyCredentialFileMigratesToAnAdministrator(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := map[string]any{
+		"username":      "admin",
+		"password_hash": string(hash),
+		"session_key":   randomKey(),
+		"updated_at":    time.Now().UTC().Format(time.RFC3339),
+	}
+	raw, _ := json.MarshalIndent(legacy, "", "  ")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load legacy: %v", err)
+	}
+	if _, ok := st.Verify("admin", testPassword); !ok {
+		t.Fatal("the migrated account cannot sign in")
+	}
+	if st.Role("admin") != RoleAdmin {
+		t.Fatalf("migrated role = %q, want admin", st.Role("admin"))
+	}
+	// The file is now version 2: a subsequent load must not need the old fields at all.
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc Credentials
+	if err := json.Unmarshal(written, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Version != 2 || len(doc.Users) != 1 || doc.Username != "" {
+		t.Fatalf("migrated document = %+v", doc)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("reload migrated file: %v", err)
+	}
+}
+
+// The whole point of roles is that the middle one cannot do everything.
+func TestRoleLadder(t *testing.T) {
+	cases := []struct {
+		role Role
+		want map[Permission]bool
+	}{
+		{RoleViewer, map[Permission]bool{PermRead: true, PermWrite: false, PermAdmin: false}},
+		{RoleOperator, map[Permission]bool{PermRead: true, PermWrite: true, PermAdmin: false}},
+		{RoleAdmin, map[Permission]bool{PermRead: true, PermWrite: true, PermAdmin: true}},
+	}
+	for _, tc := range cases {
+		for perm, want := range tc.want {
+			if got := tc.role.Allows(perm); got != want {
+				t.Fatalf("%s.Allows(%v) = %v, want %v", tc.role, perm, got, want)
+			}
+		}
+	}
+	if _, err := ParseRole("superuser"); err == nil {
+		t.Fatal("an unknown role was accepted")
+	}
+}
+
+// Locking every administrator out of their own tool is the failure mode this guards.
+func TestTheLastAdministratorCannotBeRemoved(t *testing.T) {
+	st := newStore(t) // one admin
+	if _, err := st.SetRole("admin", RoleOperator); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("demote last admin = %v, want ErrLastAdmin", err)
+	}
+	if _, err := st.SetDisabled("admin", true); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("disable last admin = %v, want ErrLastAdmin", err)
+	}
+	if err := st.DeleteUser("admin"); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("delete last admin = %v, want ErrLastAdmin", err)
+	}
+
+	// With a second administrator, the first can be demoted.
+	if _, err := st.AddUser("ops-admin", "another-long-password", RoleAdmin); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	if _, err := st.SetRole("admin", RoleOperator); err != nil {
+		t.Fatalf("demote with a second admin = %v", err)
+	}
+	// ...but now the second one is the last, so it is protected.
+	if _, err := st.SetRole("ops-admin", RoleViewer); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("demote the remaining admin = %v, want ErrLastAdmin", err)
+	}
+}
+
+// Changing a password must end that account's sessions and nobody else's.
+func TestPasswordChangeInvalidatesOnlyThatAccountsSessions(t *testing.T) {
+	st := newStore(t)
+	if _, err := st.AddUser("dana", "another-long-password", RoleOperator); err != nil {
+		t.Fatal(err)
+	}
+	adminCookie, _, err := st.SignSessionFor("admin", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	danaCookie, _, err := st.SignSessionFor("dana", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetPassword("dana", "changed-long-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Session(danaCookie, time.Now()); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("dana's old session = %v, want ErrInvalidSession", err)
+	}
+	if _, err := st.Session(adminCookie, time.Now()); err != nil {
+		t.Fatalf("admin's session was invalidated by someone else's password change: %v", err)
+	}
+}
+
+// Disabling an account ends its sessions immediately, and a disabled account cannot sign in.
+func TestDisabledAccountLosesAccessAtOnce(t *testing.T) {
+	st := newStore(t)
+	if _, err := st.AddUser("dana", "another-long-password", RoleOperator); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, err := st.SignSessionFor("dana", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetDisabled("dana", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Session(cookie, time.Now()); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("disabled account's session = %v, want ErrInvalidSession", err)
+	}
+	if _, ok := st.Verify("dana", "another-long-password"); ok {
+		t.Fatal("a disabled account could sign in")
+	}
+	if st.Role("dana") != "" {
+		t.Fatalf("disabled account still has role %q", st.Role("dana"))
+	}
+}
+
+// A role change applies to the running session, because the role is read from the store.
+func TestRoleChangeIsImmediate(t *testing.T) {
+	st := newStore(t)
+	if _, err := st.AddUser("dana", "another-long-password", RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, err := st.SignSessionFor("dana", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.Session(cookie, time.Now())
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if sess.Role.Allows(PermWrite) {
+		t.Fatal("a viewer was granted write")
+	}
+	if _, err := st.SetRole("dana", RoleOperator); err != nil {
+		t.Fatal(err)
+	}
+	sess, err = st.Session(cookie, time.Now())
+	if err != nil {
+		t.Fatalf("Session after promotion: %v", err)
+	}
+	if !sess.Role.Allows(PermWrite) {
+		t.Fatal("promotion did not take effect on the existing session")
+	}
 }

@@ -94,7 +94,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	cachePath := filepath.Join(t.TempDir(), "intel.db")
 	seedCache(t, cachePath)
-	srv, err := New(Options{CachePath: cachePath, ToolVersion: "test-1.0", Now: func() time.Time {
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: cachePath, ToolVersion: "test-1.0", Now: func() time.Time {
 		return time.Date(2026, 11, 13, 13, 0, 0, 0, time.UTC)
 	}})
 	if err != nil {
@@ -565,7 +565,7 @@ func TestFeedsEndpoint(t *testing.T) {
 // must actually receive -Version (a plain `| iex` would drop it and fail).
 func TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured(t *testing.T) {
 	const base = "https://github.com/derekzacharias/clanker-guard-agent/releases/download/v0.1.0"
-	srv, err := New(Options{
+	srv, err := New(Options{DisableBackgroundJobs: true,
 		CachePath:   filepath.Join(t.TempDir(), "intel.db"),
 		ToolVersion: "0.1.0",
 		ReleaseBase: base,
@@ -655,7 +655,7 @@ func TestAgentInstallCommandsAreRealWhenAReleaseHostIsConfigured(t *testing.T) {
 // TestAgentInstallShowsHowToPublishWithoutAReleaseHost keeps the honest empty
 // state: no fabricated URL, and the exact build/publish steps instead.
 func TestAgentInstallShowsHowToPublishWithoutAReleaseHost(t *testing.T) {
-	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.1.0"})
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.1.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +844,7 @@ func TestSoftwareExportIsTheEnvironmentWideAssetList(t *testing.T) {
 }
 
 func TestSoftwareExportWithoutAnyAssessment(t *testing.T) {
-	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db")})
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -872,7 +872,7 @@ func TestSoftwareExportRequiresDashboardAuth(t *testing.T) {
 // does not exist (server 0.2.2 vs release v0.1.7 → 404).
 func TestInstallCommandAdvertisesTheAgentReleaseVersion(t *testing.T) {
 	const base = "https://github.com/derekzacharias/clanker-guard-agent/releases/download/v0.1.7"
-	srv, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: base})
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: base})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -882,7 +882,7 @@ func TestInstallCommandAdvertisesTheAgentReleaseVersion(t *testing.T) {
 	}
 
 	// An explicit override wins.
-	override, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: base, AgentVersion: "0.3.0"})
+	override, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: base, AgentVersion: "0.3.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -892,7 +892,7 @@ func TestInstallCommandAdvertisesTheAgentReleaseVersion(t *testing.T) {
 	}
 
 	// An unversioned base falls back to the build version (no tag to trust).
-	plain, err := New(Options{CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: "https://example.test/releases"})
+	plain, err := New(Options{DisableBackgroundJobs: true, CachePath: filepath.Join(t.TempDir(), "intel.db"), ToolVersion: "0.2.2", ReleaseBase: "https://example.test/releases"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -93,7 +93,7 @@ func improvementFixture(t *testing.T) (*Server, string) {
 	}
 	store2.Close()
 
-	srv, err := New(Options{CachePath: cachePath, ToolVersion: "test-1.0", Now: func() time.Time {
+	srv, err := New(Options{DisableBackgroundJobs: true, CachePath: cachePath, ToolVersion: "test-1.0", Now: func() time.Time {
 		return time.Date(2026, 11, 13, 13, 0, 0, 0, time.UTC)
 	}})
 	if err != nil {

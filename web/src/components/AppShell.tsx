@@ -285,8 +285,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                 can be replaced or cleared. */}
             {session?.authenticated && session.username ? (
               <div className="flex items-center gap-1">
-                <span className="hidden max-w-32 truncate text-xs text-muted sm:inline" title={session.username}>
+                <span className="hidden max-w-32 truncate text-xs text-muted sm:inline" title={`${session.username} (${session.role || "?" })`}>
                   {session.username}
+                  {session.role ? <span className="text-subtle"> · {session.role}</span> : null}
                 </span>
                 <Button variant="ghost" size="sm" onClick={signOut} aria-label="Sign out" title="Sign out">
                   <LogOut className="h-4 w-4" aria-hidden="true" />

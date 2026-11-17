@@ -7,6 +7,7 @@ import { useQueryParam } from "../lib/router";
 import Improvement from "./Improvement";
 import { GitLabSettings } from "../components/GitLabSettings";
 import { AuditLog } from "../components/AuditLog";
+import { AccessPanel } from "../components/AccessPanel";
 import { formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -92,6 +93,15 @@ export default function Settings() {
         </Tabs.Content>
         <Tabs.Content value="access">
           <AccessTab />
+          <Card className="mt-3">
+            <CardHeader
+              title="Accounts and roles"
+              description="Who can sign in, and what each account may do. Changes apply immediately."
+            />
+            <CardBody>
+              <AccessPanel />
+            </CardBody>
+          </Card>
         </Tabs.Content>
       </Tabs.Root>
     </div>

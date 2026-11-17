@@ -302,6 +302,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/agents/enroll-token", s.handleEnrollTokenRotate)
 	// Kept as an alias so existing tooling keeps working; both mint a new token.
 	s.mux.HandleFunc("POST /api/agents/enroll-token/rotate", s.handleEnrollTokenRotate)
+	s.mux.HandleFunc("GET /api/access/me", s.handleAccessMe)
+	s.mux.HandleFunc("GET /api/users", s.handleUsersList)
+	s.mux.HandleFunc("POST /api/users", s.handleUserCreate)
+	s.mux.HandleFunc("PATCH /api/users/{username}", s.handleUserUpdate)
+	s.mux.HandleFunc("DELETE /api/users/{username}", s.handleUserDelete)
 	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
 	s.mux.HandleFunc("POST /api/maintenance/run", s.handleMaintenanceRun)
 	s.mux.HandleFunc("POST /api/maintenance/backup", s.handleBackup)
@@ -346,7 +351,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		// exposes assessment data.
 		needsAuth := strings.HasPrefix(r.URL.Path, "/api/") && !publicAPIPaths[r.URL.Path]
 		if needsAuth && s.authRequired() {
-			method, _ := s.authenticate(r)
+			method, sess := s.authenticate(r)
 			switch {
 			case method == authNone:
 				s.log.Warn("unauthenticated api request", "method", r.Method, "path", r.URL.Path, "remote", s.clientIP(r))
@@ -356,6 +361,17 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				s.log.Warn("cross-site state change refused", "method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"))
 				writeError(w, http.StatusForbidden, "cross_site_request", "state-changing requests must come from the dashboard itself")
 				return
+			}
+			// Roles: the shared deployment token is always allowed (it is the server
+			// secret); a session is allowed only what its role grants.
+			if method == authViaCookie {
+				if need := requiredPermission(r); !sess.Role.Allows(need) {
+					s.log.Warn("insufficient role", "user", sess.Username, "role", sess.Role,
+						"method", r.Method, "path", r.URL.Path, "needs", need.String())
+					writeError(w, http.StatusForbidden, "insufficient_role",
+						"this account ("+string(sess.Role)+") cannot "+need.Verb()+" that")
+					return
+				}
 			}
 		}
 		start := time.Now()

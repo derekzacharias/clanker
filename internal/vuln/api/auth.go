@@ -106,8 +106,12 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 	case authViaCookie:
 		resp.Authenticated = true
 		resp.Username = sess.Username
+		resp.Role = string(sess.Role)
 		resp.ExpiresAt = sess.ExpiresAt.Format(time.RFC3339)
 	case authViaToken:
+		// The shared token is a deployment secret: it has always been able to do
+		// everything, and pretending otherwise would break existing scripts.
+		resp.Role = string(auth.RoleAdmin)
 		resp.Authenticated = true
 	}
 	// An anonymous caller learns whether a password exists (it has to: that is
@@ -140,15 +144,17 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username := strings.TrimSpace(body.Username)
-	if !s.auth.Verify(username, body.Password) {
+	user, ok := s.auth.Verify(username, body.Password)
+	if !ok {
 		s.logins.fail(ip, now)
 		// One message for both causes: distinguishing them would confirm which
-		// usernames exist.
+		// usernames exist, and would tell an attacker that an account is disabled.
 		s.log.Warn("sign-in rejected", "remote", ip, "user", username)
 		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid username or password")
 		return
 	}
-	value, expires, err := s.auth.SignSession(now, s.opts.SessionTTL)
+	s.auditAs(r, user.Username, "auth.login", user.Username, "role="+string(user.Role))
+	value, expires, err := s.auth.SignSessionFor(user.Username, now, s.opts.SessionTTL)
 	if err != nil {
 		s.log.Error("sign a session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "could not create a session")
@@ -156,11 +162,13 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logins.reset(ip)
 	s.setSessionCookie(w, r, value, expires)
-	s.log.Info("sign-in succeeded", "remote", ip, "user", username, "expires", expires.Format(time.RFC3339))
+	s.log.Info("sign-in succeeded", "remote", ip, "user", user.Username, "role", user.Role,
+		"expires", expires.Format(time.RFC3339))
 	writeJSON(w, http.StatusOK, authSessionResponse{
 		Authenticated: true,
 		Required:      true,
-		Username:      username,
+		Username:      user.Username,
+		Role:          string(user.Role),
 		ExpiresAt:     expires.Format(time.RFC3339),
 		Methods:       map[string]bool{"password": true, "token": s.opts.Token != ""},
 		SessionTTL:    s.opts.SessionTTL.String(),
@@ -217,12 +225,15 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 type authSessionResponse struct {
-	Authenticated bool            `json:"authenticated"`
-	Required      bool            `json:"required"`
-	Username      string          `json:"username,omitempty"`
-	ExpiresAt     string          `json:"expires_at,omitempty"`
-	SessionTTL    string          `json:"session_ttl,omitempty"`
-	Methods       map[string]bool `json:"methods"`
+	Authenticated bool   `json:"authenticated"`
+	Required      bool   `json:"required"`
+	Username      string `json:"username,omitempty"`
+	// Role is the caller's current role, read from the store on every request so a
+	// demotion applies to a live session instead of when the cookie expires.
+	Role       string          `json:"role,omitempty"`
+	ExpiresAt  string          `json:"expires_at,omitempty"`
+	SessionTTL string          `json:"session_ttl,omitempty"`
+	Methods    map[string]bool `json:"methods"`
 }
 
 // cookieMutationAllowed blocks cross-site state changes that ride on a session
