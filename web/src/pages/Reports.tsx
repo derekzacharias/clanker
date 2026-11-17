@@ -12,12 +12,18 @@ import { useToast } from "../components/ui/Toast";
 
 const FORMATS = ["json", "markdown", "sarif", "html"] as const;
 
-export default function Reports() {
+export default function Reports({ embedded = false }: { embedded?: boolean }) {
   const { data, error, loading, reload } = useAsync(() => api.reports());
   const { push } = useToast();
 
   return (
-    <div>
+    <div className={embedded ? "space-y-3" : undefined}>
+      {embedded ? (
+        <p className="text-sm text-muted">
+          Stored assessments, newest first. Every export preserves evidence, confidence, sources and stated
+          limitations.
+        </p>
+      ) : (
       <PageHeader
         title="Reports"
         description="Stored assessments. Every export preserves evidence, confidence, sources and stated limitations."
@@ -41,6 +47,7 @@ export default function Reports() {
           </>
         }
       />
+      )}
 
       {loading && !data ? <LoadingBlock label="Loading reports" /> : null}
       {error ? <ErrorState message={error.message} onRetry={reload} /> : null}

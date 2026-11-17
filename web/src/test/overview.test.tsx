@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import Overview from "../pages/Overview";
 import { mockApi, overviewFixture, emptyOverviewFixture } from "./helpers";
@@ -12,13 +12,19 @@ describe("Overview", () => {
     mockApi([["/api/overview", overviewFixture]]);
     renderOverview();
 
-    expect(await screen.findByText("Security overview")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(await screen.findByText("Known exploited")).toBeInTheDocument();
     expect(screen.getByText("CVE-2026-0001")).toBeInTheDocument();
     expect(screen.getByText("openssl")).toBeInTheDocument();
-    // severity distribution exposes counts as text, not only as chart colour
+    // Severity and coverage are analysis, so they live behind a disclosure now: closed by
+    // default, still reachable in one click, and the chart still exposes its counts as text.
+    const severityToggle = screen.getByRole("button", { name: /Severity distribution/i });
+    expect(severityToggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(severityToggle);
     expect(screen.getByRole("img", { name: /Findings by severity/i })).toBeInTheDocument();
-    expect(screen.getByText("Coverage limitations")).toBeInTheDocument();
+
+    const coverageToggle = screen.getByRole("button", { name: /Coverage and limitations/i });
+    fireEvent.click(coverageToggle);
     expect(screen.getByText(/version-correlation only/i)).toBeInTheDocument();
   });
 

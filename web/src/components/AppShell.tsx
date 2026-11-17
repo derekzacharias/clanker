@@ -1,5 +1,4 @@
 import {
-  FileBarChart2,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -14,7 +13,6 @@ import {
   ShieldAlert,
   Sparkles,
   Sun,
-  Users,
   X,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -28,16 +26,21 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ApiError, api, getToken, setToken, type AuthSession } from "../lib/api";
 import { useAppVersion } from "../lib/version";
 
+// Navigation follows the workflow, not the data model: assess, review, fix, administer.
+// Ownership lives inside Remediation (it is the first step of assignment), and Reports live
+// inside Scans (they are the stored result of a scan), so neither competes for a top-level
+// slot.
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
   { to: "/assets", label: "Assets", icon: Server },
-  { to: "/vulnerabilities", label: "Vulnerabilities", icon: ShieldAlert },
-  { to: "/remediation", label: "Remediation", icon: Wrench },
-  { to: "/ownership", label: "Ownership", icon: Users },
   { to: "/scans", label: "Scans", icon: Radar },
-  { to: "/reports", label: "Reports", icon: FileBarChart2 },
-  { to: "/settings", label: "Settings", icon: SettingsIcon },
+  { to: "/vulnerabilities", label: "Findings", icon: ShieldAlert },
+  { to: "/remediation", label: "Remediation", icon: Wrench },
 ];
+
+// Administration is separated: it is not part of the daily loop, and mixing it into the list
+// makes the operational items harder to scan.
+const ADMIN_NAV = [{ to: "/settings", label: "Administration", icon: SettingsIcon }];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -166,9 +169,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     navigate(q ? `/vulnerabilities?q=${encodeURIComponent(q)}` : "/vulnerabilities");
   }
 
-  const nav = (
-    <nav aria-label="Primary" className="flex flex-1 flex-col gap-0.5">
-      {NAV.map((item) => {
+  const renderNav = (items: typeof NAV, label: string) => (
+    <nav aria-label={label} className="flex flex-col gap-0.5">
+      {items.map((item) => {
         const active =
           item.to === "/" ? pathname === "/" : pathname === item.to || pathname.startsWith(item.to + "/");
         const Icon = item.icon;
@@ -179,9 +182,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             aria-current={active ? "page" : undefined}
             className={cn(
               "flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm",
-              active
-                ? "bg-accent-soft font-medium text-accent"
-                : "text-muted hover:bg-surface-2 hover:text-fg",
+              "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+              active ? "bg-accent-soft font-medium text-accent" : "text-muted hover:bg-surface-2 hover:text-fg",
             )}
           >
             <Icon className="h-4 w-4" aria-hidden="true" />
@@ -190,6 +192,13 @@ export function AppShell({ children }: { children: ReactNode }) {
         );
       })}
     </nav>
+  );
+
+  const nav = (
+    <div className="flex flex-1 flex-col justify-between gap-4">
+      {renderNav(NAV, "Workflow")}
+      <div className="border-t border-border pt-2">{renderNav(ADMIN_NAV, "Administration")}</div>
+    </div>
   );
 
   return (
@@ -255,7 +264,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <Menu className="h-4 w-4" aria-hidden="true" />
             </Button>
 
-            <form onSubmit={submitSearch} role="search" className="flex min-w-0 flex-1 items-center">
+            <form onSubmit={submitSearch} role="search" className="hidden min-w-0 flex-1 items-center sm:flex">
               <label htmlFor="global-search" className="sr-only">
                 Search hostnames, IP addresses, packages or CVE identifiers
               </label>

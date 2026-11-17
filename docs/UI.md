@@ -75,6 +75,37 @@ column with words.
 
 ---
 
+## 2a. Navigation and the workflow
+
+The sidebar has one list of six destinations in workflow order, plus Administration:
+
+    Overview → Assets → Scans → Findings → Remediation        |    Administration
+
+* Overview answers posture, attention, next action and progress — in that order.
+* Scans owns both the run history and the stored reports (`/scans?tab=reports`); a report is
+  what a scan produced, so it does not need its own navigation slot.
+* Remediation owns assignment (`?tab=ownership`) and the upgrade grouping (`?tab=upgrades`);
+  ownership is the first step of assignment, not a separate product.
+* Findings is the evidence list; the drawer leads with the verdict and the decision, and the
+  raw evidence, confidence reasoning and references are one click away.
+* Administration holds configuration and governance. Account management is admin-only in the
+  interface and on the server.
+
+Old addresses keep working: `/ownership` and `/reports` forward to their new homes, so
+bookmarks and documentation links do not rot.
+
+### Progressive disclosure rules
+
+| Level | Lives here |
+|---|---|
+| Always visible | posture, the derived next action, process counts, finding verdict, owner and deadline, remediation guidance |
+| One click | evidence, confidence reasoning, risk factors, references, severity distribution, coverage limits, filters beyond search and sort, analyst review |
+| Administration | scanner policy, intelligence sources, agents, integrations, accounts, audit, operational schedules |
+
+The test of the split: a security engineer should be able to open a finding and decide *what
+to do and who owes it* without scrolling, and a reviewer should be able to check the evidence
+without leaving the page.
+
 ## 3. Screens and the question each answers
 
 | Screen | Question it answers | Notes |
@@ -82,11 +113,11 @@ column with words.
 | **Overview** | What needs attention right now? | 4 metric cards, severity distribution, priority findings, coverage, activity, feed freshness, limitations. Empty state is a first-run call to action — no fabricated numbers. |
 | **Assets** | Which endpoints are assessed and how bad is each? | filter by OS / finding / scan age; stale badge; links to detail |
 | **Asset detail** | What is on this host and what applies to it? | findings, packages (progressively disclosed), coverage, skipped checks, scan history |
-| **Vulnerabilities** | What should I fix, and how sure are we? | filters (severity, applicability, KEV, fix availability, asset, text), sort by remediation priority; evidence panel with confidence, reasons to raise/lower, references |
+| **Findings** (was Vulnerabilities) | What should I fix, and how sure are we? | filters (severity, applicability, KEV, fix availability, asset, text), sort by remediation priority; evidence panel with confidence, reasons to raise/lower, references |
 | **New scan** | How do I run an assessment? | three steps and four types: **Local System**, Network (scope + authorisation), Software/Container, and **Endpoint Scan** (dispatches to an enrolled agent at once when it is online; a request for an unreachable endpoint stays queued and is shown as such) |
 | **Scans** | What ran, what is running, what failed? | live stage + percent from the server, cancel, report links, history |
 | **Reports** | What did the assessment conclude? | stored reports, JSON/Markdown/SARIF/HTML export, evidence preserved; **software inventory** export (CSV asset list + CycloneDX SBOM) per host, and one environment-wide CSV across every assessed host |
-| **Remediation** | Who owes what, and by when? | work items derived from findings: team, owner, state, SLA due date, overdue flag; filter by team/state/overdue; **My work** scopes the queue to the signed-in operator and each row can be claimed; automated execution is reported as unavailable rather than offered |
+| **Remediation** | Who owes what, by when, and which upgrade closes it? | work items derived from findings: team, owner, state, SLA due date, overdue flag; filter by team/state/overdue; **My work** scopes the queue to the signed-in operator and each row can be claimed; automated execution is reported as unavailable rather than offered |
 | **Ownership** | Who is responsible for each machine? | inventory of assets with their work counts, recorded team/engineer, exposure; single-row edit and multi-select bulk assignment; assets routed by the category mapping but with no record say so explicitly ("work maps to X") because routing is not accountability |
 | **Settings** | Policy, intelligence, agents, integrations, access | tabs; feed freshness + update; agent install commands only when artifacts are published |
 | **Sign in** (`/login`) | Who are you, and how do I stay signed in? | username + password form when a dashboard password exists; falls back to the token form on token-only servers; states the session length; one error line, no user/password distinction |

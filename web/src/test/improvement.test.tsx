@@ -127,6 +127,8 @@ describe("finding feedback", () => {
     render(<VulnerabilityDetail id="vuln-1" onClose={() => {}} />);
     await screen.findByRole("dialog");
 
+    // Analyst actions live behind the review disclosure so the verdict stays readable.
+    await userEvent.click(screen.getByRole("button", { name: /Analyst review/i }));
     await userEvent.click(screen.getByRole("button", { name: /Mark false positive/i }));
     const submit = screen.getByRole("button", { name: /Submit feedback/i });
     expect(submit).toBeDisabled();

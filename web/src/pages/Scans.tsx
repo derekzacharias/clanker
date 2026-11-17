@@ -1,7 +1,9 @@
 import { Radar } from "lucide-react";
+import { useState } from "react";
+import Reports from "./Reports";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useApi";
-import { navigate } from "../lib/router";
+import { navigate, useQueryParam } from "../lib/router";
 import { formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Card, CardHeader } from "../components/ui/Card";
@@ -18,25 +20,48 @@ const statusTone: Record<string, string> = {
   canceled: "border-high/30 bg-high-soft text-high",
 };
 
-export default function Scans() {
+export default function Scans({ initialTab = "activity" }: { initialTab?: "activity" | "reports" }) {
   const { data, error, loading, reload } = useAsync(() => api.scans());
+  const tabParam = useQueryParam("tab");
+  const [tab, setTab] = useState<"activity" | "reports">(tabParam === "reports" ? "reports" : initialTab);
 
   return (
     <div className="space-y-4">
       <PageHeader
         title="Scans"
-        description="Start an assessment, follow its progress, and review previous runs."
+        description="Start an assessment, follow its progress, and open what it produced."
         actions={
           <Button variant="primary" onClick={() => navigate("/scans/new")}>
-            <Radar className="h-4 w-4" aria-hidden="true" /> New Scan
+            <Radar className="h-4 w-4" aria-hidden="true" /> New scan
           </Button>
         }
       />
 
+      <div className="flex gap-1 border-b border-border" role="tablist" aria-label="Scan views">
+        {[
+          ["activity", "Activity"],
+          ["reports", "Reports and exports"],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={tab === value}
+            onClick={() => setTab(value as typeof tab)}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+              tab === value ? "border-accent font-medium text-accent" : "border-transparent text-muted hover:text-fg"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {loading && !data ? <LoadingBlock label="Loading scans" /> : null}
       {error ? <ErrorState message={error.message} onRetry={reload} /> : null}
 
-      {data ? (
+      {tab === "reports" ? <Reports embedded /> : null}
+
+      {tab === "activity" && data ? (
         <>
           <Card>
             <CardHeader

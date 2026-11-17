@@ -41,7 +41,7 @@ describe("accessibility", () => {
       </AppShell>,
     );
     expect(screen.getByRole("link", { name: /Skip to content/i })).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: /Primary/i })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: /Workflow/i })).toBeInTheDocument();
     expect(screen.getByRole("search")).toBeInTheDocument();
     expect(screen.getByLabelText(/Search hostnames, IP addresses/i)).toBeInTheDocument();
   });

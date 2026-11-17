@@ -8,6 +8,7 @@ import Improvement from "./Improvement";
 import { GitLabSettings } from "../components/GitLabSettings";
 import { AuditLog } from "../components/AuditLog";
 import { AccessPanel } from "../components/AccessPanel";
+import { Collapsible } from "../components/ui/Collapsible";
 import { formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -24,13 +25,16 @@ const TABS = ["general", "intelligence", "agents", "integrations", "improvement"
 
 export default function Settings() {
   const tabParam = useQueryParam("tab");
+  const access = useAsync(() => api.accessMe());
+  const can = access.data?.permissions ?? { read: true, write: false, admin: false };
+  const isAdmin = Boolean(can.admin);
   // An unknown or stale tab value must fall back instead of rendering nothing.
   const initialTab = TABS.includes((tabParam ?? "") as (typeof TABS)[number]) ? (tabParam as string) : "general";
   return (
     <div>
       <PageHeader
-        title="Settings"
-        description="Scanner policy, vulnerability intelligence, endpoint agents, integrations and access."
+        title="Administration"
+        description="Configuration and governance. Daily work happens in Scans, Findings and Remediation."
       />
       <Tabs.Root defaultValue={initialTab}>
         <Tabs.List className="mb-3 flex flex-wrap gap-1 border-b border-border" aria-label="Settings sections">
@@ -42,7 +46,9 @@ export default function Settings() {
             ["improvement", "Continuous improvement"],
             ["access", "Access"],
             ["audit", "Audit log"],
-          ].map(([value, label]) => (
+          ]
+            .filter(([value]) => value !== "access" || can.admin)
+            .map(([value, label]) => (
             <Tabs.Trigger
               key={value}
               value={value}
@@ -93,15 +99,21 @@ export default function Settings() {
         </Tabs.Content>
         <Tabs.Content value="access">
           <AccessTab />
-          <Card className="mt-3">
-            <CardHeader
-              title="Accounts and roles"
-              description="Who can sign in, and what each account may do. Changes apply immediately."
-            />
-            <CardBody>
-              <AccessPanel />
-            </CardBody>
-          </Card>
+          {isAdmin ? (
+            <Card className="mt-3">
+              <CardHeader
+                title="Accounts and roles"
+                description="Who can sign in, and what each account may do. Changes apply immediately."
+              />
+              <CardBody>
+                <AccessPanel />
+              </CardBody>
+            </Card>
+          ) : (
+            <Banner tone="info" title="Account management needs the administrator role">
+              You can still use Remediation, Findings and Scans. Ask an administrator for account changes.
+            </Banner>
+          )}
         </Tabs.Content>
       </Tabs.Root>
     </div>
@@ -165,13 +177,15 @@ function GeneralTab() {
           onChange={setFailOnKev}
           label="Fail when a known-exploited finding is actionable"
         />
-        <ToggleRow
-          id="offline-default"
-          checked={offlineDefault}
-          onChange={setOfflineDefault}
-          label="Default new scans to offline (cached intelligence)"
-          hint="Useful on air-gapped hosts; requires a populated cache."
-        />
+        <Collapsible title="Advanced scanner behaviour" summary="offline default, air-gapped hosts">
+          <ToggleRow
+            id="offline-default"
+            checked={offlineDefault}
+            onChange={setOfflineDefault}
+            label="Default new scans to offline (cached intelligence)"
+            hint="Useful on air-gapped hosts; requires a populated cache."
+          />
+        </Collapsible>
         <div className="flex items-center gap-2 pt-1">
           <Button variant="primary" onClick={save} disabled={saving}>
             {saving ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Check className="h-4 w-4" aria-hidden="true" />}

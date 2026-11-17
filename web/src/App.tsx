@@ -8,11 +8,9 @@ import AssetDetail from "./pages/AssetDetail";
 import Vulnerabilities from "./pages/Vulnerabilities";
 import Scans from "./pages/Scans";
 import NewScan from "./pages/NewScan";
-import Reports from "./pages/Reports";
 import ReportView from "./pages/ReportView";
 import Settings from "./pages/Settings";
 import Remediation from "./pages/Remediation";
-import Ownership from "./pages/Ownership";
 
 function Routes() {
   const pathname = usePathname();
@@ -25,8 +23,9 @@ function Routes() {
   if (pathname === "/scans") return <Scans />;
   if (pathname === "/scans/new") return <NewScan />;
   if (pathname === "/remediation") return <Remediation />;
-  if (pathname === "/ownership") return <Ownership />;
-  if (pathname === "/reports") return <Reports />;
+  // Old bookmarks keep working: ownership moved inside Remediation, reports inside Scans.
+  if (pathname === "/ownership") return <Remediation initialTab="ownership" />;
+  if (pathname === "/reports") return <Scans initialTab="reports" />;
   const report = matchRoute("/reports/:id", pathname);
   if (report) return <ReportView id={report.id} />;
   if (pathname === "/settings") return <Settings />;

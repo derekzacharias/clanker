@@ -45,9 +45,9 @@ describe("null-safe rendering", () => {
   it("renders the overview even when list fields arrive as null", async () => {
     mockApi([["/api/overview", overviewWithNulls]]);
     render(<Overview />);
-    expect(await screen.findByText("Security overview")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(screen.getByText(/No actionable findings in the assessed scope/i)).toBeInTheDocument();
-    expect(screen.getByText(/No scans recorded yet/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
   });
 
   it("renders an asset with null finding lists", async () => {

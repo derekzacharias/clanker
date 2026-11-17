@@ -31,6 +31,8 @@ describe("Vulnerabilities", () => {
     renderPage();
     await screen.findByRole("table");
 
+    // Severity chips live under the Filters disclosure now: one click, then the chip.
+    await userEvent.click(screen.getByRole("button", { name: /^Filters/ }));
     const chip = screen.getByRole("button", { name: /^Critical/ });
     await userEvent.click(chip);
     expect(chip).toHaveAttribute("aria-pressed", "true");
@@ -56,8 +58,16 @@ describe("Vulnerabilities", () => {
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getByRole("heading", { name: /CVE-2026-0001/i })).toBeInTheDocument();
     expect(within(dialog).getByText(/What this means/i)).toBeInTheDocument();
+
+    // The raw evidence and the references are technical detail: one click away, and the
+    // caveat is still stated where the evidence lives.
+    const evidence = within(dialog).getByRole("button", { name: /Evidence/i });
+    expect(evidence).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(evidence);
     expect(within(dialog).getByText(/not a validated vulnerability/i)).toBeInTheDocument();
     expect(within(dialog).getByText(/openssl 3\.0\.11-1 installed/i)).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: /References/i }));
     expect(within(dialog).getByRole("link", { name: /NVD/i })).toHaveAttribute(
       "href",
       "https://nvd.nist.gov/vuln/detail/CVE-2026-0001",

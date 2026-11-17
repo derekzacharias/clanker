@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Layers, Timer } from "lucide-react";
+import { Timer } from "lucide-react";
 import { useAsync } from "../lib/useApi";
 import { api, type RemediationGroup, type RemediationItem, type RemediationState } from "../lib/api";
 import { PageHeader } from "../components/PageHeader";
@@ -12,6 +12,7 @@ import { Modal } from "../components/ui/Dialog";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 import { formatDate, relativeTime } from "../lib/format";
+import Ownership from "./Ownership";
 
 /**
  * Remediation work queue.
@@ -82,12 +83,22 @@ function severityTone(severity: string): string {
   }
 }
 
-export default function Remediation() {
+export default function Remediation({ initialTab = "queue" }: { initialTab?: "queue" | "upgrades" | "ownership" }) {
   const [team, setTeam] = useState("");
   const [state, setState] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
+  // Operators land on their own queue: it is the work they are accountable for. Admins and
+  // anyone else start with the whole queue, because triage is their job.
+  const access = useAsync(() => api.accessMe());
+  const role = access.data?.role ?? "";
   const [mineOnly, setMineOnly] = useState(false);
-  const [grouped, setGrouped] = useState(false);
+  const [roleApplied, setRoleApplied] = useState(false);
+  if (!roleApplied && access.data) {
+    setRoleApplied(true);
+    if (role === "operator" && access.data.username) setMineOnly(true);
+  }
+  const [tab, setTab] = useState<"queue" | "upgrades" | "ownership">(initialTab);
+  const grouped = tab === "upgrades";
   const [accepting, setAccepting] = useState<RemediationItem | null>(null);
   const [acceptReason, setAcceptReason] = useState("");
   const [acceptDays, setAcceptDays] = useState(30);
@@ -111,6 +122,8 @@ export default function Remediation() {
 
   const groups = useAsync(() => (grouped ? api.remediationGroups() : Promise.resolve(null)), [grouped]);
   const metrics = useAsync(() => api.metrics(), []);
+
+  const s = summary.data?.summary;
 
   const teams = useMemo(() => {
     const known = new Set<string>(ASSIGNABLE_TEAMS);
@@ -159,14 +172,35 @@ export default function Remediation() {
     }
   }
 
-  const s = summary.data?.summary;
-
   return (
     <div className="space-y-4">
       <PageHeader
         title="Remediation"
-        description="Who owns each finding, what it is waiting for, and when it is due. Findings themselves stay in Vulnerabilities."
+        description="Who owes each fix, by when, and the upgrade that closes it. Findings stay evidence; this is the work."
       />
+
+      <div className="flex gap-1 border-b border-border" role="tablist" aria-label="Remediation views">
+        {[
+          ["queue", "Queue"],
+          ["upgrades", "By upgrade"],
+          ["ownership", "Ownership"],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={tab === value}
+            onClick={() => setTab(value as typeof tab)}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+              tab === value ? "border-accent font-medium text-accent" : "border-transparent text-muted hover:text-fg"
+            }`}
+          >
+            {label}
+            {value === "ownership" && s?.triage_assets ? (
+              <span className="ml-1.5 rounded-full bg-high-soft px-1.5 text-xs text-high">{s.triage_assets}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
 
       {summary.loading && !summary.data ? <LoadingBlock label="Loading remediation summary" /> : null}
       {summary.error ? <ErrorState message={summary.error.message} onRetry={summary.reload} /> : null}
@@ -238,9 +272,11 @@ export default function Remediation() {
         </Card>
       ) : null}
 
-      <Card>
+      {tab === "ownership" ? <Ownership /> : null}
+
+      <Card className={tab === "ownership" ? "hidden" : undefined}>
         <CardHeader
-          title="Work queue"
+          title={tab === "upgrades" ? "Remediation units" : "Work queue"}
           description="Routed from asset ownership, then the responsibility mapping. Unknown assets wait for a human instead of defaulting to a team — set them in Ownership."
         />
         <CardBody className="space-y-3">
@@ -275,10 +311,7 @@ export default function Remediation() {
                 My work
               </Button>
             ) : null}
-            <Button variant={grouped ? "primary" : "secondary"} onClick={() => setGrouped((v) => !v)}>
-              <Layers className="h-4 w-4" aria-hidden="true" />
-              {grouped ? "Grouped by upgrade" : "Group by upgrade"}
-            </Button>
+
             <Button variant="ghost" onClick={() => { items.reload(); summary.reload(); }}>
               Refresh
             </Button>

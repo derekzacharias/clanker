@@ -65,8 +65,11 @@ export default function Vulnerabilities() {
   );
   const { data, error, loading, reload } = useAsync(fetcher, [fetcher]);
 
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const shown = data?.items ?? [];
   const hasFilters = query || severities.length > 0 || applicability.length > 0 || kevOnly || fix !== "all" || asset !== "all";
+  const activeFilterCount =
+    severities.length + applicability.length + (kevOnly ? 1 : 0) + (fix !== "all" ? 1 : 0) + (asset !== "all" ? 1 : 0);
 
   function clearFilters() {
     setQuery("");
@@ -80,7 +83,7 @@ export default function Vulnerabilities() {
   return (
     <div>
       <PageHeader
-        title="Vulnerabilities"
+        title="Findings"
         description="One row per affected package and advisory. Applicability and confidence come from the backend — a version match alone is never presented as validated."
         actions={
           data ? (
@@ -127,6 +130,20 @@ export default function Vulnerabilities() {
                 <option value="asset">Sort: asset</option>
               </Select>
             </div>
+            <Button
+              variant={filtersOpen ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setFiltersOpen((v) => !v)}
+              aria-expanded={filtersOpen}
+              aria-controls="finding-filters"
+            >
+              <Filter className="h-3.5 w-3.5" aria-hidden="true" />
+              Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+            </Button>
+          </div>
+
+          <div id="finding-filters" hidden={!filtersOpen} className="space-y-3">
+          <div className="flex flex-wrap items-end gap-2">
             <div>
               <label htmlFor="fix" className="sr-only">
                 Filter by fix availability
@@ -227,6 +244,7 @@ export default function Vulnerabilities() {
                 </button>
               );
             })}
+          </div>
           </div>
         </div>
 
