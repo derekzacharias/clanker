@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
+	"github.com/bgdnvk/clanker/internal/vuln/model"
+	"github.com/bgdnvk/clanker/internal/vuln/report"
 	"github.com/bgdnvk/clanker/internal/vuln/ticketing"
 )
 
@@ -73,15 +75,17 @@ type dataset struct {
 }
 
 type hostView struct {
-	Host        string
-	Asset       assetInfo
-	ReportID    string
-	FinishedAt  time.Time
-	StartedAt   time.Time
-	Findings    []vulnRow
-	Packages    []packageRow
-	Coverage    coverageView
-	Skipped     []skippedRow
+	Host       string
+	Asset      assetInfo
+	ReportID   string
+	FinishedAt time.Time
+	StartedAt  time.Time
+	Findings   []vulnRow
+	Packages   []packageRow
+	Coverage   coverageView
+	Skipped    []skippedRow
+	// Suppressed explains findings deliberately not shown (OS-owned Python duplicates).
+	Suppressed  []string
 	Errors      []string
 	Offline     bool
 	ToolVersion string
@@ -106,9 +110,12 @@ type packageRow struct {
 	Version   string `json:"version"`
 	Ecosystem string `json:"ecosystem"`
 	Source    string `json:"source"`
-	Arch      string `json:"arch,omitempty"`
-	PURL      string `json:"purl,omitempty"`
-	Patch     string `json:"patch_status,omitempty"`
+	// Origin is the metadata path (or package file) a distribution was read from. It is what
+	// distinguishes an OS-owned Python package from a real pip dependency.
+	Origin string `json:"origin,omitempty"`
+	Arch   string `json:"arch,omitempty"`
+	PURL   string `json:"purl,omitempty"`
+	Patch  string `json:"patch_status,omitempty"`
 }
 
 type vulnRow struct {
@@ -288,7 +295,17 @@ func (s *Server) buildDataset(ctx context.Context) (*dataset, error) {
 		for _, sk := range rep.Metadata.SkippedChecks {
 			hv.Skipped = append(hv.Skipped, skippedRow{Check: sk.Check, Reason: sk.Reason})
 		}
+		// Findings that duplicate an OS-owned Python package are skipped here: the OS package
+		// manager reports that copy under its real name, and the PyPI copy would carry the
+		// wrong remediation (pip cannot upgrade a distribution package).
+		suppressedRows, reasons := suppressDistroPythonDuplicates(rep)
+		if len(reasons) > 0 {
+			hv.Suppressed = append(hv.Suppressed, reasons...)
+		}
 		for _, f := range rep.Findings {
+			if suppressedRows[f.FindingID] {
+				continue
+			}
 			row := toVulnRow(hv.Host, rep.ReportID, f)
 			if fs, ok := firstSeen[hv.Host][row.Fingerprint]; ok && !fs.IsZero() {
 				row.FirstSeen = fs.UTC().Format(time.RFC3339)
@@ -520,4 +537,41 @@ func normalizeSeverity(sev string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// suppressDistroPythonDuplicates finds findings that duplicate an OS-owned Python package.
+//
+// The stored report is mapped onto the shared model so the same rule applies here, at ingest and
+// in the collector: one definition of "the distribution owns this", three places that use it.
+func suppressDistroPythonDuplicates(rep reportDoc) (map[string]bool, []string) {
+	m := model.Report{ReportID: rep.ReportID}
+	for _, p := range rep.Inventory.Packages {
+		m.Inventory.Packages = append(m.Inventory.Packages, model.Package{
+			Name: p.Name, Version: p.Version, Ecosystem: p.Ecosystem,
+			Source: model.PackageOrigin(p.Source), Origin: p.Origin,
+		})
+	}
+	for _, f := range rep.Findings {
+		m.Findings = append(m.Findings, model.Finding{
+			FindingID: f.FindingID, Product: f.Product,
+			InstalledVersion: f.InstalledVersion, Ecosystem: f.Ecosystem,
+		})
+	}
+	_, _, reasons := report.FilterSuppressed(m)
+	suppressed := map[string]bool{}
+	if len(reasons) == 0 {
+		return suppressed, nil
+	}
+	// FilterSuppressed drops in order; walk the same order to learn which ids went.
+	kept := map[string]bool{}
+	keptFindings, _, _ := report.FilterSuppressed(m)
+	for _, f := range keptFindings {
+		kept[f.FindingID] = true
+	}
+	for _, f := range m.Findings {
+		if !kept[f.FindingID] {
+			suppressed[f.FindingID] = true
+		}
+	}
+	return suppressed, reasons
 }

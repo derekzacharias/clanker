@@ -405,6 +405,8 @@ export interface AssetDetail {
   findings: Vulnerability[];
   coverage: Coverage;
   skipped: { check: string; reason: string }[];
+  /** Findings not listed because the OS package manager owns the package. */
+  suppressed?: string[];
   errors: string[];
   policy: { fail_on?: string; fail_on_kev: boolean };
   history: RunSummary[];

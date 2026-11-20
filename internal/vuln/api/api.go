@@ -194,6 +194,9 @@ func New(opts Options) (*Server, error) {
 	// Existing deployments already hold assessments: route them into remediation work
 	// once, so the queue is not empty until the next scan. Idempotent by item id.
 	s.backfillRemediation()
+	// Reports ingested before the collector stopped reading distro-managed Python paths left
+	// findings against a package pip does not own; close those work items honestly.
+	s.sweepDistroPythonDuplicates(context.Background())
 	// Expired exceptions, retention and the notification digest: the jobs that must not
 	// depend on somebody remembering to click something.
 	s.startMaintenance()

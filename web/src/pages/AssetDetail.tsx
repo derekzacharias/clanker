@@ -22,6 +22,7 @@ export default function AssetDetail({ host }: { host: string }) {
   const findings = data?.findings ?? [];
   const history = data?.history ?? [];
   const skipped = data?.skipped ?? [];
+  const suppressed = data?.suppressed ?? [];
   const runErrors = data?.errors ?? [];
   const ecosystems = useMemo(
     () => Array.from(new Set((data?.packages ?? []).map((p) => p.ecosystem))).sort(),
@@ -246,6 +247,18 @@ export default function AssetDetail({ host }: { host: string }) {
                 <ul className="mt-1 list-disc pl-4 text-muted">
                   {(data.coverage.limitations ?? []).map((n) => (
                     <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {suppressed.length > 0 ? (
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                  Not listed separately
+                </p>
+                <ul className="mt-1 list-disc pl-4 text-muted">
+                  {suppressed.slice(0, 5).map((reason) => (
+                    <li key={reason}>{reason}</li>
                   ))}
                 </ul>
               </div>

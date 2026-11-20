@@ -96,8 +96,73 @@ func (r *Runner) Run(ctx context.Context, opts Options) (model.Inventory, error)
 		}
 		pkgs = append(pkgs, got...)
 	}
+	pkgs, dropped := dropDistroProvidedPython(pkgs)
+	if dropped > 0 {
+		// Say it out loud: this is a deliberate coverage decision, not a silent gap.
+		inv.Skipped = append(inv.Skipped, model.SkippedCheck{
+			Check: "python_packages_in_distro_paths",
+			Reason: fmt.Sprintf("%d Python distributions under the distribution-managed path are reported "+
+				"through the OS package manager instead; counting them twice produced findings against "+
+				"a package that pip does not own", dropped),
+		})
+	}
 	inv.Packages = Dedupe(pkgs)
 	return inv, nil
+}
+
+// dropDistroProvidedPython removes Python distributions that belong to the operating system.
+//
+// On Debian/Ubuntu, Python's own site.getsitepackages() includes /usr/lib/python3/dist-packages,
+// which is where dpkg installs every python3-* package. Reading it as PyPI data reports one
+// installed package twice — once truthfully from dpkg, once as a language dependency — and the
+// second copy produces a `pip install` recommendation for something pip cannot upgrade without
+// breaking the system package.
+//
+// The rule is narrow on purpose: only paths under a distribution-managed prefix, and only when
+// an OS package manager actually covered the host (so a mixed or unusual image keeps coverage).
+func dropDistroProvidedPython(pkgs []model.Package) ([]model.Package, int) {
+	distroManaged := false
+	for _, p := range pkgs {
+		switch p.Source {
+		case model.OriginDpkg, model.OriginAPK, model.OriginRPM:
+			distroManaged = true
+		}
+	}
+	if !distroManaged {
+		return pkgs, 0
+	}
+	out := make([]model.Package, 0, len(pkgs))
+	dropped := 0
+	for _, p := range pkgs {
+		if p.Ecosystem == model.EcosystemPyPI && isDistroPythonPath(p.Origin) {
+			dropped++
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, dropped
+}
+
+// isDistroPythonPath reports whether a Python metadata path belongs to the OS.
+//
+// /usr/lib/python3/dist-packages is Debian/Ubuntu's convention for distribution packages.
+// /usr/lib/python3.11/site-packages and /usr/local/... are not: those are local installs,
+// including the interpreter's own pip target, and belong to the PyPI world.
+func isDistroPythonPath(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(origin))
+	for _, prefix := range []string{"/usr/lib/python3/dist-packages/", "/usr/lib/python3.11/dist-packages/"} {
+		if strings.HasPrefix(clean, prefix) {
+			return true
+		}
+	}
+	// Any /usr/lib/python3.X/dist-packages (X varies by release).
+	if strings.HasPrefix(clean, "/usr/lib/python3.") && strings.Contains(clean, "/dist-packages/") {
+		return true
+	}
+	return false
 }
 
 // normalizePackage fills in derived fields consistently across collectors.

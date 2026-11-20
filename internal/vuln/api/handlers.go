@@ -317,9 +317,11 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 		"findings":           findings,
 		"coverage":           hv.Coverage,
 		"skipped":            skipped,
-		"errors":             errorsList,
-		"policy":             hv.Policy,
-		"history":            history,
+		// Findings deliberately not listed because the OS package manager owns the package.
+		"suppressed": suppressedList(hv.Suppressed),
+		"errors":     errorsList,
+		"policy":     hv.Policy,
+		"history":    history,
 	})
 }
 
@@ -1410,3 +1412,11 @@ func firstNonEmpty(vals ...string) string {
 }
 
 func runtimePlatform() string { return runtime.GOOS }
+
+// suppressedList keeps the JSON shape stable (an array, never null).
+func suppressedList(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}

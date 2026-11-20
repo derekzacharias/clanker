@@ -250,6 +250,15 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	if started.IsZero() || started.After(finished) {
 		started = finished
 	}
+	// Drop findings that duplicate an OS-owned Python package before anything derives work from
+	// them: the queue must not carry a `pip install` instruction for a package apt owns.
+	kept, suppressed, reasons := report.FilterSuppressed(rep)
+	if suppressed > 0 {
+		rep.Findings = kept
+		for _, reason := range reasons {
+			s.log.Info("finding suppressed as a distribution-managed package", "agent", ag.ID, "reason", reason)
+		}
+	}
 	payload, err := report.MarshalJSON(rep)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not encode the report")

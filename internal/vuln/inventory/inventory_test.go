@@ -248,3 +248,71 @@ func copyFile(t *testing.T, src, dst string) {
 		t.Fatal(err)
 	}
 }
+
+// The bug this pins: on Ubuntu, Python's site.getsitepackages() lists
+// /usr/lib/python3/dist-packages, so every python3-* package was inventoried twice — once from
+// dpkg and once as a PyPI dependency. The duplicate produced findings (and a remediation
+// ticket) telling someone to `pip install` a package that apt owns.
+func TestDistroManagedPythonPackagesAreNotCountedTwice(t *testing.T) {
+	pkgs := []model.Package{
+		{Name: "python3-jwt", Version: "2.3.0-1ubuntu0.6", Ecosystem: "Ubuntu:22.04:LTS",
+			Source: model.OriginDpkg, Origin: "pyjwt"},
+		{Name: "PyJWT", Version: "2.3.0", Ecosystem: model.EcosystemPyPI, Source: model.OriginPip,
+			Origin: "/usr/lib/python3/dist-packages/PyJWT-2.3.0.egg-info"},
+		{Name: "Babel", Version: "2.8.0", Ecosystem: model.EcosystemPyPI, Source: model.OriginPip,
+			Origin: "/usr/lib/python3/dist-packages/Babel-2.8.0.egg-info"},
+		// A real application dependency in a virtualenv must survive.
+		{Name: "requests", Version: "2.32.4", Ecosystem: model.EcosystemPyPI, Source: model.OriginPip,
+			Origin: "/opt/app/.venv/lib/python3.11/site-packages/requests-2.32.4.dist-info"},
+	}
+	kept, dropped := dropDistroProvidedPython(pkgs)
+	if dropped != 2 {
+		t.Fatalf("dropped = %d, want 2", dropped)
+	}
+	var names []string
+	for _, p := range kept {
+		names = append(names, p.Name)
+	}
+	if len(kept) != 2 {
+		t.Fatalf("kept = %v, want the dpkg package and the virtualenv package", names)
+	}
+	found := map[string]bool{}
+	for _, n := range names {
+		found[n] = true
+	}
+	if !found["python3-jwt"] || !found["requests"] {
+		t.Fatalf("kept = %v", names)
+	}
+	if found["PyJWT"] {
+		t.Fatal("the distro-provided copy survived as a PyPI package")
+	}
+}
+
+// Without an OS package manager there is nothing to defer to, so the PyPI data is all we have.
+func TestDistroPythonPathIsKeptWhenNoOSManagerCoveredTheHost(t *testing.T) {
+	pkgs := []model.Package{{
+		Name: "PyJWT", Version: "2.3.0", Ecosystem: model.EcosystemPyPI, Source: model.OriginPip,
+		Origin: "/usr/lib/python3/dist-packages/PyJWT-2.3.0.egg-info",
+	}}
+	kept, dropped := dropDistroProvidedPython(pkgs)
+	if dropped != 0 || len(kept) != 1 {
+		t.Fatalf("dropped = %d, kept = %d", dropped, len(kept))
+	}
+}
+
+// The prefix test must not swallow local installs that merely live under /usr/local.
+func TestIsDistroPythonPath(t *testing.T) {
+	cases := map[string]bool{
+		"/usr/lib/python3/dist-packages/PyJWT-2.3.0.egg-info":       true,
+		"/usr/lib/python3.11/dist-packages/foo-1.0.dist-info":       true,
+		"/usr/lib/python3.11/site-packages/foo-1.0.dist-info":       false,
+		"/usr/local/lib/python3.11/dist-packages/foo-1.0.dist-info": false,
+		"/opt/app/.venv/lib/python3.11/site-packages/foo.dist-info": false,
+		"": false,
+	}
+	for path, want := range cases {
+		if got := isDistroPythonPath(path); got != want {
+			t.Fatalf("isDistroPythonPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
