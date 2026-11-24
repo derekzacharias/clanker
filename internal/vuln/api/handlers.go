@@ -1420,3 +1420,35 @@ func suppressedList(in []string) []string {
 	}
 	return in
 }
+
+// coverageNotices explains why an asset's result is thin, instead of leaving a zero to be
+// misread as "nothing to fix".
+//
+// The Windows case is the important one today: the inventory reads the classic Uninstall
+// registry, and no Windows advisory source is ingested, so a Windows host will show few packages
+// and zero findings no matter how it is patched.
+func coverageNotices(hv *hostView) []string {
+	var notices []string
+	windowsPackages, osPackages := 0, 0
+	for _, p := range hv.Packages {
+		switch p.Ecosystem {
+		case model.EcosystemWindows:
+			windowsPackages++
+		}
+		if strings.Contains(strings.ToLower(p.Ecosystem)+"", ":") {
+			osPackages++
+		}
+	}
+	if windowsPackages > 0 {
+		notices = append(notices,
+			"Windows coverage is limited: the inventory reads installed desktop applications from the registry "+
+				"("+strconv.Itoa(windowsPackages)+" found). Windows Update patch level, MSIX/Store applications and "+
+				"Windows security advisories are not collected, so zero findings here means \"not assessed\", not "+
+				"\"fully patched\".")
+	}
+	if osPackages > 0 && windowsPackages > 0 {
+		notices = append(notices, "Packages from different operating systems are counted together on this asset; "+
+			"interpret the totals accordingly.")
+	}
+	return notices
+}

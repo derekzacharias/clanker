@@ -23,6 +23,7 @@ export default function AssetDetail({ host }: { host: string }) {
   const history = data?.history ?? [];
   const skipped = data?.skipped ?? [];
   const suppressed = data?.suppressed ?? [];
+  const coverageNotices = data?.coverage_notices ?? [];
   const runErrors = data?.errors ?? [];
   const ecosystems = useMemo(
     () => Array.from(new Set((data?.packages ?? []).map((p) => p.ecosystem))).sort(),
@@ -246,6 +247,16 @@ export default function AssetDetail({ host }: { host: string }) {
                 <p className="text-xs font-semibold uppercase tracking-wide text-muted">Limitations</p>
                 <ul className="mt-1 list-disc pl-4 text-muted">
                   {(data.coverage.limitations ?? []).map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {coverageNotices.length > 0 ? (
+              <div className="rounded-md border border-high/30 bg-high-soft p-2">
+                <p className="text-xs font-semibold text-high">What this assessment does not cover</p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-high/90">
+                  {coverageNotices.map((n) => (
                     <li key={n}>{n}</li>
                   ))}
                 </ul>

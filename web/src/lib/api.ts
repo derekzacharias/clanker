@@ -407,6 +407,8 @@ export interface AssetDetail {
   skipped: { check: string; reason: string }[];
   /** Findings not listed because the OS package manager owns the package. */
   suppressed?: string[];
+  /** Why this asset's numbers are thin (e.g. Windows coverage limits). */
+  coverage_notices?: string[];
   errors: string[];
   policy: { fail_on?: string; fail_on_kev: boolean };
   history: RunSummary[];
@@ -794,6 +796,47 @@ export const api = {
   updateFeeds: () => request<Job>("/api/feeds/update", { method: "POST" }),
   agents: () => request<AgentsResponse>("/api/agents"),
   // Remediation orchestration
+  // AI providers, credentials and issue automation. Credentials are write-only from the
+  // browser's point of view: the API returns a mask, never the key.
+  aiSettings: () => request<AIState>("/api/settings/ai"),
+  saveAISettings: (body: Partial<Pick<AISettings, "provider" | "model" | "endpoint" | "api_version" | "allow_preview">>) =>
+    request<{ settings: AISettings; credential: AICredential }>("/api/settings/ai", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  saveAICredential: (provider: string, api_key: string) =>
+    request<{ credential: AICredential }>("/api/settings/ai/credential", {
+      method: "PUT",
+      body: JSON.stringify({ provider, api_key }),
+    }),
+  deleteAICredential: (provider: string) =>
+    request<{ credential: AICredential }>(`/api/settings/ai/credential?provider=${encodeURIComponent(provider)}`, {
+      method: "DELETE",
+    }),
+  testAI: () =>
+    request<{ connected: boolean; detail: string; settings: AISettings }>("/api/settings/ai/test", { method: "POST" }),
+  aiModels: (provider: string, refresh = false) =>
+    request<{ provider: string; models: AIModel[]; total: number; stale: boolean; source: string; warning?: string; fetched_at?: string }>(
+      `/api/settings/ai/models?provider=${encodeURIComponent(provider)}${refresh ? "&refresh=1" : ""}`,
+    ),
+  automation: () =>
+    request<{ config: AutomationConfig; modes: AutomationMode[]; store_dir: string; gitlab_project: number }>(
+      "/api/settings/automation",
+    ),
+  saveAutomation: (config: AutomationConfig) =>
+    request<{ config: AutomationConfig }>("/api/settings/automation", { method: "PUT", body: JSON.stringify(config) }),
+  previewIssue: (finding_id: string) =>
+    request<AutomationResult>("/api/settings/automation/preview", {
+      method: "POST",
+      body: JSON.stringify({ finding_id }),
+    }),
+  runAutomation: (mode: AutomationMode, confirm: boolean) =>
+    request<{ mode: AutomationMode; results: AutomationResult[]; created: number; total: number }>(
+      "/api/settings/automation/run",
+      { method: "POST", body: JSON.stringify({ mode, confirm }) },
+    ),
+  automationAudit: (limit = 100) =>
+    request<{ entries: AutomationAuditEntry[]; total: number }>(`/api/settings/automation/audit?limit=${limit}`),
   remediationSummary: () => request<RemediationSummary>("/api/remediation/summary"),
   remediation: (params: { team?: string; state?: string; owner?: string; asset?: string; overdue?: boolean } = {}) =>
     request<{ items: RemediationItem[]; total: number }>(`/api/remediation${qs(params)}`),
@@ -1246,4 +1289,144 @@ export interface RemediationSummary {
   teams: string[];
   generated: string;
   automation: { enabled: boolean; reason: string };
+}
+
+// ---------------------------------------------------------------- AI & automation ---
+
+export interface AIProvider {
+  id: string;
+  label: string;
+  auth: string;
+  implemented: boolean;
+  needs_endpoint: boolean;
+  needs_api_version: boolean;
+  needs_deployment: boolean;
+  default_model?: string;
+  key_hint?: string;
+  docs_url?: string;
+  notes?: string;
+}
+
+export interface AIModel {
+  id: string;
+  name: string;
+  provider: string;
+  context_window?: number;
+  supports_tools?: boolean;
+  supports_json?: boolean;
+  pricing_hint?: string;
+  status: "production" | "preview" | "retired" | "inaccessible" | string;
+  details?: string;
+}
+
+export interface AISettings {
+  provider: string;
+  model: string;
+  endpoint?: string;
+  api_version?: string;
+  allow_preview: boolean;
+  last_test_ok?: boolean;
+  last_test_detail?: string;
+  last_test_at?: string;
+  updated_at?: string;
+}
+
+export interface AICredential {
+  provider: string;
+  configured: boolean;
+  mask?: string;
+  updated_at?: string;
+  source?: string;
+}
+
+export interface AICatalog {
+  models: AIModel[];
+  stale: boolean;
+  fetched_at?: string;
+  warning?: string;
+  total?: number;
+}
+
+export interface AIState {
+  providers: AIProvider[];
+  settings: AISettings;
+  credential: AICredential;
+  catalog: AICatalog;
+  store_dir: string;
+}
+
+export type AutomationMode = "manual" | "assisted" | "auto";
+
+export interface AutomationConfig {
+  mode: AutomationMode;
+  min_severity: string;
+  max_per_run: number;
+  labels?: string[];
+  assignee?: string;
+  reopen_closed: boolean;
+  auto_sync: boolean;
+  use_ai: boolean;
+  project_id?: number;
+  updated_at?: string;
+}
+
+export interface IssueCommand {
+  shell: string;
+  text: string;
+  privileges: string;
+  validation: string;
+  risk?: string;
+}
+
+export interface IssueDraft {
+  title: string;
+  summary: string;
+  asset: string;
+  cve: string;
+  severity: string;
+  evidence: string[];
+  remediation: string[];
+  commands: IssueCommand[];
+  references: string[];
+  labels: string[];
+  assignee?: string;
+  requires_review: boolean;
+  review_reasons?: string[];
+  generator: string;
+  provider?: string;
+  model?: string;
+  generated_at: string;
+}
+
+export interface AutomationResult {
+  finding_key: string;
+  cve: string;
+  asset: string;
+  product: string;
+  severity: string;
+  action: "created" | "proposed" | "needs_review" | "duplicate" | "failed" | "unavailable" | "preview";
+  reason?: string;
+  issue_iid?: number;
+  issue_url?: string;
+  title?: string;
+  body?: string;
+  draft?: IssueDraft;
+}
+
+export interface AutomationAuditEntry {
+  at: string;
+  action: string;
+  mode: string;
+  finding_key?: string;
+  cve?: string;
+  asset?: string;
+  product?: string;
+  severity?: string;
+  generator?: string;
+  provider?: string;
+  model?: string;
+  issue_iid?: number;
+  issue_url?: string;
+  reason?: string;
+  actor?: string;
 }
