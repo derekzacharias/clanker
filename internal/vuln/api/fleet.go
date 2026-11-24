@@ -71,6 +71,14 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 			"enrollment token is required; generate one in Settings → Agents")
 		return
 	}
+	if looksLikePlaceholder(got) {
+		s.enrollLimiter.fail(ip, now)
+		s.log.Warn("agent enrollment rejected: placeholder instead of a token", "remote", ip)
+		writeError(w, http.StatusUnauthorized, "unauthorized",
+			"that is the placeholder from the install command ("+got+"), not a real token — "+
+				"mint one in Settings → Endpoint agents → New enrollment token and use the command it shows")
+		return
+	}
 	var body struct {
 		Host    string `json:"host"`
 		OS      string `json:"os"`
@@ -104,7 +112,11 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 			msg = "enrollment token has already been used; generate a new one"
 		case errors.Is(err, fleet.ErrEnrollTokenInvalid):
 			code = http.StatusUnauthorized
-			msg = "enrollment token is not valid; generate one in Settings → Agents"
+			// The install command ships with a visible placeholder, and pasting it is the most
+			// common way to reach this error. Say which mistake it probably was instead of
+			// making the operator compare strings.
+			msg = "enrollment token is not valid; generate one in Settings → Agents — if you pasted " +
+				"something like <enroll-token>, that is the placeholder from the install command, not a token"
 		default:
 			code = http.StatusInternalServerError
 			msg = err.Error()
@@ -673,4 +685,23 @@ func submissionSequence(r *http.Request) (int64, error) {
 		return 0, fmt.Errorf("X-Guard-Sequence must be a positive integer")
 	}
 	return n, nil
+}
+
+// looksLikePlaceholder reports whether an enrollment token is the literal example from the
+// install instructions. Catching it here turns a bare "invalid token" into a sentence that names
+// the mistake, which is the difference between a five-minute fix and a support thread.
+func looksLikePlaceholder(token string) bool {
+	t := strings.ToLower(strings.TrimSpace(token))
+	if t == "" {
+		return false
+	}
+	if strings.HasPrefix(t, "<") && strings.HasSuffix(t, ">") {
+		return true
+	}
+	for _, marker := range []string{"enroll-token", "your-token", "insert-token", "paste-token", "changeme"} {
+		if t == marker || t == "<"+marker+">" {
+			return true
+		}
+	}
+	return false
 }

@@ -969,3 +969,20 @@ func TestWindowsInstallCommandRunsUnderARestrictedPolicy(t *testing.T) {
 		t.Fatalf("windows command changes policy or executes from a pipe:\n%s", win)
 	}
 }
+
+// The install command contains a visible placeholder. Pasting it is the easiest way to fail
+// enrollment, so the refusal names that mistake.
+func TestEnrollmentRejectionNamesThePlaceholderTrap(t *testing.T) {
+	srv := fleetServer(t)
+	body := `{"host":"win01"}`
+	rec := request(t, srv.Handler(), "POST", "/api/agents/enroll", body, map[string]string{
+		"Content-Type":         "application/json",
+		"X-Guard-Enroll-Token": "<enroll-token>",
+	})
+	if rec.Code == 200 {
+		t.Fatalf("placeholder accepted: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "placeholder from the install command") {
+		t.Fatalf("error does not name the likely mistake: %s", rec.Body.String())
+	}
+}
