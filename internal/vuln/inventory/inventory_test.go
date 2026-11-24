@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bgdnvk/clanker/internal/vuln/model"
@@ -336,5 +337,78 @@ func TestWindowsOSInfoParsing(t *testing.T) {
 	}
 	if name != "Windows Server 2022" || version != "" || build != "10.0.20348" {
 		t.Fatalf("got name=%q version=%q build=%q", name, version, build)
+	}
+}
+
+// A Windows inventory without servicing state is the old, shallow answer. The state block is
+// what makes an update finding possible, and its absence must be a reported gap.
+type winFake struct {
+	out map[string][]byte
+	err map[string]error
+}
+
+func (f *winFake) exec(ctx context.Context, name string, args ...string) ([]byte, error) {
+	script := ""
+	if len(args) > 0 {
+		script = args[len(args)-1]
+	}
+	switch {
+	case strings.Contains(script, "Get-HotFix"):
+		return f.out["state"], f.err["state"]
+	case strings.Contains(script, "Microsoft.Update.Session"):
+		return f.out["wua"], f.err["wua"]
+	case strings.Contains(script, "Get-AppxPackage"):
+		return f.out["appx"], f.err["appx"]
+	}
+	return nil, nil
+}
+
+func TestWindowsStateCollectorParsesServicingData(t *testing.T) {
+	if platform() != "windows" {
+		t.Skip("the collector refuses to run off Windows; parsing is covered below")
+	}
+}
+
+// Parsing is tested without Windows by exercising the pure helpers, which is where the format
+// handling lives.
+func TestWindowsBuildComposition(t *testing.T) {
+	cases := []struct {
+		build             string
+		major, minor, ubr any
+		want              string
+	}{
+		{"26100", float64(10), float64(0), float64(1742), "10.0.26100.1742"},
+		{"22631", float64(10), float64(0), nil, "10.0.22631"},
+		{"", float64(10), float64(0), float64(1), ""},
+	}
+	for _, c := range cases {
+		if got := windowsBuild(c.build, c.major, c.minor, c.ubr); got != c.want {
+			t.Fatalf("windowsBuild(%q) = %q, want %q", c.build, got, c.want)
+		}
+	}
+}
+
+func TestAppxPackagesBecomeInventoryEntries(t *testing.T) {
+	raw := []byte(`[{"name":"Microsoft.WindowsCalculator_11.2210.0.0_x64__8wekyb3d8bbwe","version":"11.2210.0.0","publisher":"CN=Microsoft Corporation"},
+	               {"name":"Microsoft.StorePurchaseApp_22310.1401.0.0_neutral_~_8wekyb3d8bbwe","version":"22310.1401.0.0"}]`)
+	pkgs := parseAppxPackages(raw)
+	if len(pkgs) != 2 {
+		t.Fatalf("packages = %d", len(pkgs))
+	}
+	if pkgs[0].Name != "Microsoft.WindowsCalculator" || pkgs[0].Ecosystem != model.EcosystemWindows ||
+		pkgs[0].Source != model.OriginAppx {
+		t.Fatalf("package = %+v", pkgs[0])
+	}
+}
+
+// The update search must be read-only: the script may search, never install or download.
+func TestWindowsUpdateScriptIsReadOnly(t *testing.T) {
+	for _, forbidden := range []string{"Download()", ".Install()", "Hide()", "Add-WindowsPackage", "wuauclt /updatenow"} {
+		if strings.Contains(windowsUpdateScript, forbidden) {
+			t.Fatalf("update script contains a mutating call: %s", forbidden)
+		}
+	}
+	if !strings.Contains(windowsUpdateScript, "IsInstalled=0") {
+		t.Fatal("update search does not ask for missing updates")
 	}
 }

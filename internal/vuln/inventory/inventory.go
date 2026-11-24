@@ -66,6 +66,14 @@ type Collector interface {
 // ErrUnavailable marks a collector that cannot run on this host.
 var ErrUnavailable = errors.New("collector unavailable")
 
+// StateCollector is a collector that also reports platform servicing state (Windows today):
+// identity, installed updates, applicable missing updates, pending reboot. It is separate from
+// Collector because state is not a package list, and folding it into []Package would lose the
+// difference between "no update is missing" and "the update service was not asked".
+type StateCollector interface {
+	CollectState(ctx context.Context, opts Options) (model.WindowsState, error)
+}
+
 // Runner executes collectors and assembles an inventory.
 type Runner struct {
 	Collectors []Collector
@@ -76,7 +84,10 @@ func (r *Runner) Run(ctx context.Context, opts Options) (model.Inventory, error)
 	asset, assetWarnings := DetectAsset(ctx, opts)
 	inv := model.Inventory{Asset: asset, CollectedAt: time.Now().UTC(), Warnings: assetWarnings}
 
-	var pkgs []model.Package
+	var (
+		pkgs    []model.Package
+		windows *model.WindowsState
+	)
 	for _, c := range r.Collectors {
 		if c == nil {
 			continue
@@ -95,7 +106,16 @@ func (r *Runner) Run(ctx context.Context, opts Options) (model.Inventory, error)
 			normalizePackage(&got[i])
 		}
 		pkgs = append(pkgs, got...)
+		if sc, ok := c.(StateCollector); ok {
+			state, err := sc.CollectState(ctx, opts)
+			if err != nil {
+				inv.Warnings = append(inv.Warnings, c.Name()+" state: "+err.Error())
+				continue
+			}
+			windows = &state
+		}
 	}
+	inv.Windows = windows
 	pkgs, dropped := dropDistroProvidedPython(pkgs)
 	if dropped > 0 {
 		// Say it out loud: this is a deliberate coverage decision, not a silent gap.
@@ -278,6 +298,9 @@ func DefaultCollectors() []Collector {
 	case "windows":
 		return []Collector{
 			&WindowsRegistryCollector{},
+			// Servicing state, Windows Update applicability and MSIX/Store packages. This is
+			// what turns "12 desktop installers" into a Windows assessment.
+			&WindowsStateCollector{},
 			&PipCollector{},
 			&NpmCollector{},
 		}

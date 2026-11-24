@@ -108,6 +108,7 @@ const (
 	OriginCargo    PackageOrigin = "cargo"
 	OriginGem      PackageOrigin = "gem"
 	OriginAPK      PackageOrigin = "apk"
+	OriginAppx     PackageOrigin = "appx"
 	OriginDPKGInfo PackageOrigin = "dpkg_query"
 	OriginManifest PackageOrigin = "manifest"
 )
@@ -163,6 +164,58 @@ type Inventory struct {
 	CollectedAt time.Time      `json:"collected_at"`
 	Warnings    []string       `json:"warnings,omitempty"`
 	Skipped     []SkippedCheck `json:"skipped_checks,omitempty"`
+	// Windows is present only on Windows endpoints. It is an optional block so reports
+	// written by older agents stay valid, and a Windows report without it is treated as
+	// "not assessed" rather than "nothing to fix".
+	Windows *WindowsState `json:"windows,omitempty"`
+}
+
+// WindowsState is what only a Windows endpoint can report: the servicing identity, the
+// updates it already has, the updates Windows itself says are applicable and missing, and
+// the environment facts that change how a fix behaves (pending reboot, runtimes).
+type WindowsState struct {
+	// Product / DisplayVersion / Build come from the registry identity.
+	Product        string `json:"product,omitempty"`
+	DisplayVersion string `json:"display_version,omitempty"`
+	Build          string `json:"build,omitempty"`
+	Edition        string `json:"edition,omitempty"`
+	// InstalledUpdates are KB identifiers already present (Get-HotFix / WU history).
+	InstalledUpdates []string `json:"installed_updates,omitempty"`
+	// MissingUpdates is the Windows Update Agent's own answer to "what is applicable and
+	// not installed". It is the evidence a Windows finding rests on.
+	MissingUpdates []WindowsUpdate `json:"missing_updates,omitempty"`
+	// DotNet lists installed .NET Framework / runtime versions.
+	DotNet []string `json:"dotnet,omitempty"`
+	// PendingReboot marks a host whose servicing state is not final until it reboots.
+	PendingReboot  bool     `json:"pending_reboot,omitempty"`
+	PendingReasons []string `json:"pending_reboot_reasons,omitempty"`
+	// WUAStatus is "ok", "unavailable", "running", or "error: <reason>". Anything but "ok"
+	// means update applicability was not assessed.
+	WUAStatus string `json:"wua_status,omitempty"`
+	// CollectorStatus records per-source outcomes so partial coverage is visible.
+	CollectorStatus map[string]string `json:"collector_status,omitempty"`
+}
+
+// WindowsUpdate is one applicable, not-installed update as the Windows Update Agent
+// describes it. Only read-only details are collected: nothing is downloaded or installed.
+type WindowsUpdate struct {
+	Title          string   `json:"title"`
+	KBs            []string `json:"kb_ids,omitempty"`
+	MsrcSeverity   string   `json:"msrc_severity,omitempty"`
+	Classification []string `json:"classifications,omitempty"`
+	RebootBehavior string   `json:"reboot_behavior,omitempty"`
+	Downloaded     bool     `json:"downloaded,omitempty"`
+	SupportURL     string   `json:"support_url,omitempty"`
+}
+
+// IsSecurityUpdate reports whether the update is classified as a security update.
+func (u WindowsUpdate) IsSecurityUpdate() bool {
+	for _, c := range u.Classification {
+		if strings.Contains(strings.ToLower(c), "security") {
+			return true
+		}
+	}
+	return false
 }
 
 // SkippedCheck documents a capability that could not run (missing tool,

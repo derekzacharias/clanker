@@ -10,6 +10,7 @@
 package main
 
 import (
+	"runtime"
 	"context"
 	"encoding/json"
 	"flag"
@@ -198,6 +199,9 @@ func cmdFeeds(args []string) int {
 	case "update":
 		fs := flag.NewFlagSet("feeds update", flag.ContinueOnError)
 		withOSV := fs.Bool("with-osv", false, "also cache OSV advisories for this host")
+		withMSRC := fs.Bool("with-msrc", runtime.GOOS == "windows",
+			"also import Microsoft Security Update Guide advisories (default on Windows)")
+		msrcMonths := fs.Int("msrc-months", 6, "how many monthly Microsoft advisories to import")
 		cachePath := fs.String("cache", "", "intelligence cache path")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 3
@@ -205,6 +209,12 @@ func cmdFeeds(args []string) int {
 		if _, err := scan.UpdateFeeds(context.Background(), *cachePath, *withOSV, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "error: "+err.Error())
 			return 4
+		}
+		if *withMSRC {
+			if err := scan.SyncMSRC(context.Background(), *cachePath, *msrcMonths, os.Stderr); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: Microsoft advisories not imported: "+err.Error())
+				return 4
+			}
 		}
 		return 0
 	case "status":

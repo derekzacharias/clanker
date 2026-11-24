@@ -20,6 +20,9 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/model"
 	"github.com/bgdnvk/clanker/internal/vuln/netscan"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
+	"log/slog"
+
+	"github.com/bgdnvk/clanker/internal/vuln/msrc"
 )
 
 // Options controls a local assessment run.
@@ -220,6 +223,20 @@ func finishWith(ctx context.Context, store *intel.Store, opts Options, started t
 		Now:                opts.Now,
 	}
 	res, assessErr := engine.Assess(ctx, in.Inventory)
+
+	// Windows correlation runs alongside the OSV-based assessment: Windows updates are decided
+	// by what the endpoint's own update service reports, then mapped to CVEs via Microsoft's
+	// advisories. It appends findings and, just as importantly, coverage notes.
+	if in.Inventory.Windows != nil {
+		win := &assess.WindowsAssessor{DB: store.DB(), Now: opts.Now}
+		winRes, winErr := win.Assess(ctx, in.Inventory, in.Inventory.Asset.Hostname)
+		if winErr != nil {
+			res.Stats.Errors = append(res.Stats.Errors, "windows assessment: "+winErr.Error())
+		} else {
+			res.Findings = append(res.Findings, winRes.Findings...)
+			res.Stats.Errors = append(res.Stats.Errors, winRes.Coverage...)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, fmt.Errorf("assessment cancelled: %w", err)
 	}
@@ -616,6 +633,9 @@ func FeedStatus(ctx context.Context, cachePath string, w io.Writer) error {
 	}
 	defer store.Close()
 
+	// Microsoft advisories are their own source with their own freshness.
+	MSRCStatus(cachePath, w)
+
 	states, err := FeedStates(ctx, store)
 	if err != nil {
 		return err
@@ -809,4 +829,58 @@ func renderJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// SyncMSRC imports Microsoft's monthly security advisories into the cache.
+//
+// It is separate from UpdateFeeds so a Microsoft outage cannot block KEV/EPSS updates, and so
+// the operator can see which source failed.
+func SyncMSRC(ctx context.Context, cachePath string, months int, w io.Writer) error {
+	if cachePath == "" {
+		cachePath = DefaultCachePath()
+	}
+	store, err := intel.OpenStore(cachePath)
+	if err != nil {
+		return fmt.Errorf("open intelligence cache: %w", err)
+	}
+	defer store.Close()
+	state, err := msrc.Sync(ctx, store.DB(), msrc.SyncOptions{Months: months, Log: slog.Default()})
+	if err != nil {
+		return err
+	}
+	if w != nil {
+		fmt.Fprintf(w, "microsoft advisories: %d documents, %d CVEs, %d fixes (%d of %d monthly bundles)\n",
+			state.Documents, state.CVE, state.Fixes, state.Documents, state.Available)
+		if len(state.Skipped) > 0 {
+			fmt.Fprintf(w, "  skipped %d older bundles: %s\n", len(state.Skipped), strings.Join(state.Skipped, ", "))
+		}
+	}
+	return nil
+}
+
+// MSRCStatus reports the last Microsoft advisory sync, for `feeds status`.
+func MSRCStatus(cachePath string, w io.Writer) {
+	if cachePath == "" {
+		cachePath = DefaultCachePath()
+	}
+	store, err := intel.OpenStore(cachePath)
+	if err != nil {
+		fmt.Fprintf(w, "microsoft advisories: unavailable (%v)\n", err)
+		return
+	}
+	defer store.Close()
+	if err := msrc.EnsureSchema(store.DB()); err != nil {
+		fmt.Fprintf(w, "microsoft advisories: unavailable (%v)\n", err)
+		return
+	}
+	state, ok := msrc.LastSync(store.DB())
+	if !ok {
+		fmt.Fprintln(w, "microsoft advisories: never imported")
+		return
+	}
+	text, fresh := msrc.DescribeSyncText(state, time.Now)
+	fmt.Fprintln(w, text)
+	if !fresh {
+		fmt.Fprintln(w, "  warning: Windows update findings need current Microsoft advisories; run feeds update --with-msrc")
+	}
 }
