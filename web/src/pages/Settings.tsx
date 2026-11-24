@@ -6,6 +6,8 @@ import { useAsync } from "../lib/useApi";
 import { useQueryParam } from "../lib/router";
 import Improvement from "./Improvement";
 import { GitLabSettings } from "../components/GitLabSettings";
+import { AISettings } from "../components/AISettings";
+import { IssueAutomation } from "../components/IssueAutomation";
 import { AuditLog } from "../components/AuditLog";
 import { AccessPanel } from "../components/AccessPanel";
 import { Collapsible } from "../components/ui/Collapsible";
@@ -21,7 +23,7 @@ import { Switch } from "../components/ui/Switch";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 
-const TABS = ["general", "intelligence", "agents", "integrations", "improvement", "access", "audit"] as const;
+const TABS = ["general", "intelligence", "agents", "integrations", "ai", "automation", "improvement", "access", "audit"] as const;
 
 export default function Settings() {
   const tabParam = useQueryParam("tab");
@@ -43,6 +45,8 @@ export default function Settings() {
             ["intelligence", "Intelligence"],
             ["agents", "Endpoint agents"],
             ["integrations", "Integrations"],
+            ["ai", "AI & Models"],
+            ["automation", "Issue automation"],
             ["improvement", "Continuous improvement"],
             ["access", "Access"],
             ["audit", "Audit log"],
@@ -80,6 +84,14 @@ export default function Settings() {
               <GitLabSettings />
             </CardBody>
           </Card>
+        </Tabs.Content>
+
+        <Tabs.Content value="ai">
+          <AISettings />
+        </Tabs.Content>
+
+        <Tabs.Content value="automation">
+          <IssueAutomation />
         </Tabs.Content>
 
         <Tabs.Content value="audit">
@@ -795,7 +807,16 @@ function agentStatus(agent: EnrolledAgent) {
   // "Online" means reachable: the agent is holding a request and can be asked to
   // scan right now. An endpoint with no watcher is unreachable and says so.
   if (agent.online) return <Badge className="border-low/30 bg-low-soft text-low">online</Badge>;
-  return <Badge className="border-border bg-surface-2 text-muted">offline</Badge>;
+  // Offline is honest but unhelpful on its own: the common cause is a scan-only install where
+  // nobody is running the watcher, and that is fixable in one command.
+  return (
+    <span
+      className="inline-flex"
+      title="Not reachable: the agent is not holding a watch request. Start it with `clanker-guard-agent watch`, or reinstall the service so it starts at logon."
+    >
+      <Badge className="border-border bg-surface-2 text-muted">offline</Badge>
+    </span>
+  );
 }
 
 /** relativeSeconds renders the server's seconds_since_seen without clock math in the browser. */

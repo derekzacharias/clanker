@@ -191,9 +191,15 @@ func TestWindowsInstallFallsBackToStartupShortcut(t *testing.T) {
 		ConfigPath: `C:\Users\student\AppData\Roaming\clanker-guard\agent.json`,
 		goos:       "windows",
 		startupDir: dir,
-		Run: func(ctx context.Context, name string, args ...string) (string, error) {
+		Run:        nil, // filled below so the test can record both calls
+	}
+	var calls []string
+	m.Run = func(ctx context.Context, name string, args ...string) (string, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if name == "schtasks" {
 			return "", errors.New("schtasks: exit status 1 (ERROR: Access is denied.)")
-		},
+		}
+		return "", nil
 	}
 	st, err := m.installScheduledTask(context.Background())
 	if err != nil {
@@ -201,6 +207,20 @@ func TestWindowsInstallFallsBackToStartupShortcut(t *testing.T) {
 	}
 	if !st.Installed || !st.Enabled {
 		t.Fatalf("status = %+v", st)
+	}
+	// The watcher has to be started now, not only at the next logon, or the endpoint shows
+	// offline until someone signs out and back in.
+	started := false
+	for _, c := range calls {
+		if strings.HasPrefix(c, "cmd /c start") && strings.Contains(c, "watch --config") {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatalf("watcher was not started after the fallback install; calls: %v", calls)
+	}
+	if !st.Running {
+		t.Fatalf("status should report it running: %+v", st)
 	}
 	if !strings.Contains(st.Detail, "Startup shortcut") {
 		t.Fatalf("detail does not explain the fallback: %q", st.Detail)

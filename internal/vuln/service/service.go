@@ -390,8 +390,13 @@ func (m *Manager) installScheduledTask(ctx context.Context) (Status, error) {
 		// Startup shortcut reaches the same outcome with no privileges at all, so the endpoint
 		// still comes back after a logon instead of silently staying offline.
 		if startupErr := m.installStartupShortcut(); startupErr == nil {
-			detail := "installed as a Startup shortcut; the scheduled task was refused (" + shortErr(err) + ")"
-			return Status{Platform: m.goos, Installed: true, Enabled: true, Path: m.startupPath(), Detail: detail}, nil
+			// Starting it now matters as much as installing it: an endpoint that is reachable
+			// today should show online today, not after the next logon. `cmd /c start` detaches,
+			// so the installer is not blocked by the watcher's lifetime.
+			_, _ = m.Run(ctx, "cmd", "/c", "start", "", m.ExePath, "watch", "--config", m.ConfigPath)
+			detail := "installed as a Startup shortcut and started; the scheduled task was refused (" + shortErr(err) + ")"
+			return Status{Platform: m.goos, Installed: true, Enabled: true, Running: true,
+				Path: m.startupPath(), Detail: detail}, nil
 		}
 		return Status{Platform: m.goos}, err
 	}
