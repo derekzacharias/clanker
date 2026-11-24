@@ -647,9 +647,16 @@ func (s *Server) enrollCommands(r *http.Request, enrollToken string, extra ...st
 	return map[string]string{
 		"linux": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
 		"macos": fmt.Sprintf("curl -fsSL %s/install-agent.sh | bash -s -- %s%s", base, args, shellExtra),
+		// Windows: a downloaded .ps1 cannot be run directly on a default desktop install, where
+		// the execution policy is Restricted — "& script.ps1" fails with UnauthorizedAccess. The
+		// script is fetched to temp, unblocked (needed when the policy is RemoteSigned), and run
+		// in a child PowerShell with -ExecutionPolicy Bypass for that one invocation. Nothing is
+		// changed on the machine: no policy is set, no file is left executable.
 		"windows": fmt.Sprintf(
-			`iwr %s/install-agent.ps1 -OutFile "$env:TEMP\install-agent.ps1" -UseBasicParsing; `+
-				`& "$env:TEMP\install-agent.ps1" %s%s`, base, winArgs, winExtra),
+			`$u='%s/install-agent.ps1'; $p="$env:TEMP\install-agent.ps1"; `+
+				`iwr $u -OutFile $p -UseBasicParsing; Unblock-File $p; `+
+				`powershell -NoProfile -ExecutionPolicy Bypass -File $p %s%s`,
+			base, winArgs, winExtra),
 	}
 }
 

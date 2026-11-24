@@ -941,3 +941,31 @@ func TestIdentityConflictDoesNotBurnTheEnrollmentToken(t *testing.T) {
 		t.Fatalf("retry after conflict = %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// A downloaded PowerShell script does not run on a default Windows desktop: the execution policy
+// is Restricted, and `& script.ps1` fails with UnauthorizedAccess. The installer command we show
+// must work there, without asking the operator to change a machine-wide policy.
+func TestWindowsInstallCommandRunsUnderARestrictedPolicy(t *testing.T) {
+	srv := fleetServer(t)
+	srv.opts.ReleaseBase = "https://example.invalid/releases/download/v0.1.9"
+	srv.opts.AgentVersion = "0.1.9"
+	req := httptest.NewRequest("GET", "/api/agents", nil)
+	req.Host = "clanker.example"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	cmds := srv.enrollCommands(req, "TOKEN-123")
+	win := cmds["windows"]
+	for _, want := range []string{
+		"iwr ", "Unblock-File $p",
+		"powershell -NoProfile -ExecutionPolicy Bypass -File $p",
+		`-EnrollToken "TOKEN-123"`,
+	} {
+		if !strings.Contains(win, want) {
+			t.Fatalf("windows command is missing %q:\n%s", want, win)
+		}
+	}
+	// It must not tell anyone to change the machine policy, and must not pipe a download into
+	// an interpreter.
+	if strings.Contains(win, "Set-ExecutionPolicy") || strings.Contains(win, "| iex") {
+		t.Fatalf("windows command changes policy or executes from a pipe:\n%s", win)
+	}
+}
