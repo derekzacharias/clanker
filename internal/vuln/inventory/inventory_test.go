@@ -316,3 +316,25 @@ func TestIsDistroPythonPath(t *testing.T) {
 		}
 	}
 }
+
+// A Windows asset that reports only "windows" cannot be matched against anything, and the
+// dashboard shows "(windows )". The build is the patch level Windows advisories are keyed by.
+func TestWindowsOSInfoParsing(t *testing.T) {
+	name, version, build, err := parseWindowsOSInfo([]byte(
+		`{"product":"Windows 11 Pro","display":"24H2","build":"26100","major":10,"minor":0,"ubr":1742}`))
+	if err != nil {
+		t.Fatalf("parseWindowsOSInfo: %v", err)
+	}
+	if name != "Windows 11 Pro" || version != "24H2" || build != "10.0.26100.1742" {
+		t.Fatalf("got name=%q version=%q build=%q", name, version, build)
+	}
+	// A machine where UBR is absent still yields a usable build.
+	name, version, build, err = parseWindowsOSInfo([]byte(
+		`{"product":"Windows Server 2022","build":"20348","major":10,"minor":0}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if name != "Windows Server 2022" || version != "" || build != "10.0.20348" {
+		t.Fatalf("got name=%q version=%q build=%q", name, version, build)
+	}
+}

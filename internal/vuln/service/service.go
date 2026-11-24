@@ -38,6 +38,8 @@ type Manager struct {
 	ConfigPath string
 	// Home overrides the user's home directory (tests).
 	Home string
+	// StartupDir overrides the Windows Startup folder (tests).
+	startupDir string
 	// Run executes service-manager commands (tests).
 	Run Runner
 
@@ -380,11 +382,17 @@ func (m *Manager) launchdStatus(ctx context.Context) Status {
 // ---------------------------------------------------------------- windows ---
 
 func (m *Manager) installScheduledTask(ctx context.Context) (Status, error) {
-	// A logon task, not a Windows service: no admin rights, no binary in
-	// C:\Windows, and it stops when the user logs out for good (which is when the
-	// endpoint is unreachable anyway).
+	// A logon task, not a Windows service: no binary in C:\Windows, and it stops when the
+	// user logs out for good (which is when the endpoint is unreachable anyway).
 	if _, err := m.Run(ctx, "schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", Name,
 		"/TR", fmt.Sprintf(`"%s" watch --config "%s"`, m.ExePath, m.ConfigPath)); err != nil {
+		// Task creation is refused on some managed machines ("Access is denied"). A per-user
+		// Startup shortcut reaches the same outcome with no privileges at all, so the endpoint
+		// still comes back after a logon instead of silently staying offline.
+		if startupErr := m.installStartupShortcut(); startupErr == nil {
+			detail := "installed as a Startup shortcut; the scheduled task was refused (" + shortErr(err) + ")"
+			return Status{Platform: m.goos, Installed: true, Enabled: true, Path: m.startupPath(), Detail: detail}, nil
+		}
 		return Status{Platform: m.goos}, err
 	}
 	_, _ = m.Run(ctx, "schtasks", "/Run", "/TN", Name)
@@ -393,10 +401,48 @@ func (m *Manager) installScheduledTask(ctx context.Context) (Status, error) {
 
 func (m *Manager) uninstallScheduledTask(ctx context.Context) (Status, error) {
 	_, _ = m.Run(ctx, "schtasks", "/End", "/TN", Name)
-	if _, err := m.Run(ctx, "schtasks", "/Delete", "/F", "/TN", Name); err != nil {
-		return Status{Platform: m.goos}, nil // not installed: nothing to remove
-	}
+	_, _ = m.Run(ctx, "schtasks", "/Delete", "/F", "/TN", Name)
+	// Remove the Startup shortcut too, when that was the mechanism that got installed.
+	_ = os.Remove(m.startupPath())
 	return Status{Platform: m.goos}, nil
+}
+
+// startupPath is the per-user Startup folder entry that replaces a refused task.
+func (m *Manager) startupPath() string {
+	dir := m.startupDir
+	if dir == "" {
+		cfg, err := os.UserConfigDir() // %AppData% on Windows
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(cfg, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+	}
+	return filepath.Join(dir, Name+".cmd")
+}
+
+// installStartupShortcut writes a .cmd that launches the watcher at logon.
+//
+// No privileges, no Task Scheduler, no policy change: the Start Menu's Startup folder is
+// per-user by design. The file is a plain script the operator can read.
+func (m *Manager) installStartupShortcut() error {
+	path := m.startupPath()
+	if path == "" {
+		return errors.New("cannot resolve the Startup folder")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	content := fmt.Sprintf("@echo off\r\nstart \"\" \"%s\" watch --config \"%s\"\r\n", m.ExePath, m.ConfigPath)
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// shortErr keeps the service detail line readable.
+func shortErr(err error) string {
+	s := strings.TrimSpace(err.Error())
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 func (m *Manager) taskStatus(ctx context.Context) Status {

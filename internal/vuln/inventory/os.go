@@ -3,6 +3,7 @@ package inventory
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -57,6 +58,16 @@ func DetectAsset(ctx context.Context, opts Options) (model.Asset, []string) {
 		if b, err := os.ReadFile(filepath.Join(root, "proc/sys/kernel/osrelease")); err == nil {
 			info.Kernel = strings.TrimSpace(string(b))
 		}
+	}
+
+	if platform() == "windows" {
+		name, version, build, err := detectWindowsOS(ctx)
+		if err != nil {
+			warnings = append(warnings, "windows version unreadable: "+err.Error())
+		}
+		info.PrettyName = strings.TrimSpace(name)
+		info.VersionID = strings.TrimSpace(version)
+		info.Kernel = strings.TrimSpace(build)
 	}
 
 	host, _ := os.Hostname()
@@ -258,4 +269,71 @@ func (c *OSPackageCollector) Collect(ctx context.Context, opts Options) ([]model
 		return ParseAPKInstalled(path, eco, vendor)
 	}
 	return nil, fmt.Errorf("%w: no supported package database (dpkg, rpm, apk) found", ErrUnavailable)
+}
+
+// windowsOSScript reads the one registry key Windows keeps its own identity in. Read-only.
+const windowsOSScript = `$ErrorActionPreference='SilentlyContinue';
+$k=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion';
+[pscustomobject]@{product=$k.ProductName; display=$k.DisplayVersion; build=$k.CurrentBuild;
+  major=$k.CurrentMajorVersionNumber; minor=$k.CurrentMinorVersionNumber; ubr=$k.UBR} |
+  ConvertTo-Json -Compress`
+
+// windowsOSRunner runs PowerShell; a variable so tests can inject a fake.
+var windowsOSRunner = func(ctx context.Context, script string) ([]byte, error) {
+	return run(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+}
+
+// detectWindowsOS returns the product name, release and full build.
+//
+// An asset that says only "windows" cannot be matched against anything: Windows advisories are
+// keyed by build, and the dashboard's OS column is how a human tells two machines apart. The
+// build is reported as major.minor.build.UBR, which is what a patch level actually is.
+func detectWindowsOS(ctx context.Context) (name, version, build string, err error) {
+	out, err := windowsOSRunner(ctx, windowsOSScript)
+	if err != nil {
+		return "", "", "", err
+	}
+	return parseWindowsOSInfo(out)
+}
+
+func parseWindowsOSInfo(raw []byte) (name, version, build string, err error) {
+	var info struct {
+		Product string `json:"product"`
+		Display string `json:"display"`
+		Build   string `json:"build"`
+		Major   any    `json:"major"`
+		Minor   any    `json:"minor"`
+		UBR     any    `json:"ubr"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &info); err != nil {
+		return "", "", "", err
+	}
+	name = strings.TrimSpace(info.Product)
+	version = strings.TrimSpace(info.Display)
+	build = strings.TrimSpace(info.Build)
+	// Windows reports the build as a bare number ("26100") plus a separate update revision.
+	// Compose the version the rest of the world uses: major.minor.build.UBR, using the numbers
+	// the registry itself provides rather than assuming 10.0.
+	if build != "" {
+		major, minor := numberString(info.Major), numberString(info.Minor)
+		if major != "" && minor != "" {
+			build = major + "." + minor + "." + build
+		}
+		switch ubr := numberString(info.UBR); {
+		case ubr != "":
+			build = build + "." + ubr
+		}
+	}
+	return name, version, build, nil
+}
+
+// numberString renders a JSON number or string without a type assertion mess.
+func numberString(v any) string {
+	switch n := v.(type) {
+	case float64:
+		return fmt.Sprintf("%d", int(n))
+	case string:
+		return strings.TrimSpace(n)
+	}
+	return ""
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,5 +179,46 @@ func TestUnsupportedPlatform(t *testing.T) {
 	}
 	if st := m.Current(context.Background()); st.Installed {
 		t.Fatal("status claims an installed service on an unsupported platform")
+	}
+}
+
+// Some managed Windows machines refuse task creation ("Access is denied"). The endpoint must
+// still come back after a logon, and a per-user Startup shortcut does that with no privileges.
+func TestWindowsInstallFallsBackToStartupShortcut(t *testing.T) {
+	dir := t.TempDir()
+	m := &Manager{
+		ExePath:    `C:\Users\student\AppData\Local\clanker-guard\bin\clanker-guard-agent.exe`,
+		ConfigPath: `C:\Users\student\AppData\Roaming\clanker-guard\agent.json`,
+		goos:       "windows",
+		startupDir: dir,
+		Run: func(ctx context.Context, name string, args ...string) (string, error) {
+			return "", errors.New("schtasks: exit status 1 (ERROR: Access is denied.)")
+		},
+	}
+	st, err := m.installScheduledTask(context.Background())
+	if err != nil {
+		t.Fatalf("install should fall back, got %v", err)
+	}
+	if !st.Installed || !st.Enabled {
+		t.Fatalf("status = %+v", st)
+	}
+	if !strings.Contains(st.Detail, "Startup shortcut") {
+		t.Fatalf("detail does not explain the fallback: %q", st.Detail)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, Name+".cmd"))
+	if err != nil {
+		t.Fatalf("startup shortcut missing: %v", err)
+	}
+	for _, want := range []string{"watch --config", "clanker-guard-agent.exe"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("shortcut is missing %q:\n%s", want, body)
+		}
+	}
+	// Uninstalling removes it.
+	if _, err := m.uninstallScheduledTask(context.Background()); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, Name+".cmd")); !os.IsNotExist(err) {
+		t.Fatal("startup shortcut survived uninstall")
 	}
 }
