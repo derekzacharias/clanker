@@ -1,4 +1,4 @@
-import { KeyRound, Loader2, LockKeyhole, ShieldAlert } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Loader2, LockKeyhole, ShieldAlert } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, api, getToken, setToken, type AuthSession } from "../lib/api";
 import { useAppVersion } from "../lib/version";
@@ -35,6 +35,7 @@ export default function Login() {
   const [token, setTokenValue] = useState(() => getToken());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const version = useAppVersion();
 
   useEffect(() => {
@@ -107,16 +108,55 @@ export default function Login() {
     : "You will stay signed in on this browser.";
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-bg px-4 py-10">
+    <div className="grid min-h-screen bg-bg lg:grid-cols-[1.05fr_1fr]">
+      {/* Brand panel. Decorative only: hidden below lg, aria-hidden, and every animation stops
+          under prefers-reduced-motion. The form is always reachable without it. */}
+      <aside className="brand-gradient relative hidden overflow-hidden lg:flex lg:flex-col lg:justify-between lg:p-12" aria-hidden="true">
+        <div className="brand-orb left-[-6rem] top-[-4rem] h-72 w-72 bg-[#6366f1]" />
+        <div className="brand-orb bottom-[-6rem] right-[-4rem] h-80 w-80 bg-[#22d3ee]" style={{ animationDelay: "-6s" }} />
+        <div className="relative flex items-center gap-2.5 text-white">
+          <span className="grid h-9 w-9 place-items-center rounded-lg bg-white/15 backdrop-blur-sm">
+            <ShieldAlert className="h-5 w-5" />
+          </span>
+          <span className="text-base font-semibold tracking-tight">Clanker Guard</span>
+        </div>
+        <div className="relative max-w-md">
+          <p className="text-[0.6875rem] uppercase tracking-[0.18em] text-white/60">Vulnerability management</p>
+          <h1 className="mt-3 text-3xl font-semibold leading-tight text-white">
+            Visibility. Intelligence. Security.
+          </h1>
+          <p className="mt-3 text-sm leading-relaxed text-white/75">
+            See what is installed across your systems, which findings actually apply, and who owes each
+            fix — then prove it with a later scan.
+          </p>
+          <ul className="mt-8 space-y-2.5 text-sm text-white/70">
+            {[
+              "Findings stay evidence; nothing is closed without a rescan.",
+              "Remediation routes to the team that owns the asset.",
+              "One ticket per fix, not one per CVE.",
+            ].map((line) => (
+              <li key={line} className="flex items-start gap-2">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-white/50" />
+                {line}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <p className="relative text-xs text-white/45">
+          Runs on your infrastructure. Vulnerability data stays on this machine.
+        </p>
+      </aside>
+
+      <main className="flex items-center justify-center px-4 py-10 animate-fade-in">
       <div className="w-full max-w-sm">
-        <div className="mb-6 flex items-center gap-2.5">
-          <span className="grid h-8 w-8 place-items-center rounded-md bg-accent text-accent-fg" aria-hidden="true">
+        <div className="mb-6 flex items-center gap-2.5 lg:hidden">
+          <span className="grid h-8 w-8 place-items-center rounded-md accent-gradient text-white" aria-hidden="true">
             <ShieldAlert className="h-4 w-4" />
           </span>
           <span className="text-base font-semibold tracking-tight">Clanker Guard</span>
         </div>
 
-        <div className="rounded-lg border border-border bg-surface p-5 shadow-sm">
+        <div className="rounded-card border border-border bg-surface p-6 shadow-raised">
           {loadError ? (
             <div className="space-y-3">
               <h1 className="text-base font-semibold">Cannot reach the API</h1>
@@ -162,18 +202,30 @@ export default function Login() {
               </Field>
 
               <Field label="Password" htmlFor="login-password">
-                <Input
-                  id="login-password"
-                  name="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  disabled={busy}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  aria-invalid={error ? true : undefined}
-                  aria-describedby={error ? "login-error" : undefined}
-                />
+                <div className="relative">
+                  <Input
+                    id="login-password"
+                    name="password"
+                    type={showPassword ? "text" : "password"}
+                    autoComplete="current-password"
+                    required
+                    disabled={busy}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    aria-invalid={error ? true : undefined}
+                    aria-describedby={error ? "login-error" : undefined}
+                    className="pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    aria-pressed={showPassword}
+                    className="absolute inset-y-0 right-0 grid w-9 place-items-center rounded-r-md text-subtle hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    {showPassword ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                  </button>
+                </div>
               </Field>
 
               {error ? (
@@ -247,6 +299,7 @@ export default function Login() {
         </p>
         <p className="mt-1 text-center text-xs text-subtle">v{version}</p>
       </div>
+      </main>
     </div>
   );
 }

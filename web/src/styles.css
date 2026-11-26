@@ -33,8 +33,32 @@
   --code-border: #cdd5df;
   --focus: #2563eb;
   --radius: 0.65rem;
+  /* Cards are a hair rounder than controls: the Katalyst-style separation comes from a soft
+     radius plus a very quiet border, not from heavy shadows. */
+  --radius-card: 18px;
+  --radius-control: 10px;
   --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.06);
+  --shadow-raised: 0 2px 6px rgb(16 24 40 / 0.06), 0 12px 24px -12px rgb(16 24 40 / 0.12);
   --shadow-pop: 0 10px 30px rgb(16 24 40 / 0.12);
+
+  /* V2 accents. The primary stays blue-indigo; violet and cyan appear only in the brand
+     surfaces (login, selected summary cards) so operational panels stay calm. */
+  --accent-2: #8b5cf6;
+  --accent-3: #22d3ee;
+  --gradient-brand: linear-gradient(135deg, #1e1b4b 0%, #312e81 38%, #6d28d9 72%, #0e7490 100%);
+  --gradient-accent: linear-gradient(120deg, #6366f1 0%, #8b5cf6 55%, #22d3ee 100%);
+  --chart-1: #6366f1;
+  --chart-2: #22d3ee;
+  --chart-3: #10b981;
+  --chart-4: #f59e0b;
+  --chart-grid: #e6ebf2;
+
+  /* Motion: one scale, so timings cannot drift per component. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-hover: 120ms;
+  --dur-pop: 180ms;
+  --dur-page: 220ms;
+  --dur-chart: 520ms;
 }
 
 .dark {
@@ -67,6 +91,15 @@
   --code-bg: #293241;
   --code-border: #465364;
   --focus: #60a5fa;
+  --accent-2: #a78bfa;
+  --accent-3: #67e8f9;
+  --gradient-brand: linear-gradient(135deg, #05060f 0%, #1e1b4b 40%, #4c1d95 74%, #0e7490 100%);
+  --gradient-accent: linear-gradient(120deg, #818cf8 0%, #a78bfa 55%, #67e8f9 100%);
+  --chart-1: #818cf8;
+  --chart-2: #67e8f9;
+  --chart-3: #34d399;
+  --chart-4: #fbbf24;
+  --chart-grid: #1f2a3a;
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-pop: 0 16px 40px rgb(0 0 0 / 0.55);
 }
@@ -95,7 +128,8 @@
   --color-low-soft: var(--low-soft);
   --color-unknown: var(--unknown);
   --color-unknown-soft: var(--unknown-soft);
-  --radius-card: var(--radius);
+  --radius-card: var(--radius-card);
+  --radius-control: var(--radius-control);
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -177,4 +211,58 @@
   .skip-link:focus {
     transform: translateY(0);
   }
+}
+
+/* ---- V2 motion ----------------------------------------------------------------
+   Entrance only. Nothing on this page loops: a security dashboard that moves while you
+   read it is a dashboard you stop trusting. Every animation is disabled under
+   prefers-reduced-motion, and nothing here delays an interaction. */
+@keyframes cg-fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cg-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes cg-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50%      { transform: translate3d(2%, -2%, 0) scale(1.06); }
+}
+@keyframes cg-draw {
+  from { stroke-dashoffset: var(--dash, 1000); }
+  to   { stroke-dashoffset: 0; }
+}
+
+.animate-fade-up { animation: cg-fade-up var(--dur-page) var(--ease-out) both; }
+.animate-fade-in { animation: cg-fade-in var(--dur-pop) var(--ease-out) both; }
+/* Stagger helper: children enter in sequence without per-component delays. */
+.stagger > * { animation: cg-fade-up var(--dur-page) var(--ease-out) both; }
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 40ms; }
+.stagger > *:nth-child(3) { animation-delay: 80ms; }
+.stagger > *:nth-child(4) { animation-delay: 120ms; }
+.stagger > *:nth-child(5) { animation-delay: 160ms; }
+.stagger > *:nth-child(6) { animation-delay: 200ms; }
+
+.brand-gradient { background-image: var(--gradient-brand); }
+.accent-gradient { background-image: var(--gradient-accent); }
+/* The soft wash behind the login panel: two blurred blobs that drift very slowly. */
+.brand-orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(60px);
+  opacity: 0.55;
+  animation: cg-drift 18s ease-in-out infinite;
+}
+
+.chart-line { stroke-dasharray: var(--dash, 1000); animation: cg-draw var(--dur-chart) var(--ease-out) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up, .animate-fade-in, .stagger > *, .chart-line, .brand-orb {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  * { transition-duration: 1ms !important; }
 }

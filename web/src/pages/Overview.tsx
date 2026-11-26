@@ -1,15 +1,17 @@
-import { ArrowRight, Radar, ShieldAlert } from "lucide-react";
+import { ArrowRight, Radar, ShieldAlert, Timer, TriangleAlert, Users } from "lucide-react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useApi";
 import { Link, navigate } from "../lib/router";
 import { formatDate, pluralize, relativeTime, riskTone } from "../lib/format";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
-import { SeverityBar } from "../components/SeverityBar";
 import { SeverityBadge, KevBadge, ApplicabilityBadge } from "../components/badges";
 import { Banner, EmptyState, ErrorState, LoadingBlock } from "../components/ui/Feedback";
 import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/PageHeader";
 import { ProcessStrip, type ProcessStep } from "../components/ProcessStrip";
+import { MetricCard } from "../components/MetricCard";
+import { SeverityDonut } from "../components/charts/SeverityDonut";
+import { AgingBars } from "../components/charts/AgingBars";
 import { Collapsible } from "../components/ui/Collapsible";
 import { InfoTooltip } from "../components/ui/InfoTooltip";
 
@@ -25,6 +27,7 @@ import { InfoTooltip } from "../components/ui/InfoTooltip";
  * disclosure at the bottom (severity split, coverage, limitations) or onto its own screen.
  */
 export default function Overview() {
+
   const overview = useAsync(() => api.overview());
   const remediation = useAsync(() => api.remediationSummary());
   const metrics = useAsync(() => api.metrics());
@@ -223,13 +226,6 @@ export default function Overview() {
               </>
             )}
           </p>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            <Chip to="/vulnerabilities?severity=critical" label="Critical" value={data.metrics.critical} tone="critical" />
-            <Chip to="/vulnerabilities?severity=high" label="High" value={data.metrics.high} tone="high" />
-            <Chip to="/vulnerabilities?kev=1" label="Known exploited" value={data.metrics.kev} tone={data.metrics.kev > 0 ? "critical" : "muted"} />
-            <Chip to="/remediation?tab=queue&overdue=1" label="Overdue" value={overdue} tone={overdue > 0 ? "critical" : "muted"} />
-            <Chip to="/remediation?tab=ownership" label="Unowned" value={triage} tone={triage > 0 ? "high" : "muted"} />
-          </div>
         </Card>
 
         {/* 3: the next action, derived from the data rather than guessed. */}
@@ -243,6 +239,44 @@ export default function Overview() {
             {nextAction.label} <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
         </Card>
+      </div>
+
+      <div className="stagger grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <MetricCard
+          label="Open findings"
+          value={open}
+          hint={`${units} ${units === 1 ? "upgrade" : "upgrades"} to apply`}
+          icon={ShieldAlert}
+          to="/vulnerabilities"
+          help={<>Every finding still reported by the latest completed scan of each system. One upgrade often closes many findings, so this number is always larger than the number of changes to make.</>}
+        />
+        <MetricCard
+          label="Critical findings"
+          value={data.metrics.critical}
+          hint="severity from the advisory"
+          icon={TriangleAlert}
+          to="/vulnerabilities?severity=critical"
+          tone={data.metrics.critical > 0 ? "critical" : "neutral"}
+          help={<>Findings whose advisory rates them critical. Severity describes the vulnerability, not how urgent it is here — priority adds known exploitation, internet exposure and what the system is worth.</>}
+        />
+        <MetricCard
+          label="Systems needing an owner"
+          value={triage}
+          hint="routing waits for these"
+          icon={Users}
+          to="/remediation?tab=ownership"
+          tone={triage > 0 ? "high" : "positive"}
+          help={<>Assets whose findings could not be routed, because no team owns the asset and its packages could not be classified. Clanker never guesses a team: someone records the owner once, and the work routes from then on.</>}
+        />
+        <MetricCard
+          label="Past deadline"
+          value={overdue}
+          hint={overdue > 0 ? "behind the agreed SLA" : "nothing is late"}
+          icon={Timer}
+          to="/remediation?tab=queue&overdue=1"
+          tone={overdue > 0 ? "critical" : "positive"}
+          help={<>Open findings older than the deadline set for their severity (7 days for critical through 90 for low, unless the policy was changed). A finding past its deadline is still open work, not an escalation — nothing notifies anyone automatically.</>}
+        />
       </div>
 
       <ProcessStrip steps={steps} />
@@ -347,19 +381,6 @@ export default function Overview() {
                   <dd className="num font-medium">{m.acceptances_due ?? 0}</dd>
                 </div>
               </dl>
-              {(m.age_buckets ?? []).length > 0 ? (
-                <div className="mt-3 border-t border-border pt-2">
-                  <p className="text-xs text-muted">Age of open work</p>
-                  <ul className="mt-1 space-y-0.5 text-xs">
-                    {(m.age_buckets ?? []).map((b) => (
-                      <li key={b.label} className="flex items-baseline justify-between gap-2">
-                        <span className="text-subtle">{b.label}</span>
-                        <span className="num">{b.count}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
               <p className="mt-3 text-xs text-subtle">
                 Time to fix appears once findings are closed by a later scan. Nothing here is estimated.
               </p>
@@ -382,10 +403,31 @@ export default function Overview() {
       {/* Everything below supports analysis, not the next action: collapsed by default. */}
       <div className="grid items-start gap-3 lg:grid-cols-2">
         <Card className="p-4">
-          <Collapsible title="Severity distribution" summary={`${severity.reduce((n, r) => n + r.count, 0)} findings`}>
-            <SeverityBar rows={severity} />
-          </Collapsible>
+          <p className="mb-3 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+            Severity mix
+            <InfoTooltip label="About severity mix">
+              What the open findings look like by advisory severity, across every assessed system.
+              Select a band to jump to those findings. Severity is the advisory&apos;s rating; priority
+              on the Remediation page is when this organisation should act.
+            </InfoTooltip>
+          </p>
+          <SeverityDonut rows={severity.map((r) => ({ key: r.key, count: r.count }))} onSelect={(sev) => navigate(`/vulnerabilities?severity=${encodeURIComponent(sev)}`)} />
+          <Link to="/vulnerabilities" className="mt-3 inline-block text-xs text-accent underline underline-offset-2">
+            Open the findings list
+          </Link>
         </Card>
+        <Card className="p-4">
+          <p className="mb-3 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+            Age of open findings
+            <InfoTooltip label="About finding age">
+              How long open findings have been known, measured from the first scan that reported them.
+              A shape that piles up on the right means fixes are not keeping up with discovery, even
+              if the total stays flat.
+            </InfoTooltip>
+          </p>
+          <AgingBars buckets={metrics.data?.age_buckets ?? []} />
+        </Card>
+
         <Card className="p-4">
           <Collapsible
             title="Coverage and limitations"
@@ -420,33 +462,6 @@ export default function Overview() {
         </Card>
       </div>
     </div>
-  );
-}
-
-function Chip({
-  to,
-  label,
-  value,
-  tone,
-}: {
-  to: string;
-  label: string;
-  value: number;
-  tone: "critical" | "high" | "muted";
-}) {
-  const styles = {
-    critical: "border-critical/30 bg-critical-soft text-critical",
-    high: "border-high/30 bg-high-soft text-high",
-    muted: "border-border bg-surface-2 text-muted",
-  }[tone];
-  return (
-    <Link
-      to={to}
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${styles} hover:brightness-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent`}
-    >
-      <span className="num font-semibold">{value}</span>
-      {label}
-    </Link>
   );
 }
 

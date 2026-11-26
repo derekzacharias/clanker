@@ -13,15 +13,16 @@ describe("Overview", () => {
     renderOverview();
 
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
-    expect(await screen.findByText("Known exploited")).toBeInTheDocument();
+    // The chips were replaced by metric tiles; the underlying numbers are still shown.
+    expect(await screen.findByText("Open findings")).toBeInTheDocument();
+    expect(screen.getByText("Critical findings")).toBeInTheDocument();
     expect(screen.getByText("CVE-2026-0001")).toBeInTheDocument();
     expect(screen.getByText("openssl")).toBeInTheDocument();
     // Severity and coverage are analysis, so they live behind a disclosure now: closed by
     // default, still reachable in one click, and the chart still exposes its counts as text.
-    const severityToggle = screen.getByRole("button", { name: /Severity distribution/i });
-    expect(severityToggle).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(severityToggle);
     expect(screen.getByRole("img", { name: /Findings by severity/i })).toBeInTheDocument();
+    // The legend row is a real control (it jumps to those findings) and carries the count.
+    expect(screen.getAllByRole("button", { name: /Critical/ }).length).toBeGreaterThan(0);
 
     const coverageToggle = screen.getByRole("button", { name: /Coverage and limitations/i });
     fireEvent.click(coverageToggle);
