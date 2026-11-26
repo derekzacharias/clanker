@@ -200,22 +200,31 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // -------------------------------------------------------------------- assets ---
 
 type assetRow struct {
-	Host         string `json:"host"`
-	OS           string `json:"os"`
-	OSVersion    string `json:"os_version"`
-	Arch         string `json:"arch,omitempty"`
-	Packages     int    `json:"packages"`
-	Findings     int    `json:"findings"`
-	Actionable   int    `json:"actionable"`
-	Critical     int    `json:"critical"`
-	High         int    `json:"high"`
-	KEV          int    `json:"kev"`
-	LastScan     string `json:"last_scan"`
-	Stale        bool   `json:"stale"`
+	Host       string `json:"host"`
+	OS         string `json:"os"`
+	OSVersion  string `json:"os_version"`
+	Arch       string `json:"arch,omitempty"`
+	Packages   int    `json:"packages"`
+	Findings   int    `json:"findings"`
+	Actionable int    `json:"actionable"`
+	Critical   int    `json:"critical"`
+	High       int    `json:"high"`
+	KEV        int    `json:"kev"`
+	LastScan   string `json:"last_scan"`
+	Stale      bool   `json:"stale"`
+	// ScanTool is the build that produced the last stored report. For an enrolled endpoint it is
+	// usually the agent, but it is not the same fact as the agent's *current* version: after an
+	// upgrade the last report still says the old build until a new scan runs.
+	ScanTool string `json:"scan_tool,omitempty"`
+	// AgentVersion is what the enrolled agent reports about itself right now (empty for
+	// assets that are not enrolled endpoints).
 	AgentVersion string `json:"agent_version,omitempty"`
-	Mode         string `json:"mode,omitempty"`
-	ReportID     string `json:"report_id,omitempty"`
-	IsContainer  bool   `json:"is_container,omitempty"`
+	// AgentOutdated is true when the last report came from a different build than the agent is
+	// running, i.e. the numbers on this row are from the previous version.
+	AgentOutdated bool   `json:"agent_outdated,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	ReportID      string `json:"report_id,omitempty"`
+	IsContainer   bool   `json:"is_container,omitempty"`
 }
 
 func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
@@ -225,14 +234,30 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.opts.Now()
+	// The enrolled agent's own view, by host. This is what "agent version" means; the report
+	// carries the version of whatever build produced it.
+	agentByHost := map[string]fleet.Agent{}
+	if s.fleet != nil {
+		if agents, err := s.fleet.List(r.Context()); err == nil {
+			for _, a := range agents {
+				if !a.Revoked {
+					agentByHost[strings.ToLower(a.Host)] = a
+				}
+			}
+		}
+	}
 	items := make([]assetRow, 0, len(ds.Hosts))
 	for _, hv := range ds.Hosts {
 		row := assetRow{
 			Host: hv.Host, OS: hv.Asset.OS, OSVersion: hv.Asset.OSVersion, Arch: hv.Asset.Arch,
 			Packages: len(hv.Packages), LastScan: hv.FinishedAt.UTC().Format(time.RFC3339),
-			Stale:        now.Sub(hv.FinishedAt) > staleAfterDays*24*time.Hour,
-			AgentVersion: hv.ToolVersion, Mode: hv.Mode, ReportID: hv.ReportID,
+			Stale:    now.Sub(hv.FinishedAt) > staleAfterDays*24*time.Hour,
+			ScanTool: hv.ToolVersion, Mode: hv.Mode, ReportID: hv.ReportID,
 			IsContainer: hv.Asset.IsContainer,
+		}
+		if a, ok := agentByHost[strings.ToLower(hv.Host)]; ok {
+			row.AgentVersion = a.Version
+			row.AgentOutdated = a.Version != "" && hv.ToolVersion != "" && a.Version != hv.ToolVersion
 		}
 		for _, f := range hv.Findings {
 			effective := f.effective()
@@ -304,13 +329,17 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 		pkgs = pkgs[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"host":               hv.Host,
-		"asset":              hv.Asset,
-		"report_id":          hv.ReportID,
-		"last_scan":          hv.FinishedAt.UTC().Format(time.RFC3339),
-		"mode":               hv.Mode,
-		"offline":            hv.Offline,
-		"agent":              map[string]any{"version": hv.ToolVersion, "last_scan": hv.FinishedAt.UTC().Format(time.RFC3339)},
+		"host":      hv.Host,
+		"asset":     hv.Asset,
+		"report_id": hv.ReportID,
+		"last_scan": hv.FinishedAt.UTC().Format(time.RFC3339),
+		"mode":      hv.Mode,
+		"offline":   hv.Offline,
+		"agent": map[string]any{
+			"scan_tool": hv.ToolVersion,
+			"last_scan": hv.FinishedAt.UTC().Format(time.RFC3339),
+			"version":   s.enrolledAgentVersion(r, hv.Host),
+		},
 		"packages":           pkgs,
 		"package_count":      len(hv.Packages),
 		"packages_truncated": len(hv.Packages) > limit,
@@ -1066,7 +1095,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	endpoints := []map[string]any{}
 	for _, hv := range ds.Hosts {
 		endpoints = append(endpoints, map[string]any{
-			"host": hv.Host, "agent_version": hv.ToolVersion,
+			"host": hv.Host, "scan_tool": hv.ToolVersion,
 			"last_scan": hv.FinishedAt.UTC().Format(time.RFC3339),
 			"os":        hv.Asset.OS, "os_version": hv.Asset.OSVersion,
 			"findings": len(hv.Findings), "mode": hv.Mode,
@@ -1414,6 +1443,24 @@ func firstNonEmpty(vals ...string) string {
 func runtimePlatform() string { return runtime.GOOS }
 
 // suppressedList keeps the JSON shape stable (an array, never null).
+// enrolledAgentVersion is what the endpoint says about itself right now. Empty for assets that
+// are not enrolled agents (an image, an SBOM, the scanning host itself).
+func (s *Server) enrolledAgentVersion(r *http.Request, host string) string {
+	if s.fleet == nil {
+		return ""
+	}
+	agents, err := s.fleet.List(r.Context())
+	if err != nil {
+		return ""
+	}
+	for _, a := range agents {
+		if !a.Revoked && strings.EqualFold(a.Host, host) {
+			return a.Version
+		}
+	}
+	return ""
+}
+
 func suppressedList(in []string) []string {
 	if in == nil {
 		return []string{}

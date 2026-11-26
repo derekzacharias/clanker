@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -984,5 +985,43 @@ func TestEnrollmentRejectionNamesThePlaceholderTrap(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "placeholder from the install command") {
 		t.Fatalf("error does not name the likely mistake: %s", rec.Body.String())
+	}
+}
+
+// "Agent version" on the assets page used to show the build that produced the last report, which
+// after an upgrade reads as the agent being old. Both facts matter and are different: the enrolled
+// agent's current version, and the build behind the numbers shown.
+func TestAssetsDistinguishAgentVersionFromScanBuild(t *testing.T) {
+	srv := fleetServer(t)
+	postReport(t, srv, "win01", "Windows", "Windows 11 Pro", "CVE-2026-1", "high", "SCAN-V-1")
+	// The endpoint upgrades: the agent now says 0.2.0 while the stored report is older.
+	agents, err := srv.fleet.List(t.Context())
+	if err != nil || len(agents) == 0 {
+		t.Fatalf("agents = %+v err=%v", agents, err)
+	}
+	if err := srv.fleet.Checkin(t.Context(), agents[0].ID, fleet.Checkin{State: "idle", Version: "0.2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []struct {
+			Host          string `json:"host"`
+			ScanTool      string `json:"scan_tool"`
+			AgentVersion  string `json:"agent_version"`
+			AgentOutdated bool   `json:"agent_outdated"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/assets", &list)
+	if len(list.Items) != 1 {
+		t.Fatalf("assets = %+v", list.Items)
+	}
+	row := list.Items[0]
+	if row.AgentVersion != "0.2.0" {
+		t.Fatalf("agent version = %q, want the enrolled agent's own version", row.AgentVersion)
+	}
+	if row.ScanTool == "" || row.ScanTool == row.AgentVersion {
+		t.Fatalf("scan tool = %q, want the older build that produced the report", row.ScanTool)
+	}
+	if !row.AgentOutdated {
+		t.Fatal("the row should be flagged as produced by an older build")
 	}
 }

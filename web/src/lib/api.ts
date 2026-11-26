@@ -366,7 +366,12 @@ export interface Asset {
   kev: number;
   last_scan: string;
   stale: boolean;
+  /** Build that produced the last stored report. */
+  scan_tool?: string;
+  /** What the enrolled agent reports about itself right now. */
   agent_version?: string;
+  /** True when the last report came from a different build than the agent runs. */
+  agent_outdated?: boolean;
   mode?: string;
   report_id?: string;
   is_container?: boolean;
@@ -524,7 +529,8 @@ export interface AgentsResponse {
   local: { host: string; version: string; cache_path: string; platform: string; installed: boolean; last_scan?: string };
   endpoints: {
     host: string;
-    agent_version: string;
+    scan_tool?: string;
+    agent_version?: string;
     last_scan: string;
     os: string;
     os_version: string;

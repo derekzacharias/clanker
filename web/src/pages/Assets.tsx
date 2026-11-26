@@ -124,7 +124,16 @@ export default function Assets() {
                         {a.host}
                       </Link>
                       <div className="text-xs text-muted">
-                        {a.mode} scan{a.agent_version ? ` · agent ${a.agent_version}` : ""}
+                        {a.mode} scan
+                        {a.agent_version ? ` · agent ${a.agent_version}` : a.scan_tool ? ` · scanned by ${a.scan_tool}` : ""}
+                        {a.agent_outdated ? (
+                          <span
+                            className="ml-1 text-high"
+                            title={`The last report came from build ${a.scan_tool}, but the agent is running ${a.agent_version}. Scan again to use the current build.`}
+                          >
+                            · rescan needed
+                          </span>
+                        ) : null}
                       </div>
                     </Td>
                     <Td>
