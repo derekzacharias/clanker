@@ -365,10 +365,16 @@ func (c *Client) postRaw(ctx context.Context, path string, payload []byte, out a
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var apiErr struct {
-			Error string `json:"error"`
-			Code  string `json:"code"`
+			Error        string `json:"error"`
+			Code         string `json:"code"`
+			LastSequence int64  `json:"last_sequence"`
 		}
 		_ = json.Unmarshal(raw, &apiErr)
+		// A sequence reset is recoverable, and it is the one rejection that is worth
+		// retrying automatically: the endpoint's own counter fell behind the server's.
+		if apiErr.Code == "replay_detected" && apiErr.LastSequence > 0 {
+			return &ReplayError{LastSequence: apiErr.LastSequence}
+		}
 		msg := strings.TrimSpace(apiErr.Error)
 		if msg == "" {
 			msg = strings.TrimSpace(string(raw))
@@ -474,4 +480,12 @@ func (c *Client) Health(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("health check returned %d", resp.StatusCode)
 	}
 	return strings.TrimSpace(string(raw)), nil
+}
+
+// ReplayError is returned when the server has accepted a higher sequence than this agent offered.
+// It carries the server's value so the caller can jump past it instead of being stuck forever.
+type ReplayError struct{ LastSequence int64 }
+
+func (e *ReplayError) Error() string {
+	return fmt.Sprintf("server has already accepted sequence %d; the local counter is behind", e.LastSequence)
 }

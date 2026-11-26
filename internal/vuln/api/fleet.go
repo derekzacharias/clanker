@@ -246,8 +246,14 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 	// replay attempt.
 	if sequence > 0 && sequence < ag.LastSequence {
 		s.log.Warn("replayed report rejected", "agent", ag.ID, "sequence", sequence, "last", ag.LastSequence)
-		writeError(w, http.StatusConflict, "replay_detected",
-			fmt.Sprintf("submission sequence %d is older than the last accepted submission (%d)", sequence, ag.LastSequence))
+		// last_sequence is included so an agent whose local counter was reset (reinstall, new
+		// profile, restored config) can catch up by itself. Without it, a single reset silently
+		// blocks every future report for that endpoint.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":         fmt.Sprintf("submission sequence %d is older than the last accepted submission (%d)", sequence, ag.LastSequence),
+			"code":          "replay_detected",
+			"last_sequence": ag.LastSequence,
+		})
 		return
 	}
 

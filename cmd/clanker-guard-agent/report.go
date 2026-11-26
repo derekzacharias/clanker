@@ -196,6 +196,15 @@ func (r *reporting) upload(ctx context.Context, res scan.Result, stderr io.Write
 	// restart cannot re-use an old one, which the server treats as a replay.
 	sequence := r.cfg.NextSequence + 1
 	ack, err := r.reporter.Client.ReportWithSequence(ctx, payload, sequence)
+	// A reset local counter (upgrade, restored config, new user profile) would otherwise be
+	// rejected as a replay for ever. Take the server's number, persist it, and try once more.
+	var replay *agent.ReplayError
+	if errors.As(err, &replay) {
+		sequence = replay.LastSequence + 1
+		fmt.Fprintf(stderr, "notice: local report counter was behind %s; resuming at sequence %d\n",
+			r.cfg.Server, sequence)
+		ack, err = r.reporter.Client.ReportWithSequence(ctx, payload, sequence)
+	}
 	if err != nil {
 		// A rejected report (bad request, replay, revoked credential) will not get
 		// better by retrying; a transport failure might, so only that is queued.

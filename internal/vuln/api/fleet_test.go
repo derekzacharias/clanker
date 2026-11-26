@@ -1025,3 +1025,34 @@ func TestAssetsDistinguishAgentVersionFromScanBuild(t *testing.T) {
 		t.Fatal("the row should be flagged as produced by an older build")
 	}
 }
+
+// A reset local counter must be recoverable: the refusal tells the agent where the server is, so it
+// can catch up. Without this, one reinstall silently blocks every future report for that endpoint.
+func TestReplayRejectionReportsTheServerSequence(t *testing.T) {
+	srv := fleetServer(t)
+	ag, token := enrollAgent(t, srv, "win01")
+	if err := srv.fleet.Checkin(t.Context(), ag, fleet.Checkin{State: "idle"}); err != nil {
+		t.Fatal(err)
+	}
+	// The server has accepted sequence 5.
+	if err := srv.fleet.AdvanceSequence(t.Context(), ag, 5); err != nil {
+		t.Fatalf("AdvanceSequence: %v", err)
+	}
+	rep := minimalReportWith("win01", "SCAN-SEQ-1", "Windows", "Win11", "CVE-1", "high")
+	headers := agentHeaders(token)
+	headers["X-Guard-Sequence"] = "1"
+	rec := request(t, srv.Handler(), "POST", "/api/agents/report", string(rep), headers)
+	if rec.Code != 409 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Code         string `json:"code"`
+		LastSequence int64  `json:"last_sequence"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "replay_detected" || body.LastSequence != 5 {
+		t.Fatalf("body = %+v, want replay_detected with last_sequence 5", body)
+	}
+}
