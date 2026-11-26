@@ -18,6 +18,19 @@ beforeEach(() => {
     }),
   });
   window.scrollTo = vi.fn();
+  // Radix popper (tooltips, popovers) measures its anchor with ResizeObserver, which jsdom does
+  // not implement. A no-op stub is honest here: layout is verified in a real browser by the
+  // Playwright checks, not in jsdom.
+  if (!("ResizeObserver" in globalThis)) {
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      writable: true,
+      value: class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    });
+  }
   Object.assign(navigator, {
     clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
   });

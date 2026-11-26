@@ -766,7 +766,7 @@ function stageLabel(name: string): string {
     case "matching":
       return "Matching advisories and deciding applicability";
     case "enrichment":
-      return "Enriching with KEV / EPSS and scoring risk";
+      return "Checking which vulnerabilities are known to be exploited, and scoring risk";
     case "report":
       return "Preparing report";
     default:

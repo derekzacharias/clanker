@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { InfoTooltip } from "../components/ui/InfoTooltip";
 import { AppShell } from "../components/AppShell";
 import { applyTheme, resolveInitialTheme } from "../lib/theme";
 import { AskGuard } from "../components/AskGuard";
@@ -64,5 +65,24 @@ describe("accessibility", () => {
     await userEvent.keyboard("{Escape}");
     // Radix calls onOpenChange(false); the panel unmounts via the parent.
     expect(screen.queryByRole("dialog")).toBeInTheDocument(); // controlled: parent decides
+  });
+});
+
+// Contextual help must be reachable without a mouse. Radix opens a tooltip on hover and focus but
+// not on click, which left touch users with nothing — the component is controlled for that reason.
+describe("contextual help", () => {
+  it("opens on click and announces what it explains", async () => {
+    render(
+      <InfoTooltip label="About current posture">
+        A plain-English explanation.
+      </InfoTooltip>,
+    );
+    const trigger = screen.getByRole("button", { name: "About current posture" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent("A plain-English explanation."));
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
   });
 });

@@ -40,6 +40,7 @@ export default function Assets() {
       <PageHeader
         title="Assets"
         description="Every endpoint with a completed assessment. Counts reflect the latest scan for that host."
+              help={`Each row is one system Clanker has assessed. The counts are findings from that system's latest completed scan, not a running total across all scans. A system scanned a week ago still shows its old results until it is scanned again.`}
       />
 
       <Card>

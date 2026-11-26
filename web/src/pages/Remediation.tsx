@@ -196,6 +196,7 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
       <PageHeader
         title="Remediation"
         description="Who owes each fix, by when, and the upgrade that closes it. Findings stay evidence; this is the work."
+              help={`This is the work queue: who owes each fix, by when, and what will close it. One upgrade often closes many findings at once, which is why the By upgrade view exists. A finding is only marked resolved when a later scan stops reporting it; closing a ticket does not do that.`}
       />
 
       <div className="flex gap-1 border-b border-border" role="tablist" aria-label="Remediation views">

@@ -93,6 +93,7 @@ export default function Vulnerabilities() {
             </span>
           ) : null
         }
+              help={`A finding means Clanker matched something installed on a system against a vulnerability advisory. It is evidence, not a verdict on risk: severity comes from the advisory, and the confidence tells you how sure the match is. Open a finding to see the evidence, the fix and who owns it.`}
       />
 
       <Card>

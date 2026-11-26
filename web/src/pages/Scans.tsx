@@ -30,6 +30,7 @@ export default function Scans({ initialTab = "activity" }: { initialTab?: "activ
       <PageHeader
         title="Scans"
         description="Start an assessment, follow its progress, and open what it produced."
+        help={`A scan reads the software installed on a system, then compares what it finds against vulnerability information. Nothing is changed on the system being scanned. Results are kept as reports, so you can compare what changed between two scans.`}
         actions={
           <Button variant="primary" onClick={() => navigate("/scans/new")}>
             <Radar className="h-4 w-4" aria-hidden="true" /> New scan

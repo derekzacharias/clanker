@@ -11,6 +11,7 @@ import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/PageHeader";
 import { ProcessStrip, type ProcessStep } from "../components/ProcessStrip";
 import { Collapsible } from "../components/ui/Collapsible";
+import { InfoTooltip } from "../components/ui/InfoTooltip";
 
 /**
  * The landing screen answers four questions in order, and nothing else:
@@ -179,6 +180,7 @@ export default function Overview() {
             {formatDate(data.coverage.last_scan_at)}
           </>
         }
+        help={`This page answers four questions: how exposed you are right now, what needs attention, what to do next, and whether things are improving. The numbers come from the most recent completed assessment of each system, so a system scanned a week ago still counts with its old results until it is scanned again.`}
         actions={
           <Button className="hidden sm:inline-flex" variant="primary" onClick={() => navigate("/scans/new")}>
             <Radar className="h-4 w-4" aria-hidden="true" /> New scan
@@ -189,7 +191,15 @@ export default function Overview() {
       {/* 1 + 2: posture and what needs attention, in one block. */}
       <div className="grid gap-3 lg:grid-cols-3">
         <Card className="p-4 lg:col-span-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted">Current posture</p>
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+            Current posture
+            <InfoTooltip label="About current posture">
+              Open findings are the ones still reported by each system&apos;s latest scan. A finding
+              closed here means a later scan no longer sees it — not that a ticket was closed. One
+              upgrade can close many findings, so the number of findings is always larger than the
+              number of changes someone has to make.
+            </InfoTooltip>
+          </p>
           <p className="mt-1 text-lg leading-snug">
             {open === 0 ? (
               <>No actionable findings in scope.</>
@@ -306,7 +316,15 @@ export default function Overview() {
 
         {/* 4: progress, from stored evidence. */}
         <Card className="p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted">Is it getting better?</p>
+          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+            Is it getting better?
+            <InfoTooltip label="About process metrics">
+              Time to fix is measured from the first scan that reported a finding to the scan that
+              proved it gone. It only appears for findings that have been verified, so a new
+              installation shows a dash rather than an invented number. Ageing counts open findings
+              by how long ago they were first seen.
+            </InfoTooltip>
+          </p>
           {m ? (
             <>
               <dl className="mt-2 space-y-1.5 text-sm">

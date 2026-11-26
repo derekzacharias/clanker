@@ -37,6 +37,7 @@ export default function Settings() {
       <PageHeader
         title="Administration"
         description="Configuration and governance. Daily work happens in Scans, Findings and Remediation."
+              help={`Configuration for the scanner, the vulnerability data it uses, the software that collects results from your systems, and the people who can sign in. Daily work happens on the other pages; this one is for setup and governance.`}
       />
       <Tabs.Root defaultValue={initialTab}>
         <Tabs.List className="mb-3 flex flex-wrap gap-1 border-b border-border" aria-label="Settings sections">
