@@ -1,6 +1,8 @@
 package ticketing
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -161,4 +163,12 @@ func (a AccessBlock) SSHCommand() string {
 // HasAccess reports whether anything useful can be said about reaching the host.
 func (a AccessBlock) HasAccess() bool {
 	return a.SSHCommand() != "" || strings.TrimSpace(a.Runbook) != ""
+}
+
+// sha256Prefix hashes a short value for change detection (ticket content digests).
+func sha256Prefix(s string) []byte {
+	sum := sha256.Sum256([]byte(s))
+	raw := make([]byte, 8)
+	copy(raw, sum[:8])
+	return []byte(hex.EncodeToString(raw))
 }

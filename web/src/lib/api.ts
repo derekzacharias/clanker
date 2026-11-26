@@ -913,6 +913,12 @@ export const api = {
       "/api/integrations/gitlab/tickets",
       { method: "POST", body: JSON.stringify(body) },
     ),
+  /** One ticket per remediation action (a Windows KB, or a product upgrade). */
+  createGitLabGroupTicket: (body: { asset: string; product: string; fixed_version: string }) =>
+    request<{ ticket: GitLabTicket; created: boolean; reused: boolean; message: string; cves: number }>(
+      "/api/integrations/gitlab/group-tickets",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   refreshGitLabTicket: (id: string) =>
     request<{ ticket: GitLabTicket }>(`/api/integrations/gitlab/tickets/${encodeURIComponent(id)}/refresh`, {
       method: "POST",

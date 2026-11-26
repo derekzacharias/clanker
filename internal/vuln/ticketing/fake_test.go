@@ -112,6 +112,13 @@ func (f *fakeGitLab) handler() http.Handler {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"iid": 42, "state": "closed",
 				"web_url": "http://gitlab.test.intra:8929/platform/security/-/issues/42"})
+		case strings.Contains(r.URL.Path, "/issues/") && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": 1001, "iid": 42, "project_id": 42, "title": body["title"],
+				"state": "opened", "web_url": "http://gitlab.test.intra:8929/platform/security/-/issues/42",
+				"description": body["description"],
+			})
 		case strings.Contains(r.URL.Path, "/projects/"):
 			if f.project == nil {
 				w.WriteHeader(http.StatusNotFound)

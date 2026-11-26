@@ -34,11 +34,17 @@ func newAuthedServer(t *testing.T, clk *clock, mutate ...func(*Options)) (*Serve
 		t.Fatalf("write credentials: %v", err)
 	}
 	opts := Options{
-		CachePath:   filepath.Join(t.TempDir(), "intel.db"),
-		AuthPath:    authPath,
-		ToolVersion: "test-1.0",
-		SessionTTL:  2 * time.Hour,
-		Now:         clk.Now,
+		CachePath: filepath.Join(t.TempDir(), "intel.db"),
+		AuthPath:  authPath,
+		// Background jobs are disabled in tests: the maintenance loop performs network calls
+		// (KEV/EPSS refresh) and writes to the cache while a test is asserting against the same
+		// database. That is uncontrolled network I/O and timing inside a unit test — the likely
+		// source of the intermittent failure seen in this package. A test that wants the loop
+		// can opt back in through the mutate hooks.
+		DisableBackgroundJobs: true,
+		ToolVersion:           "test-1.0",
+		SessionTTL:            2 * time.Hour,
+		Now:                   clk.Now,
 	}
 	for _, m := range mutate {
 		m(&opts)

@@ -717,3 +717,135 @@ func modelFindingFor(row *vulnRow) model.Finding {
 		VulnerabilityID:  row.CVE,
 	}
 }
+
+// handleGitLabCreateGroupTicket files one ticket for a remediation action (a Windows KB, or a
+// product upgrade) instead of one per CVE.
+//
+// The individual findings stay exactly as they are: this endpoint only changes what goes into the
+// tracker. A thousand CVEs behind one cumulative update become one actionable issue.
+func (s *Server) handleGitLabCreateGroupTicket(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Asset   string `json:"asset"`
+		Product string `json:"product"`
+		Fixed   string `json:"fixed_version"`
+		Project int    `json:"project_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is not valid JSON")
+		return
+	}
+	if strings.TrimSpace(body.Asset) == "" || strings.TrimSpace(body.Fixed) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "asset and fixed_version are required")
+		return
+	}
+	settings, err := s.gitlabSettings()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "gitlab_config_error", err.Error())
+		return
+	}
+	if !settings.Usable() {
+		writeError(w, http.StatusConflict, "gitlab_not_configured",
+			"GitLab ticketing is not ready: enable it in Settings → Integrations → GitLab and set a server, token and project")
+		return
+	}
+	projectID := settings.ProjectID
+	if body.Project > 0 {
+		projectID = body.Project
+	}
+	client, err := s.gitlabClient(settings)
+	if err != nil {
+		writeError(w, http.StatusConflict, "gitlab_not_configured", err.Error())
+		return
+	}
+	project, err := client.Project(r.Context(), projectID)
+	if err != nil {
+		writeError(w, gitlabStatus(err), "gitlab_error", humanGitLabError(err))
+		return
+	}
+
+	// Collect the open findings this action closes.
+	items, err := s.remediate.List(r.Context(), remediate.Filter{Asset: body.Asset}, s.currentPolicy(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "remediation_error", err.Error())
+		return
+	}
+	group := ticketing.Group{
+		Asset: body.Asset, Product: body.Product, Fixed: body.Fixed,
+		Action: body.Fixed, Kind: "package_upgrade",
+	}
+	if strings.HasPrefix(strings.ToUpper(body.Fixed), "KB") {
+		group.Kind = "windows_update"
+	}
+	ds, dsErr := s.buildDataset(r.Context())
+	kevByVuln := map[string]bool{}
+	if dsErr == nil {
+		for _, row := range ds.Vulns {
+			if row.KEV {
+				kevByVuln[row.Asset+"|"+row.CVE] = true
+			}
+		}
+	}
+	var reboot bool
+	for _, it := range items {
+		if it.State == remediate.StateResolved || it.State == remediate.StateRiskAccepted || it.State == remediate.StateFalsePositive {
+			continue
+		}
+		if it.FixedVersion != body.Fixed || !strings.EqualFold(it.Product, body.Product) {
+			continue
+		}
+		group.Findings = append(group.Findings, ticketing.Finding{
+			VulnerabilityID: it.VulnerabilityID, Severity: it.Severity, EffectiveSeverity: it.Severity,
+			Asset: it.Asset, Product: it.Product, FixedVersion: it.FixedVersion,
+			KEV: kevByVuln[it.Asset+"|"+it.VulnerabilityID],
+		})
+		if it.State != "" {
+			// Windows update findings carry the reboot note in their remediation text.
+			if strings.Contains(strings.ToLower(it.Remediation), "restart is required") {
+				reboot = true
+			}
+		}
+	}
+	if len(group.Findings) == 0 {
+		writeError(w, http.StatusConflict, "nothing_to_close",
+			"no open findings are closed by that action on this asset")
+		return
+	}
+	group.Reboot = reboot
+	if own, err := s.remediate.Ownership(body.Asset); err == nil {
+		group.OS, group.OSVersion = "", ""
+		group.Access = ticketing.AccessBlock{Host: body.Asset, SSHUser: own.SSHUser, SSHHost: own.SSHHost,
+			SSHJump: own.SSHJump, SSHPort: own.SSHPort, Runbook: own.RunbookURL}
+	}
+	if hv, ok := ds.Hosts[body.Asset]; ok {
+		group.Hostname = firstNonEmpty(hv.Asset.Hostname, body.Asset)
+		group.OS, group.OSVersion = hv.Asset.OS, hv.Asset.OSVersion
+		group.Installed = ""
+	}
+	for _, it := range items {
+		if it.Product == body.Product && it.InstalledVersion != "" {
+			group.Installed = it.InstalledVersion
+			break
+		}
+	}
+
+	creator := &ticketing.Creator{
+		Store: s.tickets, Client: client, ProjectID: projectID, ProjectPath: project.PathWithNamespace,
+		CreatedBy: s.actorName(r), Log: s.log,
+	}
+	if settings.Assignee != "" {
+		if user, err := client.FindUser(r.Context(), settings.Assignee); err == nil {
+			creator.AssigneeID, creator.AssigneeName = user.ID, user.Username
+		}
+	}
+	res, err := creator.CreateGroup(r.Context(), group)
+	if err != nil {
+		writeError(w, gitlabStatus(err), "gitlab_error", humanGitLabError(err))
+		return
+	}
+	s.audit(r, "ticket.group", firstNonEmpty(group.Action, group.Fixed),
+		fmt.Sprintf("asset=%s action=%s cves=%d issue=#%d created=%t", group.Asset, group.Action, len(group.Findings), res.Ticket.IssueIID, res.Created))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ticket": res.Ticket, "created": res.Created, "reused": res.Reused,
+		"message": res.Message, "cves": len(group.Findings),
+	})
+}

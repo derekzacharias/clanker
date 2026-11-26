@@ -490,3 +490,17 @@ func (c *Client) SearchUsers(ctx context.Context, search string) ([]User, error)
 	}
 	return out, nil
 }
+
+// UpdateIssue rewrites an existing issue's title and description.
+//
+// Used when a remediation action already has a ticket and a later assessment finds more CVEs it
+// closes: updating the issue keeps one ticket per action instead of piling up duplicates.
+func (c *Client) UpdateIssue(ctx context.Context, projectID, iid int, in IssueInput) (Issue, error) {
+	var out Issue
+	body := map[string]string{"title": in.Title, "description": in.Description}
+	if in.Labels != "" {
+		body["labels"] = in.Labels
+	}
+	err := c.do(ctx, http.MethodPut, "/projects/"+strconv.Itoa(projectID)+"/issues/"+strconv.Itoa(iid), body, &out)
+	return out, err
+}

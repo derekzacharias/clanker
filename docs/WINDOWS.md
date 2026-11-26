@@ -73,6 +73,23 @@ The inventory reports each source separately (`identity`, `hotfix`, `windows_upd
 the report carries coverage notes when something was not assessed. The asset page renders them under
 **What this assessment does not cover**. Absence of a source is never rendered as zero risk.
 
+## 5a. One ticket per remediation action
+
+A Windows cumulative update closes hundreds or thousands of CVEs. Filing one ticket per CVE is
+technically traceable and operationally useless, so the tracker gets **one issue per action** while
+every individual finding stays in Clanker Guard for audit and reporting.
+
+* `POST /api/integrations/gitlab/group-tickets {asset, product, fixed_version}` files the ticket
+  for one action; the Remediation → **By upgrade** tab has a *File ticket* button per group.
+* The issue lists the host, IP, OS, product, installed and fixed versions, the KB, severity counts,
+  the KEV count, every CVE in a collapsible block, installation commands, reboot requirement and
+  verification steps.
+* Idempotent: the group key (asset + product + fixed version) is the dedupe key, so a second scan
+  reuses the issue. If a later scan finds *more* CVEs behind the same action, the existing issue is
+  rewritten (its content digest changes) rather than a second one being opened.
+* Closing the ticket is a human action; Clanker Guard only resolves findings when a later
+  assessment stops reporting them.
+
 ## 6. Deliberately not implemented
 
 | Gap | Why it matters | Next step |

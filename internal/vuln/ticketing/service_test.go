@@ -248,3 +248,85 @@ func TestAssigneeIsResolvedAndSentAsAnID(t *testing.T) {
 		t.Fatalf("assignee id = %v", ids[0])
 	}
 }
+
+// Acceptance scenario B: 1,000 CVEs closed by one cumulative update produce one ticket, and
+// repeated assessments do not produce a second one.
+func TestGroupTicketIsCreatedOnceForManyCVEs(t *testing.T) {
+	f := newFake()
+	creator, store := newCreator(t, f)
+	g := groupFixture(1000)
+
+	res, err := creator.CreateGroup(context.Background(), g)
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if !res.Created || res.Ticket.IssueIID == 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	// The issue carries the action, the count and the collapsible CVE list.
+	body := str(f.last().Body["description"])
+	for _, want := range []string{"KB5127648", "All CVEs closed by this action (1000)", "wusa.exe", "A restart is required"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("issue body missing %q", want)
+		}
+	}
+	if n := f.count(http.MethodPost, "/issues"); n != 1 {
+		t.Fatalf("GitLab received %d creation requests, want 1", n)
+	}
+
+	// A second assessment with the same CVE set reuses the issue and calls GitLab not at all.
+	f2res, err := creator.CreateGroup(context.Background(), g)
+	if err != nil {
+		t.Fatalf("second CreateGroup: %v", err)
+	}
+	if !f2res.Reused || f2res.Created {
+		t.Fatalf("second result = %+v", f2res)
+	}
+	if n := f.count(http.MethodPost, "/issues"); n != 1 {
+		t.Fatalf("duplicate ticket created: %d creation requests", n)
+	}
+	if n := f.count(http.MethodPut, "/issues"); n != 0 {
+		t.Fatalf("unchanged content should not update the issue: %d PUTs", n)
+	}
+	tickets, _ := store.ForFinding(context.Background(), GroupKey(g.Asset, g.Product, g.Fixed))
+	if len(tickets) != 1 {
+		t.Fatalf("stored tickets = %d, want 1", len(tickets))
+	}
+}
+
+// When a later assessment finds more CVEs behind the same action, the existing issue is rewritten
+// rather than duplicated.
+func TestGroupTicketUpdatesWhenMoreCVEsAppear(t *testing.T) {
+	f := newFake()
+	creator, _ := newCreator(t, f)
+	first := groupFixture(10)
+	if _, err := creator.CreateGroup(context.Background(), first); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	more := groupFixture(25)
+	res, err := creator.CreateGroup(context.Background(), more)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if res.Ticket.IssueIID != 42 {
+		t.Fatalf("issue iid = %d", res.Ticket.IssueIID)
+	}
+	if n := f.count(http.MethodPost, "/issues"); n != 1 {
+		t.Fatalf("a second issue was created (%d POSTs)", n)
+	}
+	if n := f.count(http.MethodPut, "/issues"); n != 1 {
+		t.Fatalf("the issue was not updated (%d PUTs)", n)
+	}
+	if !strings.Contains(res.Message, "25") {
+		t.Fatalf("message does not report the new count: %q", res.Message)
+	}
+}
+
+// A group with nothing to close must not create a ticket.
+func TestGroupTicketRefusesEmptyGroups(t *testing.T) {
+	creator, _ := newCreator(t, newFake())
+	g := groupFixture(0)
+	if _, err := creator.CreateGroup(context.Background(), g); err == nil {
+		t.Fatal("an empty group produced a ticket")
+	}
+}

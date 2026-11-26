@@ -97,6 +97,7 @@ func (s *Store) ensureSchema() error {
 	// Existing installs predate these columns, so they are added after the table exists.
 	for _, col := range [][2]string{
 		{"remediation_status", "TEXT NOT NULL DEFAULT ''"},
+		{"content_digest", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn("gitlab_tickets", col[0], col[1]); err != nil {
 			return err
@@ -326,4 +327,18 @@ func (s *Store) ensureColumn(table, column, ddl string) error {
 	rows.Close()
 	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, ddl))
 	return err
+}
+
+// SetContentDigest records what the issue body said, so a later assessment can tell whether the
+// ticket needs updating (new CVEs closed by the same action) or is already current.
+func (s *Store) SetContentDigest(ctx context.Context, id, digest string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE gitlab_tickets SET content_digest = ? WHERE id = ?`, digest, id)
+	return err
+}
+
+// ContentDigest returns the stored digest for a ticket ("" when never recorded).
+func (s *Store) ContentDigest(ctx context.Context, id string) (string, error) {
+	var d string
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(content_digest,'') FROM gitlab_tickets WHERE id = ?`, id).Scan(&d)
+	return d, err
 }

@@ -102,6 +102,7 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
   const [accepting, setAccepting] = useState<RemediationItem | null>(null);
   const [acceptReason, setAcceptReason] = useState("");
   const [acceptDays, setAcceptDays] = useState(30);
+  const [ticketing, setTicketing] = useState<string | null>(null);
   const { push } = useToast();
 
   const summary = useAsync(() => api.remediationSummary());
@@ -130,6 +131,24 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
     (summary.data?.teams ?? []).forEach((t) => known.add(t));
     return [...known].sort();
   }, [summary.data]);
+
+  // File one ticket for the whole upgrade instead of one per CVE: that is the difference
+  // between a thousand tickets and "install KB5127648 once".
+  async function fileGroupTicket(g: RemediationGroup) {
+    setTicketing(g.key);
+    try {
+      const res = await api.createGitLabGroupTicket({
+        asset: g.asset,
+        product: g.product,
+        fixed_version: g.fixed_version ?? "",
+      });
+      push(res.message);
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Could not file the ticket");
+    } finally {
+      setTicketing(null);
+    }
+  }
 
   async function claim(item: RemediationItem) {
     if (!me) return;
@@ -347,6 +366,7 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                       <Th>Worst severity</Th>
                       <Th>Team</Th>
                       <Th>Due</Th>
+                      <Th>Ticket</Th>
                     </tr>
                   </thead>
                   <tbody>
@@ -373,6 +393,15 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                         <Td className="text-xs">
                           {g.due_at ? formatDate(g.due_at) : <span className="text-subtle">—</span>}
                           {g.overdue > 0 ? <span className="block text-critical">{g.overdue} overdue</span> : null}
+                        </Td>
+                        <Td>
+                          {g.fixed_version ? (
+                            <Button size="sm" variant="ghost" onClick={() => fileGroupTicket(g)} disabled={ticketing === g.key}>
+                              {ticketing === g.key ? "Filing…" : "File ticket"}
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-subtle">needs a fixed version</span>
+                          )}
                         </Td>
                       </Tr>
                     ))}

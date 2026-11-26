@@ -386,3 +386,71 @@ func TestTokenFromEnvironmentIsReportedWithoutBeingExposed(t *testing.T) {
 		t.Fatalf("view = %+v", view)
 	}
 }
+
+// Acceptance scenario B at the API level: many findings behind one action → one issue, and asking
+// twice does not file a second ticket.
+func TestGroupTicketEndpointFilesOneIssueForManyFindings(t *testing.T) {
+	srv, fake, baseURL := gitlabServer(t)
+	configureGitLab(t, srv, baseURL)
+	// Seed through the agent path so remediation items exist (a stored report alone does not
+	// create work items; ingest does).
+	postReport(t, srv, "web01", "Ubuntu:24.04", "openssl", "CVE-2026-9301", "high", "SCAN-GRP-1")
+
+	var list struct {
+		Items []struct {
+			Asset   string `json:"asset"`
+			Product string `json:"product"`
+			Fixed   string `json:"fixed_version"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation", &list)
+	if len(list.Items) == 0 {
+		t.Fatal("no remediation items seeded")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"asset": list.Items[0].Asset, "product": list.Items[0].Product,
+		"fixed_version": list.Items[0].Fixed,
+	})
+	rec := request(t, srv.Handler(), "POST", "/api/integrations/gitlab/group-tickets", string(body), dash())
+	if rec.Code != 200 {
+		t.Fatalf("group ticket = %d: %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Created bool `json:"created"`
+		Reused  bool `json:"reused"`
+		CVEs    int  `json:"cves"`
+		Ticket  struct {
+			IssueIID int    `json:"issue_iid"`
+			IssueURL string `json:"issue_url"`
+		} `json:"ticket"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if !created.Created || created.CVEs == 0 || created.Ticket.IssueIID == 0 {
+		t.Fatalf("result = %+v", created)
+	}
+	if fake.createHit != 1 {
+		t.Fatalf("creation requests = %d", fake.createHit)
+	}
+
+	// The second call reuses it.
+	rec = request(t, srv.Handler(), "POST", "/api/integrations/gitlab/group-tickets", string(body), dash())
+	if rec.Code != 200 {
+		t.Fatalf("second = %d: %s", rec.Code, rec.Body.String())
+	}
+	var second struct {
+		Reused bool `json:"reused"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &second)
+	if !second.Reused || fake.createHit != 1 {
+		t.Fatalf("second call created another ticket: reused=%v posts=%d", second.Reused, fake.createHit)
+	}
+
+	// A group with nothing open is refused rather than filing an empty issue.
+	empty, _ := json.Marshal(map[string]any{"asset": "nope", "product": "x", "fixed_version": "KB1"})
+	rec = request(t, srv.Handler(), "POST", "/api/integrations/gitlab/group-tickets", string(empty), dash())
+	if rec.Code != 409 {
+		t.Fatalf("empty group = %d, want 409", rec.Code)
+	}
+}

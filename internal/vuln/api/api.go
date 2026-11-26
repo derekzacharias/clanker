@@ -17,9 +17,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/aihub"
 	"github.com/bgdnvk/clanker/internal/vuln/auth"
+	"github.com/bgdnvk/clanker/internal/vuln/automation"
 	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
@@ -49,6 +52,10 @@ type Options struct {
 	// X-Forwarded-For header is trusted. Empty means "no proxy": the header is
 	// ignored and rate limits key on the real peer address.
 	TrustedProxies []string
+	// AIDir stores AI settings and encrypted credentials. Empty means the user config dir.
+	AIDir string
+	// AutomationDir stores issue-automation policy and its audit trail.
+	AutomationDir string
 	// AgentVersion overrides the version advertised in install commands. Empty
 	// means "derive it": the dashboard's own version is the wrong answer, because
 	// agent releases and server releases are versioned independently.
@@ -97,6 +104,13 @@ type Server struct {
 	remediate *remediate.Store
 	// tickets links findings to GitLab issues.
 	tickets *ticketing.Store
+	// ai holds provider settings and encrypted credentials (lazy: the directory may not
+	// exist until an operator configures a provider).
+	ai   *aihub.Store
+	aiMu sync.Mutex
+	// issueAuto holds the "Create Issues for Me" policy and its audit trail.
+	issueAuto    *automation.Store
+	automationMu sync.Mutex
 	// getenv reads the deployment environment for integration credentials (tests inject
 	// their own so a developer's GITLAB_TOKEN cannot change a test outcome).
 	getenv func(string) string
@@ -285,6 +299,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/integrations/gitlab/preview", s.handleGitLabPreview)
 	s.mux.HandleFunc("GET /api/integrations/gitlab/tickets", s.handleGitLabTickets)
 	s.mux.HandleFunc("POST /api/integrations/gitlab/tickets", s.handleGitLabCreateTicket)
+	s.mux.HandleFunc("POST /api/integrations/gitlab/group-tickets", s.handleGitLabCreateGroupTicket)
+
+	// AI providers and issue automation. Credentials go in through these routes and
+	// never come back out: every response carries a mask.
+	s.mux.HandleFunc("GET /api/settings/ai", s.handleAISettingsGet)
+	s.mux.HandleFunc("PUT /api/settings/ai", s.handleAISettingsPut)
+	s.mux.HandleFunc("PUT /api/settings/ai/credential", s.handleAICredentialPut)
+	s.mux.HandleFunc("DELETE /api/settings/ai/credential", s.handleAICredentialDelete)
+	s.mux.HandleFunc("POST /api/settings/ai/test", s.handleAITest)
+	s.mux.HandleFunc("GET /api/settings/ai/models", s.handleAIModels)
+	s.mux.HandleFunc("GET /api/settings/automation", s.handleAutomationGet)
+	s.mux.HandleFunc("PUT /api/settings/automation", s.handleAutomationPut)
+	s.mux.HandleFunc("POST /api/settings/automation/preview", s.handleAutomationPreview)
+	s.mux.HandleFunc("POST /api/settings/automation/run", s.handleAutomationRun)
+	s.mux.HandleFunc("GET /api/settings/automation/audit", s.handleAutomationAudit)
 	s.mux.HandleFunc("POST /api/integrations/gitlab/tickets/{id}/refresh", s.handleGitLabTicketRefresh)
 
 	s.mux.HandleFunc("GET /api/feeds", s.handleFeeds)
