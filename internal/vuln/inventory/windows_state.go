@@ -116,6 +116,12 @@ func (c *WindowsStateCollector) CollectState(ctx context.Context, opts Options) 
 	state.Product = strings.TrimSpace(raw.Product)
 	state.DisplayVersion = strings.TrimSpace(raw.Display)
 	state.Build = windowsBuild(raw.Build, raw.Major, raw.Minor, raw.UBR)
+	// The registry calls many Windows 11 machines "Windows 10 Pro"; the build decides. The
+	// correction is recorded so the report shows what the registry actually said.
+	if corrected, changed := WindowsMarketingName(state.Product, state.Build); changed {
+		state.CollectorStatus["identity"] = "ok (registry names this OS " + state.Product + "; build " + state.Build + " is Windows 11)"
+		state.Product = corrected
+	}
 	state.InstalledUpdates = raw.Installed
 	state.DotNet = raw.DotNet
 	state.PendingReasons = raw.Pending

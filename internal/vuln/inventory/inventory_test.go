@@ -412,3 +412,44 @@ func TestWindowsUpdateScriptIsReadOnly(t *testing.T) {
 		t.Fatal("update search does not ask for missing updates")
 	}
 }
+
+// Windows 11 machines often still report ProductName "Windows 10 Pro" in the registry. Trusting it
+// mislabels the OS and, worse, makes advisory matching look for "Windows 10 Version 23H2", which
+// does not exist — so every missing update goes unreported.
+func TestWindowsMarketingNameUsesTheBuild(t *testing.T) {
+	cases := []struct {
+		product, build, want string
+		corrected            bool
+	}{
+		{"Windows 10 Pro", "10.0.22631.4317", "Windows 11 Pro", true},   // 23H2
+		{"Windows 10 Home", "10.0.22621.4249", "Windows 11 Home", true}, // 22H2
+		{"Windows 10 Pro", "10.0.26100.1742", "Windows 11 Pro", true},   // 24H2
+		{"Windows 10 Pro", "10.0.19045.4894", "Windows 10 Pro", false},  // really Windows 10
+		{"Windows 11 Pro", "10.0.22631.4317", "Windows 11 Pro", false},  // already right
+		{"Windows Server 2022", "10.0.20348.2582", "Windows Server 2022", false},
+		{"Windows Server 2025", "10.0.26100.1742", "Windows Server 2025", false}, // same build as 24H2
+		{"", "10.0.22631.1", "", false},
+	}
+	for _, c := range cases {
+		got, corrected := WindowsMarketingName(c.product, c.build)
+		if got != c.want || corrected != c.corrected {
+			t.Fatalf("WindowsMarketingName(%q, %q) = (%q, %v), want (%q, %v)",
+				c.product, c.build, got, corrected, c.want, c.corrected)
+		}
+	}
+}
+
+// The correction must happen inside the parse path, so the asset records the right OS.
+func TestParseWindowsOSInfoCorrectsWindows11(t *testing.T) {
+	name, version, build, err := parseWindowsOSInfo([]byte(
+		`{"product":"Windows 10 Pro","display":"23H2","build":"22631","major":10,"minor":0,"ubr":4317}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "Windows 11 Pro" {
+		t.Fatalf("product = %q, want Windows 11 Pro", name)
+	}
+	if version != "23H2" || build != "10.0.22631.4317" {
+		t.Fatalf("version=%q build=%q", version, build)
+	}
+}

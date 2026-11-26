@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/bgdnvk/clanker/internal/vuln/model"
@@ -324,7 +325,42 @@ func parseWindowsOSInfo(raw []byte) (name, version, build string, err error) {
 			build = build + "." + ubr
 		}
 	}
+	name, _ = WindowsMarketingName(name, build)
 	return name, version, build, nil
+}
+
+// WindowsMarketingName corrects the registry's product name using the build number.
+//
+// Windows 11 machines commonly report ProductName = "Windows 10 Pro": Microsoft never updated that
+// key for many SKUs, and every tool that trusts it mislabels the OS. The build is authoritative —
+// 22000 and above is Windows 11 (21H2=22000, 22H2=22621, 23H2=22631, 24H2=26100) — except for
+// Server, whose builds overlap Windows 11 (Server 2025 is also 26100) but which is named correctly.
+//
+// Getting this wrong is not cosmetic: the advisory matcher selects Microsoft's product by family
+// and release, so a Windows 11 host labelled "Windows 10 Version 23H2" matches nothing and silently
+// reports zero missing updates.
+func WindowsMarketingName(product, build string) (string, bool) {
+	name := strings.TrimSpace(product)
+	if name == "" {
+		return name, false
+	}
+	upper := strings.ToUpper(name)
+	if strings.Contains(upper, "SERVER") {
+		return name, false
+	}
+	// The build string is composed as major.minor.build[.UBR]; take the third component.
+	parts := strings.Split(strings.TrimSpace(build), ".")
+	if len(parts) < 3 {
+		return name, false
+	}
+	buildNumber, err := strconv.Atoi(parts[2])
+	if err != nil || buildNumber < 22000 {
+		return name, false
+	}
+	if strings.HasPrefix(upper, "WINDOWS 10") {
+		return "Windows 11" + name[len("Windows 10"):], true
+	}
+	return name, false
 }
 
 // numberString renders a JSON number or string without a type assertion mess.
