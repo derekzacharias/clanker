@@ -242,3 +242,31 @@ func TestWindowsInstallFallsBackToStartupShortcut(t *testing.T) {
 		t.Fatal("startup shortcut survived uninstall")
 	}
 }
+
+// Installing over an existing install must take effect. `enable --now` does nothing to a running
+// unit, so an upgraded binary would sit on disk while the old build kept the connection — which is
+// what made an agent upgrade look like "not reporting".
+func TestLinuxInstallRestartsAnExistingUnit(t *testing.T) {
+	dir := t.TempDir()
+	var calls []string
+	m := &Manager{
+		ExePath: "/usr/local/bin/clanker-guard-agent", ConfigPath: dir + "/agent.json",
+		Home: dir, goos: "linux", Run: func(ctx context.Context, name string, args ...string) (string, error) {
+			calls = append(calls, name+" "+strings.Join(args, " "))
+			if name == "systemctl" && len(args) > 1 && args[1] == "show-environment" {
+				return "VAR=value", nil
+			}
+			return "", nil
+		},
+	}
+	if _, err := m.installSystemdUser(context.Background()); err != nil && !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("installSystemdUser: %v", err)
+	}
+	joined := strings.Join(calls, "\n")
+	if !strings.Contains(joined, "systemctl --user enable --now") {
+		t.Fatalf("enable missing:\n%s", joined)
+	}
+	if !strings.Contains(joined, "systemctl --user restart "+Name+".service") {
+		t.Fatalf("install does not restart an existing unit:\n%s", joined)
+	}
+}

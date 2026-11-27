@@ -246,6 +246,13 @@ func (m *Manager) installSystemdUser(ctx context.Context) (Status, error) {
 	if _, err := m.Run(ctx, "systemctl", "--user", "enable", "--now", Name+".service"); err != nil {
 		return Status{Platform: m.goos, Path: unitPath}, err
 	}
+	// `enable --now` is a no-op for a unit that is already running, so an upgraded binary would keep
+	// sitting on disk while the old build held the connection. Restart explicitly: an install over an
+	// existing install must take effect, which is exactly what an agent upgrade is.
+	if _, err := m.Run(ctx, "systemctl", "--user", "restart", Name+".service"); err != nil {
+		return Status{Platform: m.goos, Path: unitPath, Installed: true, Enabled: true,
+			Detail: "installed, but the restart failed: " + shortErr(err)}, err
+	}
 	// Without lingering the unit stops when the last session closes, which is the
 	// exact "it went offline" complaint this is here to prevent. Not fatal: some
 	// systems disallow it, and the service is still running for this session.
