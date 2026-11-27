@@ -176,3 +176,48 @@ const msrcFixture = `<cvrfdoc xmlns="http://www.icasi.org/CVRF/schema/cvrf/1.1">
       <URL>https://catalog.update.microsoft.com/x</URL><ProductID>12085</ProductID></Remediation></Remediations>
   </Vulnerability>
 </cvrfdoc>`
+
+// A fully patched host must produce a positive, specific statement — not silence. Silence is what
+// made a patched Windows endpoint look like a broken scanner.
+func TestPatchedHostSaysSoExplicitly(t *testing.T) {
+	db := msrcTestDB(t)
+	inv := windowsInventory()
+	inv.Windows.MissingUpdates = nil // nothing applicable
+	inv.Windows.InstalledUpdates = []string{"KB5044284", "KB5044285"}
+
+	res, err := (&WindowsAssessor{DB: db}).Assess(context.Background(), inv, "win01")
+	if err != nil {
+		t.Fatalf("Assess: %v", err)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("findings = %+v", res.Findings)
+	}
+	joined := strings.Join(res.Coverage, " ")
+	if !strings.Contains(joined, "no missing security updates") {
+		t.Fatalf("coverage does not state the host is current: %v", res.Coverage)
+	}
+	if !strings.Contains(joined, "Windows 11 Pro 24H2") || !strings.Contains(joined, "10.0.26100.1742") {
+		t.Fatalf("coverage does not name what was assessed: %v", res.Coverage)
+	}
+	// It must also say what it did not assess.
+	if !strings.Contains(joined, "not yet matched") {
+		t.Fatalf("coverage does not disclose the application gap: %v", res.Coverage)
+	}
+}
+
+// A host with only a definition update applicable (Defender signatures) is not vulnerable.
+func TestDefinitionUpdatesDoNotProduceFindings(t *testing.T) {
+	db := msrcTestDB(t)
+	inv := windowsInventory()
+	inv.Windows.MissingUpdates = []model.WindowsUpdate{{
+		Title: "Security Intelligence Update for Microsoft Defender Antivirus - KB2267602",
+		KBs:   []string{"KB2267602"}, Classification: []string{"Definition Updates"},
+	}}
+	res, _ := (&WindowsAssessor{DB: db}).Assess(context.Background(), inv, "win01")
+	if len(res.Findings) != 0 {
+		t.Fatalf("a signature update became a vulnerability: %+v", res.Findings)
+	}
+	if !strings.Contains(strings.Join(res.Coverage, " "), "no missing security updates") {
+		t.Fatalf("coverage should say the host is current: %v", res.Coverage)
+	}
+}

@@ -85,6 +85,7 @@ func (w *WindowsAssessor) Assess(ctx context.Context, inv model.Inventory, host 
 	}
 
 	seen := map[string]bool{} // CVE+KB: one finding per vulnerability per update
+	securityMissing := 0
 	for _, u := range ws.MissingUpdates {
 		// Only security updates become findings. A feature update or driver is not a
 		// vulnerability, and treating it as one would bury the real work.
@@ -100,6 +101,7 @@ func (w *WindowsAssessor) Assess(ctx context.Context, inv model.Inventory, host 
 		if len(kbs) == 0 {
 			continue
 		}
+		securityMissing++
 		for _, kb := range kbs {
 			cves, err := msrc.KBsForProduct(ctx, w.DB, kb, match)
 			if err != nil {
@@ -123,6 +125,22 @@ func (w *WindowsAssessor) Assess(ctx context.Context, inv model.Inventory, host 
 			}
 		}
 	}
+	// With advisories present and nothing missing, this is a real clean result — and saying it
+	// is the difference between "your machine is current" and "we found nothing to say".
+	if count > 0 && len(res.Findings) == 0 && res.Indeterminate == 0 && securityMissing == 0 {
+		res.Coverage = append(res.Coverage, fmt.Sprintf(
+			"Windows Update Agent reports no missing security updates on this host: %s %s, build %s, "+
+				"%d installed updates checked against %d Microsoft advisories. This assessment found no "+
+				"applicable Windows vulnerability at this patch level.",
+			firstNonEmpty(ws.Product, "Windows"), firstNonEmpty(ws.DisplayVersion, ""), ws.Build,
+			len(installed), count))
+	}
+	// Windows applications are inventoried but not yet matched against advisories; say so, so a
+	// clean Windows result is not read as a clean application result.
+	res.Coverage = append(res.Coverage,
+		"Installed applications (browsers, Office, runtimes, third-party software) were inventoried but are not "+
+			"yet matched against vulnerability advisories; Windows findings cover operating-system updates only.")
+
 	// A host with a pending reboot has not finished applying what it has: say so, so a
 	// "patched" reading is not trusted until the reboot happens.
 	if ws.PendingReboot {

@@ -228,6 +228,7 @@ func finishWith(ctx context.Context, store *intel.Store, opts Options, started t
 	// by what the endpoint's own update service reports, then mapped to CVEs via Microsoft's
 	// advisories. It appends findings and, just as importantly, coverage notes.
 	if in.Inventory.Windows != nil {
+		ensureWindowsAdvisories(ctx, store, opts, &in)
 		win := &assess.WindowsAssessor{DB: store.DB(), Now: opts.Now}
 		winRes, winErr := win.Assess(ctx, in.Inventory, in.Inventory.Asset.Hostname)
 		if winErr != nil {
@@ -883,4 +884,41 @@ func MSRCStatus(cachePath string, w io.Writer) {
 	if !fresh {
 		fmt.Fprintln(w, "  warning: Windows update findings need current Microsoft advisories; run feeds update --with-msrc")
 	}
+}
+
+// msrcSync is injectable so tests never touch the network.
+var msrcSync = msrc.Sync
+
+// msrcMaxAge is how stale Microsoft advisory data may be before a scan refreshes it.
+const msrcMaxAge = 24 * time.Hour
+
+// ensureWindowsAdvisories makes a Windows scan self-sufficient.
+//
+// Windows correlation needs Microsoft's KB→CVE mapping. Making that a manual prerequisite was the
+// reason a patched-looking endpoint reported zero findings: the update list was collected, the
+// advisories were absent, and nothing said the two facts were unrelated. A scan now imports them
+// when they are missing or a day old, bounded, and records what happened either way.
+func ensureWindowsAdvisories(ctx context.Context, store *intel.Store, opts Options, in *pipelineInput) {
+	if opts.Offline {
+		in.ExtraErrors = append(in.ExtraErrors,
+			"Microsoft advisories were not refreshed because this scan is offline; Windows update findings "+
+				"use whatever advisory data was already cached")
+		return
+	}
+	if err := msrc.EnsureSchema(store.DB()); err != nil {
+		in.ExtraErrors = append(in.ExtraErrors, "Microsoft advisory store unavailable: "+err.Error())
+		return
+	}
+	if state, ok := msrc.LastSync(store.DB()); ok && opts.Now().Sub(state.SyncedAt) < msrcMaxAge {
+		return
+	}
+	opts.report(Stage{Name: "advisories", Percent: 30, Detail: "importing Microsoft security advisories"})
+	state, err := msrcSync(ctx, store.DB(), msrc.SyncOptions{Months: 3, Log: slog.Default()})
+	if err != nil {
+		in.ExtraErrors = append(in.ExtraErrors,
+			"Microsoft advisory import failed ("+err.Error()+"); Windows update findings may be missing")
+		return
+	}
+	opts.report(Stage{Name: "advisories", Percent: 35,
+		Detail: fmt.Sprintf("%d Microsoft advisories, %d CVEs", state.Documents, state.CVE)})
 }
