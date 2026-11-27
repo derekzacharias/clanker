@@ -156,7 +156,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	now := s.opts.Now()
 	for _, hv := range ds.Hosts {
 		resp.Coverage.Assessed++
-		if now.Sub(hv.FinishedAt) > staleAfterDays*24*time.Hour {
+		if now.Sub(hv.FinishedAt) > staleAfterDays*24*time.Hour && !isPseudoAsset(hv.Host) {
 			resp.Coverage.Stale++
 		}
 		if resp.Coverage.LastScanAt == "" || hv.FinishedAt.Format(time.RFC3339) > resp.Coverage.LastScanAt {
@@ -219,6 +219,10 @@ type assetRow struct {
 	// AgentVersion is what the enrolled agent reports about itself right now (empty for
 	// assets that are not enrolled endpoints).
 	AgentVersion string `json:"agent_version,omitempty"`
+	// AgentID lets the dashboard queue a scan for this asset.
+	AgentID string `json:"agent_id,omitempty"`
+	// StaleReason explains why an asset is stale, when it cannot simply be rescanned.
+	StaleReason string `json:"stale_reason,omitempty"`
 	// AgentOutdated is true when the last report came from a different build than the agent is
 	// running, i.e. the numbers on this row are from the previous version.
 	AgentOutdated bool   `json:"agent_outdated,omitempty"`
@@ -257,7 +261,14 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		}
 		if a, ok := agentByHost[strings.ToLower(hv.Host)]; ok {
 			row.AgentVersion = a.Version
+			row.AgentID = a.ID
 			row.AgentOutdated = a.Version != "" && hv.ToolVersion != "" && a.Version != hv.ToolVersion
+		}
+		// A stale machine can be rescanned; a stale artifact has to be produced again.
+		if row.Stale && isPseudoAsset(hv.Host) {
+			row.StaleReason = "created from a file or image, not a machine: re-run that scan to refresh it"
+		} else if row.Stale && row.AgentID == "" {
+			row.StaleReason = "no agent is enrolled for this host, so it cannot be rescanned from here"
 		}
 		for _, f := range hv.Findings {
 			effective := f.effective()
@@ -1498,4 +1509,20 @@ func coverageNotices(hv *hostView) []string {
 			"interpret the totals accordingly.")
 	}
 	return notices
+}
+
+// isPseudoAsset reports assets the scanner synthesises rather than discovers: SBOM files, container
+// images, network scopes and the scanning host itself. They are not machines, so "stale" is not
+// something a rescan can fix, and counting them made the coverage number unclearable.
+func isPseudoAsset(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" || h == "localhost" {
+		return true
+	}
+	for _, prefix := range []string{"sbom:", "scope:", "image:", "container:", "file:", "tar:", "path:"} {
+		if strings.HasPrefix(h, prefix) {
+			return true
+		}
+	}
+	return false
 }

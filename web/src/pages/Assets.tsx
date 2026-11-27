@@ -10,8 +10,28 @@ import { EmptyState, ErrorState, LoadingBlock } from "../components/ui/Feedback"
 import { Input, Select } from "../components/ui/Field";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { useToast } from "../components/ui/Toast";
 
 export default function Assets() {
+  const { push } = useToast();
+  const [scanning, setScanning] = useState<string | null>(null);
+
+  // Queue a scan for one endpoint through its agent. The agent picks it up on its next poll, so
+  // there is nothing to wait for here beyond the acknowledgement.
+  async function queueScan(asset: { host: string; agent_id?: string }) {
+    if (!asset.agent_id) return;
+    setScanning(asset.host);
+    try {
+      await api.queueAgentScan(asset.agent_id);
+      push(`Scan queued for ${asset.host}; the agent will start it on its next check-in`);
+      reload();
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Could not queue the scan");
+    } finally {
+      setScanning(null);
+    }
+  }
   const { data, error, loading, reload } = useAsync(() => api.assets());
   const [query, setQuery] = useState("");
   const [osFilter, setOsFilter] = useState("all");
@@ -154,8 +174,27 @@ export default function Assets() {
                     <Td>
                       <span title={formatDate(a.last_scan)}>{relativeTime(a.last_scan)}</span>
                       {a.stale || isStale(a.last_scan) ? (
-                        <div>
-                          <Badge className="mt-1 border-high/30 bg-high-soft text-high">Stale</Badge>
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          <Badge
+                            className="border-high/30 bg-high-soft text-high"
+                            title={a.stale_reason || "No scan in the last 7 days"}
+                          >
+                            Stale
+                          </Badge>
+                          {/* Only an enrolled endpoint can be asked to scan; artifacts have to be produced again. */}
+                          {a.agent_id ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => queueScan(a)}
+                              disabled={scanning === a.host}
+                              title="Ask this endpoint's agent to scan now"
+                            >
+                              {scanning === a.host ? "Queueing…" : "Scan now"}
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-subtle">{a.stale_reason || "no agent enrolled"}</span>
+                          )}
                         </div>
                       ) : null}
                     </Td>

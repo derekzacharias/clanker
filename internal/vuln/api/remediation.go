@@ -590,3 +590,75 @@ func validateAccess(o remediate.Ownership) error {
 	}
 	return nil
 }
+
+// handleRemediationGroupAction applies one decision to every open finding behind one upgrade.
+//
+// The queue is per finding, but the decision ("I am taking this", "we accept this risk") is almost
+// always per upgrade: 1,067 CVEs on one missing KB share one owner and one deadline. Doing it one
+// row at a time is the reason nobody does it at all.
+func (s *Server) handleRemediationGroupAction(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Asset   string `json:"asset"`
+		Product string `json:"product"`
+		Fixed   string `json:"fixed_version"`
+		Action  string `json:"action"` // claim | accept
+		Reason  string `json:"reason"`
+		Days    int    `json:"days"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is not valid JSON")
+		return
+	}
+	if strings.TrimSpace(body.Asset) == "" || strings.TrimSpace(body.Fixed) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "asset and fixed_version are required")
+		return
+	}
+	items, err := s.remediate.List(r.Context(), remediate.Filter{Asset: body.Asset}, s.currentPolicy(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "remediation_error", err.Error())
+		return
+	}
+	var targets []remediate.Item
+	for _, it := range items {
+		if it.FixedVersion != body.Fixed || !strings.EqualFold(it.Product, body.Product) {
+			continue
+		}
+		if it.State == remediate.StateResolved || it.State == remediate.StateRiskAccepted || it.State == remediate.StateFalsePositive {
+			continue
+		}
+		targets = append(targets, it)
+	}
+	if len(targets) == 0 {
+		writeError(w, http.StatusConflict, "nothing_to_change", "no open findings match that upgrade on this asset")
+		return
+	}
+
+	changed := 0
+	for _, it := range targets {
+		switch body.Action {
+		case "claim":
+			owner := s.actorName(r)
+			if _, err := s.remediate.Update(r.Context(), it.ID, remediate.Patch{Owner: &owner}); err != nil {
+				s.log.Warn("group claim: item failed", "id", it.ID, "err", err)
+				continue
+			}
+		case "accept":
+			until := s.opts.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, body.Days)
+			if body.Days <= 0 || body.Days > 365 {
+				writeError(w, http.StatusBadRequest, "invalid_request", "an acceptance needs a review date within a year")
+				return
+			}
+			if _, err := s.remediate.AcceptRisk(r.Context(), it.ID, body.Reason, s.actorName(r), until); err != nil {
+				s.log.Warn("group accept: item failed", "id", it.ID, "err", err)
+				continue
+			}
+		default:
+			writeError(w, http.StatusBadRequest, "invalid_request", "action must be claim or accept")
+			return
+		}
+		changed++
+	}
+	s.audit(r, "remediation.group_"+body.Action, body.Asset,
+		fmt.Sprintf("upgrade=%s product=%s findings=%d", body.Fixed, body.Product, changed))
+	writeJSON(w, http.StatusOK, map[string]any{"changed": changed, "action": body.Action})
+}

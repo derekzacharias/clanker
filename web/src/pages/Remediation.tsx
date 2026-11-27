@@ -150,6 +150,36 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
     }
   }
 
+  async function groupAction(g: RemediationGroup, action: "claim" | "accept") {
+    setTicketing(g.key);
+    try {
+      const res = await api.remediationGroupAction({
+        asset: g.asset,
+        product: g.product,
+        fixed_version: g.fixed_version ?? "",
+        action,
+        reason:
+          action === "accept"
+            ? window.prompt(`Why is it acceptable to leave ${g.items} findings until the review date?`, "") ?? ""
+            : undefined,
+        days: action === "accept" ? 30 : undefined,
+      });
+      if (action === "accept" && res.changed === 0) return;
+      push(
+        action === "claim"
+          ? `Claimed ${res.changed} findings behind ${g.product}`
+          : `Accepted ${res.changed} findings for 30 days`,
+      );
+      groups.reload();
+      items.reload();
+      summary.reload();
+    } catch (err) {
+      push(err instanceof Error ? err.message : "Could not update this upgrade");
+    } finally {
+      setTicketing(null);
+    }
+  }
+
   async function claim(item: RemediationItem) {
     if (!me) return;
     try {
@@ -368,6 +398,7 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                       <Th>Team</Th>
                       <Th>Due</Th>
                       <Th>Ticket</Th>
+                      <Th>Owner</Th>
                     </tr>
                   </thead>
                   <tbody>
@@ -403,6 +434,16 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                           ) : (
                             <span className="text-xs text-subtle">needs a fixed version</span>
                           )}
+                        </Td>
+                        <Td>
+                          <div className="flex flex-wrap items-center gap-1">
+                            <Button size="sm" variant="ghost" onClick={() => groupAction(g, "claim")} disabled={ticketing === g.key}>
+                              Claim
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => groupAction(g, "accept")} disabled={ticketing === g.key}>
+                              Accept risk
+                            </Button>
+                          </div>
                         </Td>
                       </Tr>
                     ))}

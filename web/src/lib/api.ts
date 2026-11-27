@@ -372,6 +372,10 @@ export interface Asset {
   agent_version?: string;
   /** True when the last report came from a different build than the agent runs. */
   agent_outdated?: boolean;
+  /** Present when the asset is an enrolled endpoint that can be rescanned from here. */
+  agent_id?: string;
+  /** Why a stale asset cannot simply be rescanned. */
+  stale_reason?: string;
   mode?: string;
   report_id?: string;
   is_container?: boolean;
@@ -868,6 +872,15 @@ export const api = {
     }),
   deleteUser: (username: string) =>
     request<{ deleted: string }>(`/api/users/${encodeURIComponent(username)}`, { method: "DELETE" }),
+  /** Claim or risk-accept every open finding behind one upgrade. */
+  remediationGroupAction: (body: {
+    asset: string;
+    product: string;
+    fixed_version: string;
+    action: "claim" | "accept";
+    reason?: string;
+    days?: number;
+  }) => request<{ changed: number; action: string }>("/api/remediation/groups/action", { method: "POST", body: JSON.stringify(body) }),
   audit: (opts: { limit?: number; action?: string; actor?: string } = {}) =>
     request<{ items: AuditEntry[]; total: number; actions: string[] }>(
       `/api/audit${qs({ limit: opts.limit, action: opts.action, actor: opts.actor })}`,

@@ -289,6 +289,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/remediation/{id}", s.handleRemediationPatch)
 	s.mux.HandleFunc("POST /api/remediation/{id}/verify", s.handleRemediationVerify)
 	s.mux.HandleFunc("POST /api/remediation/{id}/accept", s.handleRemediationAccept)
+	s.mux.HandleFunc("POST /api/remediation/groups/action", s.handleRemediationGroupAction)
 
 	// GitLab ticketing: configuration, connection test, and issues.
 	s.mux.HandleFunc("GET /api/integrations/gitlab", s.handleGitLabGet)

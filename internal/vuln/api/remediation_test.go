@@ -673,3 +673,65 @@ func TestGroupEndpointFoldsFindings(t *testing.T) {
 		t.Fatalf("groups = %+v", g)
 	}
 }
+
+// A whole upgrade is claimed or accepted in one action: 1,067 findings share one owner and one
+// deadline, and doing it row by row is why nobody does it.
+func TestGroupClaimAndAcceptApplyToEveryFinding(t *testing.T) {
+	srv := fleetServer(t)
+	_, token := enrollAgent(t, srv, "web01")
+	// Three findings that one upgrade closes, plus one unrelated.
+	for i, cve := range []string{"CVE-2026-7001", "CVE-2026-7002", "CVE-2026-7003"} {
+		rep := minimalReportWith("web01", "SCAN-GRP-"+string(rune('A'+i)), "Ubuntu:24.04", "openssl", cve, "high")
+		if rec := request(t, srv.Handler(), "POST", "/api/agents/report", string(rep), agentHeaders(token)); rec.Code != 200 {
+			t.Fatalf("seed report: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	other := minimalReportWith("web01", "SCAN-GRP-Z", "Ubuntu:24.04", "curl", "CVE-2026-7099", "low")
+	request(t, srv.Handler(), "POST", "/api/agents/report", string(other), agentHeaders(token))
+
+	claim, _ := json.Marshal(map[string]any{"asset": "web01", "product": "openssl", "fixed_version": "1.0.1", "action": "claim"})
+	rec := request(t, srv.Handler(), "POST", "/api/remediation/groups/action", string(claim), dash())
+	if rec.Code != 200 {
+		t.Fatalf("claim = %d: %s", rec.Code, rec.Body.String())
+	}
+	var claimed struct {
+		Changed int `json:"changed"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &claimed)
+	if claimed.Changed != 3 {
+		t.Fatalf("claimed = %d, want the three openssl findings", claimed.Changed)
+	}
+
+	var list struct {
+		Items []struct {
+			Product string `json:"product"`
+			Owner   string `json:"owner"`
+			State   string `json:"state"`
+		} `json:"items"`
+	}
+	dashGet(t, srv.Handler(), "/api/remediation?asset=web01", &list)
+	for _, it := range list.Items {
+		if it.Product == "openssl" && it.Owner != "api-token" {
+			t.Fatalf("finding not claimed: %+v", it)
+		}
+		if it.Product == "curl" && it.Owner != "" {
+			t.Fatalf("an unrelated finding was changed: %+v", it)
+		}
+	}
+
+	accept, _ := json.Marshal(map[string]any{"asset": "web01", "product": "openssl", "fixed_version": "1.0.1",
+		"action": "accept", "reason": "vendor patch lands next month, host is isolated", "days": 30})
+	rec = request(t, srv.Handler(), "POST", "/api/remediation/groups/action", string(accept), dash())
+	if rec.Code != 200 {
+		t.Fatalf("accept = %d: %s", rec.Code, rec.Body.String())
+	}
+	dashGet(t, srv.Handler(), "/api/remediation?asset=web01", &list)
+	for _, it := range list.Items {
+		if it.Product == "openssl" && it.State != "risk_accepted" {
+			t.Fatalf("finding not accepted: %+v", it)
+		}
+		if it.Product == "curl" && it.State == "risk_accepted" {
+			t.Fatalf("unrelated finding was accepted: %+v", it)
+		}
+	}
+}
