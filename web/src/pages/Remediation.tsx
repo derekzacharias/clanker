@@ -103,6 +103,12 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
   const [acceptReason, setAcceptReason] = useState("");
   const [acceptDays, setAcceptDays] = useState(30);
   const [ticketing, setTicketing] = useState<string | null>(null);
+  // Group acceptance asks in the app, not in a browser prompt: a prompt blocks the page, cannot be
+  // labelled for a screen reader, cannot validate, and returns "" on cancel — which the server then
+  // rejects after the operator already confirmed.
+  const [acceptingGroup, setAcceptingGroup] = useState<RemediationGroup | null>(null);
+  const [groupReason, setGroupReason] = useState("");
+  const [groupDays, setGroupDays] = useState(30);
   const { push } = useToast();
 
   const summary = useAsync(() => api.remediationSummary());
@@ -150,7 +156,7 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
     }
   }
 
-  async function groupAction(g: RemediationGroup, action: "claim" | "accept") {
+  async function groupAction(g: RemediationGroup, action: "claim" | "accept", reason = "", days = 30) {
     setTicketing(g.key);
     try {
       const res = await api.remediationGroupAction({
@@ -158,18 +164,16 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
         product: g.product,
         fixed_version: g.fixed_version ?? "",
         action,
-        reason:
-          action === "accept"
-            ? window.prompt(`Why is it acceptable to leave ${g.items} findings until the review date?`, "") ?? ""
-            : undefined,
-        days: action === "accept" ? 30 : undefined,
+        reason: action === "accept" ? reason : undefined,
+        days: action === "accept" ? days : undefined,
       });
-      if (action === "accept" && res.changed === 0) return;
       push(
         action === "claim"
           ? `Claimed ${res.changed} findings behind ${g.product}`
-          : `Accepted ${res.changed} findings for 30 days`,
+          : `Accepted ${res.changed} findings until the review date`,
       );
+      setAcceptingGroup(null);
+      setGroupReason("");
       groups.reload();
       items.reload();
       summary.reload();
@@ -440,7 +444,16 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                             <Button size="sm" variant="ghost" onClick={() => groupAction(g, "claim")} disabled={ticketing === g.key}>
                               Claim
                             </Button>
-                            <Button size="sm" variant="ghost" onClick={() => groupAction(g, "accept")} disabled={ticketing === g.key}>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => {
+                                setAcceptingGroup(g);
+                                setGroupReason("");
+                                setGroupDays(30);
+                              }}
+                              disabled={ticketing === g.key}
+                            >
                               Accept risk
                             </Button>
                           </div>
@@ -543,6 +556,55 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
           ) : null}
         </CardBody>
       </Card>
+
+      <Modal
+        open={acceptingGroup !== null}
+        onOpenChange={(open) => {
+          if (!open) setAcceptingGroup(null);
+        }}
+        title={acceptingGroup ? `Accept risk for ${acceptingGroup.product} on ${acceptingGroup.asset}` : "Accept risk"}
+        description="This records one decision for every open finding behind this upgrade. Each finding stays visible, keeps its history, and reopens automatically when the review date passes."
+      >
+        <div className="space-y-3">
+          <Field
+            label="Reason"
+            htmlFor="group-accept-reason"
+            hint="What makes this acceptable, and what is covering the risk in the meantime?"
+          >
+            <Input
+              id="group-accept-reason"
+              value={groupReason}
+              onChange={(e) => setGroupReason(e.target.value)}
+              placeholder="e.g. vendor patch lands in Q3; host is isolated by a network rule"
+            />
+          </Field>
+          <Field label="Review in" htmlFor="group-accept-days">
+            <Select id="group-accept-days" value={String(groupDays)} onChange={(e) => setGroupDays(Number(e.target.value))}>
+              {[30, 60, 90, 180].map((d) => (
+                <option key={d} value={d}>
+                  {d} days
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <p className="text-xs text-muted">
+            {acceptingGroup ? `${acceptingGroup.items} findings behind this upgrade. ` : ""}
+            The server requires a reason of at least a sentence; the button stays disabled until it is given.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="primary"
+              onClick={() => acceptingGroup && groupAction(acceptingGroup, "accept", groupReason, groupDays)}
+              disabled={groupReason.trim().length < 8 || ticketing !== null}
+            >
+              Accept risk until the review date
+            </Button>
+            <Button variant="ghost" onClick={() => setAcceptingGroup(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         open={accepting !== null}
