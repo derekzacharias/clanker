@@ -1056,3 +1056,59 @@ func TestReplayRejectionReportsTheServerSequence(t *testing.T) {
 		t.Fatalf("body = %+v, want replay_detected with last_sequence 5", body)
 	}
 }
+
+// Re-enrolling an endpoint that already holds its credential must not require a fresh enrollment
+// token. Requiring one made every agent upgrade fail with "token has already been used" — the
+// operator had no reason to mint a token, and the one in their shell was spent on the first install.
+func TestReenrollmentSucceedsWithTheExistingCredentialAndNoToken(t *testing.T) {
+	srv := fleetServer(t)
+	agentID, token := enrollAgent(t, srv, "win01")
+
+	// A second install run: no token header, the old credential presented instead.
+	body := `{"host":"win01","os":"windows","version":"0.2.3"}`
+	rec := request(t, srv.Handler(), "POST", "/api/agents/enroll", body, map[string]string{
+		"Content-Type":  "application/json",
+		"Authorization": "Bearer " + token,
+	})
+	if rec.Code != 200 {
+		t.Fatalf("re-enrollment without a token = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		AgentID string `json:"agent_id"`
+		Token   string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AgentID != agentID || out.Token == "" {
+		t.Fatalf("re-enrollment = %+v, want the same agent with a working token", out)
+	}
+	// And the same, with a spent token in the header: the credential decides, not the token.
+	spent, _, err := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "spent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.fleet.ConsumeEnrollToken(t.Context(), spent, "another-host"); err != nil {
+		t.Fatal(err)
+	}
+	// Re-enrollment rotates the credential, so this uses the token it returned above.
+	rec = request(t, srv.Handler(), "POST", "/api/agents/enroll", body, map[string]string{
+		"Content-Type":         "application/json",
+		"Authorization":        "Bearer " + out.Token,
+		"X-Guard-Enroll-Token": spent,
+	})
+	if rec.Code != 200 {
+		t.Fatalf("re-enrollment with a spent token = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A *new* host still needs a token: the credential shortcut must not become a way to claim an
+// identity you do not hold.
+func TestNewHostStillRequiresAnEnrollmentToken(t *testing.T) {
+	srv := fleetServer(t)
+	rec := request(t, srv.Handler(), "POST", "/api/agents/enroll", `{"host":"stranger"}`,
+		map[string]string{"Content-Type": "application/json"})
+	if rec.Code != 401 {
+		t.Fatalf("new host without a token = %d, want 401", rec.Code)
+	}
+}

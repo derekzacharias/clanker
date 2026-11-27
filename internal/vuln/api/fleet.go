@@ -64,21 +64,6 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	got := strings.TrimSpace(r.Header.Get("X-Guard-Enroll-Token"))
-	if got == "" {
-		s.enrollLimiter.fail(ip, now)
-		s.log.Warn("agent enrollment rejected: no enrollment token", "remote", ip)
-		writeError(w, http.StatusUnauthorized, "unauthorized",
-			"enrollment token is required; generate one in Settings → Agents")
-		return
-	}
-	if looksLikePlaceholder(got) {
-		s.enrollLimiter.fail(ip, now)
-		s.log.Warn("agent enrollment rejected: placeholder instead of a token", "remote", ip)
-		writeError(w, http.StatusUnauthorized, "unauthorized",
-			"that is the placeholder from the install command ("+got+"), not a real token — "+
-				"mint one in Settings → Endpoint agents → New enrollment token and use the command it shows")
-		return
-	}
 	var body struct {
 		Host    string `json:"host"`
 		OS      string `json:"os"`
@@ -92,13 +77,43 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "host is required")
 		return
 	}
-	// Proof of possession: an already-enrolled hostname can only be re-attached by
-	// a caller holding that agent's current credential. Without it the request is
-	// refused, so reinstalling elsewhere cannot seize an existing identity.
 	proof := ""
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		proof = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	}
+	// A host that already has this agent's credential does not need an enrollment token: it is
+	// re-attaching an identity it already holds. Requiring one here made every agent upgrade fail
+	// with a spent token, which is a dead end for the operator.
+	if proof != "" {
+		{
+			if ag, token, err := s.fleet.Enroll(r.Context(), body.Host, body.OS, body.Version, proof); err == nil {
+				s.log.Info("agent re-enrolled with its existing credential", "agent", ag.ID, "host", ag.Host, "remote", ip)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"agent_id": ag.ID, "token": token, "host": ag.Host,
+					"note": "re-enrolled with the credential already on this endpoint; no enrollment token was used",
+				})
+				return
+			}
+		}
+	}
+	if got == "" {
+		s.enrollLimiter.fail(ip, now)
+		s.log.Warn("agent enrollment rejected: no enrollment token", "remote", ip)
+		writeError(w, http.StatusUnauthorized, "unauthorized",
+			"enrollment token is required to enroll a new endpoint; generate one in Settings → Agents")
+		return
+	}
+	if looksLikePlaceholder(got) {
+		s.enrollLimiter.fail(ip, now)
+		s.log.Warn("agent enrollment rejected: placeholder instead of a token", "remote", ip)
+		writeError(w, http.StatusUnauthorized, "unauthorized",
+			"that is the placeholder from the install command ("+got+"), not a real token — "+
+				"mint one in Settings → Endpoint agents → New enrollment token and use the command it shows")
+		return
+	}
+	// Proof of possession: an already-enrolled hostname can only be re-attached by
+	// a caller holding that agent's current credential. Without it the request is
+	// refused, so reinstalling elsewhere cannot seize an existing identity.
 	// The token is burned before enrollment so a single installer command cannot
 	// enroll two endpoints, and a replay of a captured request finds it spent.
 	if err := s.fleet.ConsumeEnrollToken(r.Context(), got, body.Host); err != nil {
