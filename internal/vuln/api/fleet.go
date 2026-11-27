@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -150,10 +151,17 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case errors.Is(err, fleet.ErrIdentityConflict):
-		s.log.Warn("agent enrollment refused: hostname already enrolled", "host", body.Host, "remote", ip)
-		writeError(w, http.StatusConflict, "identity_conflict",
-			fmt.Sprintf("host %q is already enrolled by %s; reinstall with its existing credential, "+
-				"or revoke that agent in the dashboard and enroll again", body.Host, "another agent"))
+		holder := s.describeHostHolder(r.Context(), body.Host)
+		s.log.Warn("agent enrollment refused: hostname already enrolled", "host", body.Host,
+			"holder", holder, "remote", ip)
+		msg := fmt.Sprintf("this endpoint's hostname %q is already enrolled by %s", body.Host, holder)
+		if proof != "" {
+			msg += ". The credential this agent presented belongs to a different (likely revoked) identity, " +
+				"so it cannot take the hostname back"
+		}
+		msg += ". Fix it in Settings → Endpoint agents: revoke that agent, create a new enrollment token, " +
+			"then run the installer with it — or reinstall using the credential of the agent named above"
+		writeError(w, http.StatusConflict, "identity_conflict", msg)
 		return
 	case err != nil:
 		writeError(w, http.StatusBadRequest, "enroll_error", err.Error())
@@ -725,4 +733,28 @@ func looksLikePlaceholder(token string) bool {
 		}
 	}
 	return false
+}
+
+// describeHostHolder names the active agent that owns a hostname, so an operator has something to
+// search for instead of "another agent".
+func (s *Server) describeHostHolder(ctx context.Context, host string) string {
+	if s.fleet == nil {
+		return "another agent"
+	}
+	agents, err := s.fleet.List(ctx)
+	if err != nil {
+		return "another agent"
+	}
+	for _, a := range agents {
+		if !strings.EqualFold(a.Host, host) || a.Revoked {
+			continue
+		}
+		last := "never heard from"
+		if a.LastSeen != nil && !a.LastSeen.IsZero() {
+			last = "last seen " + a.LastSeen.UTC().Format(time.RFC3339)
+		}
+		return fmt.Sprintf("%s (agent %s, running %s, %s)", a.Host, a.ID,
+			firstNonEmpty(a.Version, "unknown version"), last)
+	}
+	return "another agent"
 }

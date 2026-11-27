@@ -1112,3 +1112,33 @@ func TestNewHostStillRequiresAnEnrollmentToken(t *testing.T) {
 		t.Fatalf("new host without a token = %d, want 401", rec.Code)
 	}
 }
+
+// When a hostname is held by another agent, the refusal must name it. "Another agent" gave the
+// operator nothing to search for, and the common cause — a revoked credential still on disk — was
+// invisible.
+func TestIdentityConflictNamesTheHolderAndTheFix(t *testing.T) {
+	srv := fleetServer(t)
+	active, _ := enrollAgent(t, srv, "win01")
+	// The machine presents a stale credential (its old identity was revoked) and holds a token of
+	// its own; the hostname is owned by the active agent.
+	token, _, err := srv.fleet.MintEnrollToken(t.Context(), time.Hour, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := request(t, srv.Handler(), "POST", "/api/agents/enroll", `{"host":"win01"}`,
+		map[string]string{"Content-Type": "application/json",
+			"X-Guard-Enroll-Token": token,
+			"Authorization":        "Bearer some-revoked-credential"})
+	if rec.Code != 409 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, active) {
+		t.Fatalf("refusal does not name the agent holding the hostname:\n%s", body)
+	}
+	for _, want := range []string{"revoke that agent", "enrollment token"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("refusal does not explain the fix (%q):\n%s", want, body)
+		}
+	}
+}
