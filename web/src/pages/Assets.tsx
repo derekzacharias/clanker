@@ -185,7 +185,7 @@ export default function Assets() {
                           {a.agent_id ? (
                             <Button
                               size="sm"
-                              variant="ghost"
+                              variant="secondary"
                               onClick={() => queueScan(a)}
                               disabled={scanning === a.host}
                               title="Ask this endpoint's agent to scan now"

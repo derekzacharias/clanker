@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Timer } from "lucide-react";
+import { ShieldAlert, Timer, Ticket, UserCheck } from "lucide-react";
 import { useAsync } from "../lib/useApi";
 import { api, type RemediationGroup, type RemediationItem, type RemediationState } from "../lib/api";
 import { PageHeader } from "../components/PageHeader";
@@ -432,7 +432,8 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                         </Td>
                         <Td>
                           {g.fixed_version ? (
-                            <Button size="sm" variant="ghost" onClick={() => fileGroupTicket(g)} disabled={ticketing === g.key}>
+                            <Button size="sm" variant="secondary" onClick={() => fileGroupTicket(g)} disabled={ticketing === g.key}>
+                              <Ticket className="h-3.5 w-3.5" aria-hidden="true" />
                               {ticketing === g.key ? "Filing…" : "File ticket"}
                             </Button>
                           ) : (
@@ -441,12 +442,19 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                         </Td>
                         <Td>
                           <div className="flex flex-wrap items-center gap-1">
-                            <Button size="sm" variant="ghost" onClick={() => groupAction(g, "claim")} disabled={ticketing === g.key}>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => groupAction(g, "claim")}
+                              disabled={ticketing === g.key}
+                              title="Assign every open finding behind this upgrade to you"
+                            >
+                              <UserCheck className="h-3.5 w-3.5" aria-hidden="true" />
                               Claim
                             </Button>
                             <Button
                               size="sm"
-                              variant="ghost"
+                              variant="secondary"
                               onClick={() => {
                                 setAcceptingGroup(g);
                                 setGroupReason("");
@@ -454,6 +462,7 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                               }}
                               disabled={ticketing === g.key}
                             >
+                              <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
                               Accept risk
                             </Button>
                           </div>
@@ -537,12 +546,12 @@ export default function Remediation({ initialTab = "queue" }: { initialTab?: "qu
                             ))}
                           </Select>
                           {me && item.owner !== me ? (
-                            <Button size="sm" variant="ghost" onClick={() => claim(item)} title={`Assign ${item.id} to ${me}`}>
+                            <Button size="sm" variant="secondary" onClick={() => claim(item)} title={`Assign ${item.id} to ${me}`}>
                               Claim
                             </Button>
                           ) : null}
                           {item.state !== "risk_accepted" ? (
-                            <Button size="sm" variant="ghost" onClick={() => setAccepting(item)}>
+                            <Button size="sm" variant="secondary" onClick={() => setAccepting(item)}>
                               Accept risk
                             </Button>
                           ) : null}

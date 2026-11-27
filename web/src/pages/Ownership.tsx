@@ -360,7 +360,7 @@ export default function Ownership() {
                         </Select>
                       </Td>
                       <Td>
-                        <Button size="sm" variant="ghost" onClick={() => openAccess(row)}>
+                        <Button size="sm" variant="secondary" onClick={() => openAccess(row)}>
                           <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
                           Access
                         </Button>
