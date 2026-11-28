@@ -63,6 +63,15 @@
       "affected_below": "5.6.1-2",
       "url": "https://tukaani.org/xz-backdoor/",
       "statement": "The xz maintainers confirm 5.6.0 and 5.6.1 tarballs contain malicious code; distributions ship fixed builds."
+    },
+    {
+      "cve": "CVE-2024-1546",
+      "vendor": "mozilla",
+      "product": "firefox",
+      "fixed_version": "123.0",
+      "affected_below": "123.0",
+      "url": "https://www.mozilla.org/security/advisories/mfsa2024-07/",
+      "statement": "Mozilla confirms Firefox versions before 123.0 (and Firefox ESR before 115.8.0) are affected; 123.0 / ESR 115.8.0 contain the fix."
     }
   ]
 }

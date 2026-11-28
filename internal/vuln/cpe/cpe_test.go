@@ -109,6 +109,75 @@ func TestMatchesArchConstrained(t *testing.T) {
 	}
 }
 
+func TestMatchesNAPlaceholderDoesNotConstrain(t *testing.T) {
+	// Real NVD shape: application criteria commonly carry target_sw "-"
+	// (the dictionary's "not applicable" filler). It must not reject a
+	// concrete x64 target — strict NA matching would silently drop most
+	// application criteria.
+	pattern := MustParse("cpe:2.3:a:mozilla:firefox:*:*:*:*:-:*:*:*")
+	target := NewTarget("mozilla", "firefox", "122.0.1", "", "", "x64")
+	if !pattern.Matches(target) {
+		t.Fatal("NA target_sw must be a non-constraining placeholder")
+	}
+	// Identity attributes stay strict: vendor/product/version "-" match
+	// nothing real.
+	if (CPE{Part: "a", Vendor: "-", Product: "firefox", Version: Any}).Matches(target) {
+		t.Fatal("vendor NA must not match a concrete target")
+	}
+	if (CPE{Part: "a", Vendor: "mozilla", Product: "firefox", Version: "-"}).Matches(target) {
+		t.Fatal("version NA must not match a concrete version")
+	}
+}
+
+// The real CVE-2024-1546 configuration: an OR node with an ESR range
+// (sw_edition esr, < 115.8) and a generic range (sw_edition *, < 123.0).
+func firefox1546Config() Node {
+	return Node{Operator: "OR", Matches: []Match{
+		{
+			Criteria:        "cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*",
+			Vulnerable:      true,
+			Range:           Range{EndExcluding: "115.8.0"},
+			MatchCriteriaID: "esr",
+		},
+		{
+			Criteria:        "cpe:2.3:a:mozilla:firefox:*:*:*:*:-:*:*:*",
+			Vulnerable:      true,
+			Range:           Range{EndExcluding: "123.0"},
+			MatchCriteriaID: "generic",
+		},
+	}}
+}
+
+func TestFirefoxEditionShadowing(t *testing.T) {
+	// Regular Firefox: the generic range applies.
+	reg := NewTarget("mozilla", "firefox", "122.0.1", "", "", "x64")
+	if ev := firefox1546Config().Evaluate(Targets{App: reg}, nil); !ev.Matched || !ev.Vulnerable {
+		t.Fatalf("firefox 122.0.1 must be vulnerable (< 123.0): %+v", ev)
+	}
+	if ev := firefox1546Config().Evaluate(Targets{App: NewTarget("mozilla", "firefox", "123.0", "", "", "x64")}, nil); ev.Matched {
+		t.Fatal("firefox 123.0 must not be vulnerable")
+	}
+
+	// ESR build 115.7: vulnerable via the ESR range.
+	esrVuln := NewTarget("mozilla", "firefox", "115.7.0", "", "esr", "x64")
+	if ev := firefox1546Config().Evaluate(Targets{App: esrVuln}, nil); !ev.Matched || !ev.Vulnerable {
+		t.Fatalf("ESR 115.7 must be vulnerable (< 115.8): %+v", ev)
+	}
+	// ESR build 115.8.1: fixed in the ESR line. The generic range says
+	// "< 123.0 affected", which would flag it — edition shadowing must
+	// keep the generic entry out.
+	esrFixed := NewTarget("mozilla", "firefox", "115.8.1", "", "esr", "x64")
+	ev := firefox1546Config().Evaluate(Targets{App: esrFixed}, nil)
+	if ev.Matched {
+		t.Fatalf("fixed ESR 115.8.1 must not match the generic range: %+v", ev)
+	}
+	// The shadowing only kicks in when the node HAS an esr-specific entry.
+	genericOnly := Node{Operator: "OR", Matches: []Match{firefox1546Config().Matches[1]}}
+	if ev := genericOnly.Evaluate(Targets{App: esrFixed}, nil); !ev.Matched {
+		t.Fatalf("a node with only a generic range still matches (no edition data to shadow it): %+v", ev)
+	}
+}
+
 func TestRangeContains(t *testing.T) {
 	cmp := func(a, b string) (int, error) { return version.Compare("", a, b) }
 

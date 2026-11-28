@@ -19,11 +19,22 @@ type SyncOptions struct {
 	// means the whole history. A first sync is normally bounded; incremental
 	// syncs keep the dataset moving forward.
 	Since time.Time
+	// SincePublished bounds the initial CVE population by publication date
+	// instead (e.g. "everything published since 2024-01-01"). Publication
+	// dates match the calendar a reviewer thinks in; lastModified clusters
+	// around NVD's bulk re-analyses instead.
+	SincePublished time.Time
 	// Full forces a full re-population instead of an incremental update.
 	Full bool
 	// MaxPages bounds the number of pages fetched (safety valve; 0 =
 	// unlimited).
 	MaxPages int
+	// SkipDictionary skips the CPE dictionary population. The correlation
+	// engine does not require the dictionary (normalization rules carry the
+	// priority applications); it exists for unknown-software identity
+	// resolution. A full dictionary sync is ~1.9M entries and takes hours
+	// without an API key, so deployments may choose to skip it.
+	SkipDictionary bool
 	// Progress receives (stage, detail) updates; may be nil.
 	Progress func(stage, detail string)
 	// Log receives structured logs; may be nil.
@@ -73,13 +84,43 @@ func (o *SyncOptions) log() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// maxDateRange is the largest lastModStartDate..lastModEndDate span the NVD
+// API accepts for one request series (it answers 404 for longer ranges).
+// Population windows wider than this are fetched as consecutive slices.
+const maxDateRange = 120 * 24 * time.Hour
+
+// dateWindow is one lastModified slice to fetch.
+type dateWindow struct {
+	start, end time.Time
+}
+
+// dateWindows slices a population window into API-acceptable ranges.
+func dateWindows(start, end time.Time, max time.Duration) []dateWindow {
+	if max <= 0 {
+		max = maxDateRange
+	}
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return []dateWindow{{start: start, end: end}}
+	}
+	var out []dateWindow
+	for s := start; s.Before(end); s = s.Add(max) {
+		e := s.Add(max)
+		if e.After(end) {
+			e = end
+		}
+		out = append(out, dateWindow{start: s, end: e})
+	}
+	return out
+}
+
 // SyncCVEs populates or updates the local CVE dataset from NVD.
 //
 // Incremental mode re-fetches the window since the last successful sync
 // (minus a two-day overlap so records modified several times are re-seen).
-// Every page is stored transactionally; a failure aborts the run and leaves
-// the last known valid dataset in place. Rejected CVEs are stored and marked
-// so correlation can exclude them explicitly.
+// Population windows wider than the API's 120-day limit are fetched as
+// consecutive slices. Every page is stored transactionally; a failure aborts
+// the run and leaves the last known valid dataset in place. Rejected CVEs are
+// stored and marked so correlation can exclude them explicitly.
 func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, error) {
 	if err := EnsureSchema(db); err != nil {
 		return SyncResult{}, err
@@ -95,6 +136,13 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 	}
 	if !opts.Since.IsZero() && (windowStart.IsZero() || opts.Since.After(windowStart)) {
 		windowStart = opts.Since
+	}
+	published := !opts.SincePublished.IsZero()
+	windows := []dateWindow{{start: windowStart}}
+	if published {
+		windows = dateWindows(opts.SincePublished, opts.now(), maxDateRange)
+	} else if !windowStart.IsZero() {
+		windows = dateWindows(windowStart, opts.now(), maxDateRange)
 	}
 	seq, err := store.RecordSyncStart(ctx, "cves", mode, windowStart, time.Time{}, started)
 	if err != nil {
@@ -119,10 +167,9 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 		client.MaxRetries = opts.MaxRetries
 	}
 
-	startIndex := 0
 	pages := 0
-	lastTotal := -1
-	for {
+	windowTotal := 0
+	for wi, w := range windows {
 		if err := ctx.Err(); err != nil {
 			res.Status = "failed"
 			res.Detail = "cancelled: " + err.Error()
@@ -130,62 +177,83 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 			_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
 			return res, err
 		}
-		total, records, err := client.CVEPage(ctx, startIndex, windowStart, time.Time{})
-		if err != nil {
-			res.Status = "failed"
-			res.Detail = fmt.Sprintf("page %d failed: %v", startIndex, err)
-			res.FinishedAt = opts.now()
-			_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
-			return res, fmt.Errorf("NVD CVE sync failed at startIndex %d (existing data untouched): %w", startIndex, err)
-		}
-		if pages == 0 {
-			// Feed integrity: the envelope's total must stay stable across
-			// the run, or the dataset is being modified under us.
-			lastTotal = total
-			opts.progress("nvd", fmt.Sprintf("%d CVE records available", total))
-		} else if total != lastTotal {
-			res.Status = "failed"
-			res.Detail = fmt.Sprintf("feed total changed mid-sync (%d -> %d); retry", lastTotal, total)
-			res.FinishedAt = opts.now()
-			_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
-			return res, fmt.Errorf("NVD feed changed during sync; run again to get a consistent snapshot")
-		}
-		res.TotalSeen = total
-		imported, updated, err := store.SaveCVEs(ctx, records, opts.now())
-		if err != nil {
-			res.Status = "failed"
-			res.Detail = fmt.Sprintf("store page %d: %v", startIndex, err)
-			res.FinishedAt = opts.now()
-			_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
-			return res, fmt.Errorf("store NVD page %d: %w", startIndex, err)
-		}
-		res.Imported += imported
-		res.Updated += updated
-		startIndex += len(records)
-		pages++
-		if len(records) == 0 || startIndex >= total {
-			break
-		}
-		if opts.MaxPages > 0 && pages >= opts.MaxPages {
-			res.Status = "failed"
-			res.Detail = fmt.Sprintf("page limit %d reached before the feed was complete", opts.MaxPages)
-			res.FinishedAt = opts.now()
-			_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
-			return res, fmt.Errorf("NVD sync stopped by page limit %d; raise or remove it", opts.MaxPages)
+		startIndex := 0
+		lastTotal := -1
+		for {
+			if err := ctx.Err(); err != nil {
+				res.Status = "failed"
+				res.Detail = "cancelled: " + err.Error()
+				res.FinishedAt = opts.now()
+				_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
+				return res, err
+			}
+			var total int
+			var records []Record
+			var err error
+			if published {
+				total, records, err = client.CVEPagePublished(ctx, startIndex, w.start, w.end)
+			} else {
+				total, records, err = client.CVEPage(ctx, startIndex, w.start, w.end)
+			}
+			if err != nil {
+				res.Status = "failed"
+				res.Detail = fmt.Sprintf("window %d/%d page %d failed: %v", wi+1, len(windows), startIndex, err)
+				res.FinishedAt = opts.now()
+				_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
+				return res, fmt.Errorf("NVD CVE sync failed at startIndex %d (existing data untouched): %w", startIndex, err)
+			}
+			if lastTotal == -1 {
+				// Feed integrity: the envelope's total must stay stable
+				// across the window, or the dataset is being modified
+				// under us.
+				lastTotal = total
+				windowTotal += total
+				opts.progress("nvd", fmt.Sprintf("window %d/%d: %d CVE records", wi+1, len(windows), total))
+			} else if total != lastTotal {
+				res.Status = "failed"
+				res.Detail = fmt.Sprintf("feed total changed mid-window (%d -> %d); retry", lastTotal, total)
+				res.FinishedAt = opts.now()
+				_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
+				return res, fmt.Errorf("NVD feed changed during sync; run again to get a consistent snapshot")
+			}
+			imported, updated, err := store.SaveCVEs(ctx, records, opts.now())
+			if err != nil {
+				res.Status = "failed"
+				res.Detail = fmt.Sprintf("store window %d page %d: %v", wi+1, startIndex, err)
+				res.FinishedAt = opts.now()
+				_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
+				return res, fmt.Errorf("store NVD page %d: %w", startIndex, err)
+			}
+			res.Imported += imported
+			res.Updated += updated
+			startIndex += len(records)
+			pages++
+			if len(records) == 0 || startIndex >= total {
+				break
+			}
+			if opts.MaxPages > 0 && pages >= opts.MaxPages {
+				res.Status = "failed"
+				res.Detail = fmt.Sprintf("page limit %d reached before the feed was complete", opts.MaxPages)
+				res.FinishedAt = opts.now()
+				_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
+				return res, fmt.Errorf("NVD sync stopped by page limit %d; raise or remove it", opts.MaxPages)
+			}
 		}
 	}
+	res.TotalSeen = windowTotal
 	// A page cap can silently truncate; the invariant below makes that loud.
-	if startIndex < res.TotalSeen {
+	importedTotal := res.Imported + res.Updated
+	if importedTotal < res.TotalSeen {
 		res.Status = "failed"
-		res.Detail = fmt.Sprintf("imported %d of %d records", startIndex, res.TotalSeen)
+		res.Detail = fmt.Sprintf("imported %d of %d records", importedTotal, res.TotalSeen)
 		res.FinishedAt = opts.now()
 		_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
-		return res, fmt.Errorf("NVD sync incomplete: %d of %d records imported", startIndex, res.TotalSeen)
+		return res, fmt.Errorf("NVD sync incomplete: %d of %d records imported", importedTotal, res.TotalSeen)
 	}
 	res.Status = "ok"
 	res.FinishedAt = opts.now()
 	if err := store.RecordSyncFinish(ctx, seq, "ok", res.TotalSeen, res.Imported, res.Updated, res.Failed,
-		fmt.Sprintf("%d pages", pages), res.FinishedAt); err != nil {
+		fmt.Sprintf("%d pages across %d window(s)", pages, len(windows)), res.FinishedAt); err != nil {
 		return res, fmt.Errorf("record sync finish: %w", err)
 	}
 	return res, nil

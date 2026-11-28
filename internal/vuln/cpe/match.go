@@ -262,14 +262,67 @@ func (n Node) evaluate(targets Targets, cmp CompareFunc) Evaluation {
 		return combine(op, evs)
 	}
 	// Leaf node: combine its cpeMatch entries.
+	matches := n.Matches
+	if len(matches) > 0 {
+		matches = preferEditionMatches(matches, targets)
+	}
 	var evs []Evaluation
-	for _, m := range n.Matches {
+	for _, m := range matches {
 		evs = append(evs, evaluateMatch(m, targets, cmp))
 	}
 	if len(evs) == 0 {
 		return Evaluation{Details: []string{"leaf node with no cpeMatch entries"}}
 	}
 	return combine(op, evs)
+}
+
+// preferEditionMatches resolves edition-specific criteria against generic
+// ones. NVD models extended-support releases with a sw_edition on the
+// criteria (e.g. mozilla:firefox sw_edition="esr" with its own version
+// range) while the generic entry keeps sw_edition "*". A target that IS an
+// ESR build must be evaluated against the ESR range only: the generic range
+// says "Firefox < 123.0 is affected", which would flag a fixed ESR 115.8
+// build as vulnerable. When the installed build carries an edition and the
+// node has edition-specific criteria for its product, the generic entries
+// for that product are shadowed.
+func preferEditionMatches(matches []Match, targets Targets) []Match {
+	app := targets.App
+	if isAny(app.SwEdition) || isAny(app.Vendor) || isAny(app.Product) {
+		return matches
+	}
+	editionSpecific := false
+	for _, m := range matches {
+		crit, err := m.ParsedCriteria()
+		if err != nil || !namesProduct(crit, app) {
+			continue
+		}
+		if strings.EqualFold(crit.SwEdition, app.SwEdition) {
+			editionSpecific = true
+		}
+	}
+	if !editionSpecific {
+		return matches
+	}
+	out := make([]Match, 0, len(matches))
+	for _, m := range matches {
+		crit, err := m.ParsedCriteria()
+		if err == nil && namesProduct(crit, app) && (isAny(crit.SwEdition) || crit.SwEdition == NA) {
+			// Generic entry for this product: shadowed by the
+			// edition-specific one.
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// namesProduct reports whether the criteria concretely names the same
+// application identity as the target (wildcards do not name anything).
+func namesProduct(crit, target CPE) bool {
+	return crit.Part == PartApplication &&
+		!isAny(crit.Vendor) && !isAny(crit.Product) &&
+		ComponentMatches(crit.Vendor, target.Vendor) &&
+		ComponentMatches(crit.Product, target.Product)
 }
 
 // evaluateMatch decides whether one cpeMatch entry covers the target of the

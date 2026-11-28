@@ -383,6 +383,40 @@ func (c *Client) CVEPage(ctx context.Context, startIndex int, lastModStart, last
 	return p.TotalResults, records, nil
 }
 
+// CVEPagePublished fetches one page of CVE records filtered by publication
+// date. Both pubStartDate and pubEndDate are required together, and the
+// span is subject to the same 120-day API limit as the modified-date
+// filters, so callers slice their window with dateWindows.
+func (c *Client) CVEPagePublished(ctx context.Context, startIndex int, pubStart, pubEnd time.Time) (total int, records []Record, err error) {
+	base := strings.TrimRight(c.BaseURL, "/") + "/cves/2.0"
+	params := []string{
+		"startIndex=" + strconv.Itoa(startIndex),
+		"resultsPerPage=" + strconv.Itoa(c.ResultsPerPage),
+	}
+	if !pubStart.IsZero() {
+		end := pubEnd
+		if end.IsZero() {
+			end = c.now()
+		}
+		params = append(params,
+			"pubStartDate="+nvdDateParam(pubStart),
+			"pubEndDate="+nvdDateParam(end))
+	}
+	p, err := c.fetchPage(ctx, base+"?"+strings.Join(params, "&"), true)
+	if err != nil {
+		return 0, nil, err
+	}
+	records = make([]Record, 0, len(p.Vulnerabilities))
+	for _, raw := range p.Vulnerabilities {
+		r, err := parseRecord(raw)
+		if err != nil {
+			return 0, nil, fmt.Errorf("page corrupt: %w", err)
+		}
+		records = append(records, r)
+	}
+	return p.TotalResults, records, nil
+}
+
 // CPEDictionaryPage fetches one page of the CPE dictionary.
 func (c *Client) CPEDictionaryPage(ctx context.Context, startIndex int, lastModStart time.Time) (total int, entries []DictEntry, err error) {
 	base := strings.TrimRight(c.BaseURL, "/") + "/cpes/2.0"
@@ -411,11 +445,11 @@ func (c *Client) CPEDictionaryPage(ctx context.Context, startIndex int, lastModS
 }
 
 // nvdDateParam renders the ISO 8601 format the NVD API requires for its date
-// filters. NVD rejects the "Z" suffix for these parameters, so the offset is
-// always emitted numerically and the "+" percent-encoded, exactly as its API
-// documentation shows.
+// filters. NVD rejects the "Z" suffix AND unencoded colons for these
+// parameters, so the offset is always emitted numerically and both "+" and
+// ":" are percent-encoded, exactly as its API documentation shows.
 func nvdDateParam(t time.Time) string {
-	return t.UTC().Format("2006-01-02T15:04:05.000") + "%2B00:00"
+	return strings.ReplaceAll(t.UTC().Format("2006-01-02T15:04:05.000")+"%2B00:00", ":", "%3A")
 }
 
 func (c *Client) fetchPage(ctx context.Context, url string, cves bool) (*page, error) {

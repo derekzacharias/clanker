@@ -188,16 +188,38 @@ func wildcardMatch(pattern, value string) bool {
 // Matches reports whether the target CPE is covered by this binding pattern.
 // Every non-ANY attribute of the pattern must match the target; the target's
 // own attributes are concrete values.
+//
+// NA semantics: for the identity attributes (part, vendor, product, version)
+// a "-" pattern matches only a "-" target — a criteria naming vendor "-"
+// matches nothing real. For the descriptive attributes (update, edition,
+// language, sw_edition, target_sw, target_hw, other) NVD fills "-" as a
+// placeholder meaning "unspecified", so it is treated as non-constraining:
+// treating it strictly would silently drop most application criteria (e.g.
+// mozilla:firefox criteria carry target_sw "-").
 func (c CPE) Matches(target CPE) bool {
-	fields := []struct {
+	identity := []struct {
 		pat, val string
 	}{
 		{c.Part, target.Part}, {c.Vendor, target.Vendor}, {c.Product, target.Product},
-		{c.Version, target.Version}, {c.Update, target.Update}, {c.Edition, target.Edition},
-		{c.Language, target.Language}, {c.SwEdition, target.SwEdition},
-		{c.TargetSW, target.TargetSW}, {c.TargetHW, target.TargetHW}, {c.Other, target.Other},
+		{c.Version, target.Version},
 	}
-	for _, f := range fields {
+	for _, f := range identity {
+		if !ComponentMatches(f.pat, f.val) {
+			return false
+		}
+	}
+	descriptive := []struct {
+		pat, val string
+	}{
+		{c.Update, target.Update}, {c.Edition, target.Edition},
+		{c.Language, target.Language}, {c.SwEdition, target.SwEdition},
+		{c.TargetSW, target.TargetSW}, {c.TargetHW, target.TargetHW},
+		{c.Other, target.Other},
+	}
+	for _, f := range descriptive {
+		if f.pat == NA {
+			continue // "not applicable" filled in by NVD: no constraint
+		}
 		if !ComponentMatches(f.pat, f.val) {
 			return false
 		}
@@ -208,6 +230,8 @@ func (c CPE) Matches(target CPE) bool {
 // NewTarget builds a concrete CPE from the observed facts of an installed
 // application. Unknown attributes become ANY so pattern matching never rejects
 // a candidate merely because the inventory did not record that dimension.
+// Known release channels map onto the attributes NVD uses for them (e.g.
+// Firefox ESR lives in sw_edition).
 func NewTarget(vendor, product, version, edition, channel, arch string) CPE {
 	c := CPE{
 		Part:    PartApplication,
@@ -216,6 +240,11 @@ func NewTarget(vendor, product, version, edition, channel, arch string) CPE {
 		Version: orAny(version),
 		Edition: orAny(edition),
 		Other:   orAny(channel),
+	}
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case "esr":
+		// NVD models extended-support releases as a software edition.
+		c.SwEdition = "esr"
 	}
 	switch strings.ToLower(arch) {
 	case "x64", "amd64", "x86_64":

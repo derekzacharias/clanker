@@ -318,9 +318,11 @@ func newVulnFeedsCmd() *cobra.Command {
 		withMSRC    bool
 		withNVD     bool
 		nvdSince    string
+		nvdPubSince string
 		nvdFull     bool
 		nvdAPIKey   string
 		nvdMaxPages int
+		nvdNoDict   bool
 	)
 	feeds := &cobra.Command{
 		Use:   "feeds",
@@ -344,7 +346,7 @@ func newVulnFeedsCmd() *cobra.Command {
 				if nvdAPIKey != "" {
 					key = nvdAPIKey
 				}
-				var since time.Time
+				var since, pubSince time.Time
 				if nvdSince != "" {
 					t, err := time.Parse("2006-01-02", nvdSince)
 					if err != nil {
@@ -352,8 +354,16 @@ func newVulnFeedsCmd() *cobra.Command {
 					}
 					since = t
 				}
+				if nvdPubSince != "" {
+					t, err := time.Parse("2006-01-02", nvdPubSince)
+					if err != nil {
+						return fmt.Errorf("--nvd-pub-since must be YYYY-MM-DD: %w", err)
+					}
+					pubSince = t
+				}
 				if err := scan.SyncNVD(ctx, common.path(), nvd.SyncOptions{
-					APIKey: key, Since: since, Full: nvdFull, MaxPages: nvdMaxPages,
+					APIKey: key, Since: since, SincePublished: pubSince, Full: nvdFull, MaxPages: nvdMaxPages,
+					SkipDictionary: nvdNoDict,
 				}, os.Stdout); err != nil {
 					return err
 				}
@@ -365,9 +375,11 @@ func newVulnFeedsCmd() *cobra.Command {
 	update.Flags().BoolVar(&withMSRC, "with-msrc", false, "also import Microsoft security advisories (Windows update findings)")
 	update.Flags().BoolVar(&withNVD, "with-nvd", false, "synchronize the NVD CVE dataset and CPE dictionary (application vulnerability detection)")
 	update.Flags().StringVar(&nvdSince, "nvd-since", "", "bound the initial NVD CVE window by lastModified (YYYY-MM-DD); empty = full history")
+	update.Flags().StringVar(&nvdPubSince, "nvd-pub-since", "", "bound the initial NVD CVE window by publication date instead (YYYY-MM-DD); use this for a first population covering a calendar range")
 	update.Flags().BoolVar(&nvdFull, "nvd-full", false, "force a full NVD re-population instead of an incremental update")
 	update.Flags().StringVar(&nvdAPIKey, "nvd-api-key", "", "NVD API key (also read from CLANKER_GUARD_NVD_API_KEY / NVD_API_KEY; never logged)")
 	update.Flags().IntVar(&nvdMaxPages, "nvd-max-pages", 0, "safety valve: stop after N pages (0 = unlimited; a partial sync is recorded as failed)")
+	update.Flags().BoolVar(&nvdNoDict, "nvd-no-cpe-dictionary", false, "skip the CPE dictionary (1.9M entries, hours without an API key); normalization rules still cover priority applications")
 	common.register(update)
 
 	status := &cobra.Command{

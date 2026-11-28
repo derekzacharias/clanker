@@ -685,12 +685,18 @@ func SyncNVD(ctx context.Context, cachePath string, opts nvd.SyncOptions, w io.W
 	opts.Progress = func(stage, detail string) {
 		fmt.Fprintf(w, "%s: %s\n", stage, detail)
 	}
-	dictRes, dictErr := nvd.SyncDictionary(ctx, store.DB(), opts)
-	if dictErr != nil {
-		fmt.Fprintf(w, "cpe dictionary: %s (the last successful dictionary sync remains the reference; a failed run is recorded)\n", dictErr)
+	var dictRes nvd.SyncResult
+	var dictErr error
+	if opts.SkipDictionary {
+		fmt.Fprintln(w, "cpe dictionary: skipped (--nvd-no-cpe-dictionary)")
 	} else {
-		fmt.Fprintf(w, "cpe dictionary: %d imported, %d updated, %d total (%s)\n",
-			dictRes.Imported, dictRes.Updated, dictRes.TotalSeen, dictRes.FinishedAt.UTC().Format(time.RFC3339))
+		dictRes, dictErr = nvd.SyncDictionary(ctx, store.DB(), opts)
+		if dictErr != nil {
+			fmt.Fprintf(w, "cpe dictionary: %s (the last successful dictionary sync remains the reference; a failed run is recorded)\n", dictErr)
+		} else {
+			fmt.Fprintf(w, "cpe dictionary: %d imported, %d updated, %d total (%s)\n",
+				dictRes.Imported, dictRes.Updated, dictRes.TotalSeen, dictRes.FinishedAt.UTC().Format(time.RFC3339))
+		}
 	}
 
 	cveRes, cveErr := nvd.SyncCVEs(ctx, store.DB(), opts)
