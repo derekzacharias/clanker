@@ -539,6 +539,8 @@ export interface ReportDoc {
 export interface FeedResponse {
   feeds: FeedStatus[];
   counts: { advisories: number; kev: number; epss: number };
+  /** Whether the operator's NVD API key is configured (never the key itself). */
+  nvd_api_key_configured?: boolean;
 }
 
 export interface AgentTask {
@@ -850,6 +852,11 @@ export const api = {
   exportUrl: (id: string, format: "json" | "markdown" | "sarif" | "html") =>
     `/api/reports/${encodeURIComponent(id)}/export?format=${format}`,
   feeds: () => request<FeedResponse>("/api/feeds"),
+  nvdKey: (apiKey: string) =>
+    request<{ configured: boolean }>("/api/settings/nvd-key", {
+      method: "PUT",
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
   updateFeeds: () => request<Job>("/api/feeds/update", { method: "POST" }),
   agents: () => request<AgentsResponse>("/api/agents"),
   // Remediation orchestration

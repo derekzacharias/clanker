@@ -315,6 +315,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/settings/ai/credential", s.handleAICredentialPut)
 	s.mux.HandleFunc("DELETE /api/settings/ai/credential", s.handleAICredentialDelete)
 	s.mux.HandleFunc("POST /api/settings/ai/test", s.handleAITest)
+	s.mux.HandleFunc("GET /api/settings/nvd-key", s.handleNVDKeyGet)
+	s.mux.HandleFunc("PUT /api/settings/nvd-key", s.handleNVDKeyPut)
 	s.mux.HandleFunc("GET /api/settings/ai/models", s.handleAIModels)
 	s.mux.HandleFunc("GET /api/settings/automation", s.handleAutomationGet)
 	s.mux.HandleFunc("PUT /api/settings/automation", s.handleAutomationPut)

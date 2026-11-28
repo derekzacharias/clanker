@@ -1166,6 +1166,8 @@ func (s *Server) handleFeeds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"feeds":  rows,
 		"counts": map[string]int{"advisories": advisories, "kev": kev, "epss": epss},
+		// Only the fact that a key exists, never the key itself.
+		"nvd_api_key_configured": s.nvdKeyConfigured(),
 	})
 }
 

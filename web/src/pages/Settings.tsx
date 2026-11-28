@@ -25,13 +25,14 @@ import { useToast } from "../components/ui/Toast";
 
 const TABS = ["general", "intelligence", "agents", "integrations", "ai", "automation", "improvement", "access", "audit"] as const;
 
-export default function Settings() {
+export default function Settings({ initialTab: initialTabProp }: { initialTab?: string } = {}) {
   const tabParam = useQueryParam("tab");
   const access = useAsync(() => api.accessMe());
   const can = access.data?.permissions ?? { read: true, write: false, admin: false };
   const isAdmin = Boolean(can.admin);
   // An unknown or stale tab value must fall back instead of rendering nothing.
-  const initialTab = TABS.includes((tabParam ?? "") as (typeof TABS)[number]) ? (tabParam as string) : "general";
+  const initialTab =
+    initialTabProp ?? (TABS.includes((tabParam ?? "") as (typeof TABS)[number]) ? (tabParam as string) : "general");
   return (
     <div>
       <PageHeader
@@ -215,6 +216,8 @@ function IntelligenceTab() {
   const { data, error, loading, reload } = useAsync(() => api.feeds());
   const { push } = useToast();
   const [updating, setUpdating] = useState(false);
+  const [nvdKey, setNvdKey] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
 
   async function update() {
     setUpdating(true);
@@ -228,6 +231,33 @@ function IntelligenceTab() {
     } catch (err) {
       setUpdating(false);
       push(err instanceof ApiError ? err.message : String(err), "error");
+    }
+  }
+
+  async function saveKey() {
+    setSavingKey(true);
+    try {
+      await api.nvdKey(nvdKey.trim());
+      setNvdKey("");
+      push("NVD API key saved; the next sync uses the keyed rate limit");
+      reload();
+    } catch (err) {
+      push(err instanceof ApiError ? err.message : String(err), "error");
+    } finally {
+      setSavingKey(false);
+    }
+  }
+
+  async function clearKey() {
+    setSavingKey(true);
+    try {
+      await api.nvdKey("");
+      push("NVD API key removed");
+      reload();
+    } catch (err) {
+      push(err instanceof ApiError ? err.message : String(err), "error");
+    } finally {
+      setSavingKey(false);
     }
   }
 
@@ -274,6 +304,66 @@ function IntelligenceTab() {
           <Count label="Advisories" value={data.counts.advisories} />
           <Count label="KEV records" value={data.counts.kev} />
           <Count label="EPSS scores" value={data.counts.epss} />
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="NVD API key"
+          description="An optional key from NVD raises the sync rate limit from 5 to 50 requests per 30 seconds — the difference between minutes and hours for the first full download."
+        />
+        <CardBody className="space-y-3">
+          <p className="flex items-center gap-1.5 text-sm">
+            <span className="text-muted">Status:</span>
+            {data.nvd_api_key_configured ? (
+              <Badge className="border-low/30 bg-low-soft text-low">configured</Badge>
+            ) : (
+              <Badge className="border-border bg-surface-2 text-muted">not configured</Badge>
+            )}
+          </p>
+          <p className="text-xs text-muted">
+            Request a free key at{" "}
+            <a
+              href="https://nvd.nist.gov/developers/request-an-api-key"
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent underline underline-offset-2"
+            >
+              nvd.nist.gov/developers/request-an-api-key
+            </a>{" "}
+            (takes minutes to arrive by email). The key is stored only on this server, is never shown again after saving,
+            and is used solely to authenticate syncs to NVD.
+          </p>
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              saveKey();
+            }}
+          >
+            <div className="min-w-[18rem] flex-1">
+              <label htmlFor="nvd-key" className="sr-only">
+                NVD API key
+              </label>
+              <Input
+                id="nvd-key"
+                type="password"
+                autoComplete="off"
+                placeholder={data.nvd_api_key_configured ? "enter a new key to replace the stored one" : "paste your NVD API key"}
+                value={nvdKey}
+                onChange={(e) => setNvdKey(e.target.value)}
+              />
+            </div>
+            <Button type="submit" variant="primary" disabled={savingKey || nvdKey === ""}>
+              {savingKey ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : null}
+              Save key
+            </Button>
+            {data.nvd_api_key_configured ? (
+              <Button type="button" variant="secondary" disabled={savingKey} onClick={clearKey}>
+                Remove key
+              </Button>
+            ) : null}
+          </form>
         </CardBody>
       </Card>
 
