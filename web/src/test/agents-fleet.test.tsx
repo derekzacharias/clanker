@@ -158,13 +158,19 @@ describe("enrolled endpoint fleet", () => {
     expect(within(web01).getByText("correlation · 45%")).toBeInTheDocument();
     expect(within(web01).getByText("8s ago")).toBeInTheDocument();
     expect(within(web01).getByText("12")).toBeInTheDocument();
+    // The hostname and the agent that owns it are in the same row, so an enrollment error that
+    // names an agent ID can be traced to its endpoint without guessing.
+    expect(within(web01).getByText("AGT-1")).toBeInTheDocument();
 
     const db01 = within(table).getByRole("row", { name: /db01/ });
     expect(within(db01).getByText("offline")).toBeInTheDocument();
     expect(within(db01).getByText("reported 3 findings")).toBeInTheDocument();
+    expect(within(db01).getByText("AGT-2")).toBeInTheDocument();
 
     const old01 = within(table).getByRole("row", { name: /old01/ });
     expect(within(old01).getByText("revoked")).toBeInTheDocument();
+    // A revoked identity keeps its ID on screen: that is the record holding the hostname.
+    expect(within(old01).getByText("AGT-3")).toBeInTheDocument();
     // A revoked endpoint keeps its record but offers no revoke action.
     expect(within(old01).queryByRole("button", { name: /Revoke/i })).not.toBeInTheDocument();
   });

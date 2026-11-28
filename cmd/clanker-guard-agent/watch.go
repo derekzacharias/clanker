@@ -56,6 +56,10 @@ func cmdWatch(args []string) int {
 	client := agent.New(cfg.Server, cfg.Token)
 	fmt.Fprintf(os.Stderr, "watching %s as %s — scans requested from the dashboard start immediately\n",
 		cfg.Server, cfg.AgentID)
+	// The watcher runs until stopped, so a console window it owns would stay on the desktop for
+	// good. On Windows that window is hidden once the agent is clearly running; a console shared
+	// with an operator's shell is never touched. No-op elsewhere.
+	hideOwnedConsoleWindow()
 
 	ctx := context.Background()
 	backoff := time.Second
@@ -64,6 +68,20 @@ func cmdWatch(args []string) int {
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0
+			}
+			// A revoked or replaced credential is terminal: the server will reject every claim
+			// until this endpoint enrolls again, so looping only fills the log with the same
+			// warning. Say what happened and what to run, then stop.
+			var revoked *agent.RevokedError
+			if errors.As(err, &revoked) {
+				fmt.Fprintln(os.Stderr, "error: "+revoked.Error())
+				fmt.Fprintln(os.Stderr, "this endpoint has to enroll again to reconnect; the dashboard shows the command:")
+				enroll := fmt.Sprintf("  clanker-guard-agent enroll --server %s --enroll-token <token>", cfg.Server)
+				if *configPath != "" {
+					enroll += " --config " + *configPath
+				}
+				fmt.Fprintln(os.Stderr, enroll)
+				return 4
 			}
 			// Connection lost: that is exactly when the dashboard should show the
 			// endpoint as unreachable, so back off quietly rather than spamming.

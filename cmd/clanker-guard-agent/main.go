@@ -10,13 +10,13 @@
 package main
 
 import (
-	"runtime"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/bgdnvk/clanker/internal/vuln/agent"

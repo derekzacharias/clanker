@@ -392,6 +392,20 @@ func (s *Store) agentByHost(ctx context.Context, host string) (*Agent, error) {
 	return &a, nil
 }
 
+// HostEnrolled reports whether a non-revoked agent already owns this hostname.
+//
+// The enrollment handler uses it to tell two very different requests apart: an endpoint
+// re-attaching an identity it already holds (its credential is the proof), and a caller asking
+// for a brand-new identity (which still needs an enrollment token). Without the distinction a
+// presented-but-unverified credential would fall through to the create path and mint an agent.
+func (s *Store) HostEnrolled(ctx context.Context, host string) (bool, error) {
+	a, err := s.agentByHost(ctx, host)
+	if err != nil {
+		return false, err
+	}
+	return a != nil, nil
+}
+
 // Authenticate resolves a bearer token to its agent.
 func (s *Store) Authenticate(ctx context.Context, token string) (Agent, error) {
 	token = strings.TrimSpace(token)

@@ -471,6 +471,7 @@ function AgentsTab() {
               <thead>
                 <tr>
                   <Th>Host</Th>
+                  <Th>Agent</Th>
                   <Th>Status</Th>
                   <Th>Activity</Th>
                   <Th>Last seen</Th>
@@ -486,6 +487,7 @@ function AgentsTab() {
                       <span className="mono text-xs">{agent.host}</span>
                       {agent.os ? <span className="block text-xs text-subtle">{agent.os}</span> : null}
                     </Td>
+                    <Td className="mono text-xs">{agent.id}</Td>
                     <Td>{agentStatus(agent)}</Td>
                     <Td>
                       <span className="text-xs text-muted">

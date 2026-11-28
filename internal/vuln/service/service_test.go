@@ -201,6 +201,11 @@ func TestWindowsInstallFallsBackToStartupShortcut(t *testing.T) {
 		}
 		return "", nil
 	}
+	var started []string
+	m.StartWatcher = func(exePath, configPath string) error {
+		started = append(started, exePath+"|"+configPath)
+		return nil
+	}
 	st, err := m.installScheduledTask(context.Background())
 	if err != nil {
 		t.Fatalf("install should fall back, got %v", err)
@@ -210,14 +215,18 @@ func TestWindowsInstallFallsBackToStartupShortcut(t *testing.T) {
 	}
 	// The watcher has to be started now, not only at the next logon, or the endpoint shows
 	// offline until someone signs out and back in.
-	started := false
-	for _, c := range calls {
-		if strings.HasPrefix(c, "cmd /c start") && strings.Contains(c, "watch --config") {
-			started = true
-		}
+	if len(started) != 1 {
+		t.Fatalf("watcher start calls = %v, want exactly one", started)
 	}
-	if !started {
-		t.Fatalf("watcher was not started after the fallback install; calls: %v", calls)
+	if want := m.ExePath + "|" + m.ConfigPath; started[0] != want {
+		t.Fatalf("watcher started with %q, want %q", started[0], want)
+	}
+	// A terminal window the installer leaves behind is the bug this replaced: `cmd /c start`
+	// gave the watcher its own console, which stayed open for as long as the watcher ran.
+	for _, c := range calls {
+		if strings.HasPrefix(c, "cmd ") {
+			t.Fatalf("the fallback must not launch the watcher through a shell: %v", calls)
+		}
 	}
 	if !st.Running {
 		t.Fatalf("status should report it running: %+v", st)
@@ -240,6 +249,35 @@ func TestWindowsInstallFallsBackToStartupShortcut(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, Name+".cmd")); !os.IsNotExist(err) {
 		t.Fatal("startup shortcut survived uninstall")
+	}
+}
+
+// A watcher that could not be started must be reported honestly: the endpoint is installed and
+// returns at the next logon, but it is offline right now, and the installer should say so rather
+// than show a green running state that will not answer a scan.
+func TestWindowsFallbackReportsAWatcherThatDidNotStart(t *testing.T) {
+	dir := t.TempDir()
+	m := &Manager{
+		ExePath:    `C:\agent\clanker-guard-agent.exe`,
+		ConfigPath: `C:\agent\agent.json`,
+		goos:       "windows",
+		startupDir: dir,
+		Run: func(context.Context, string, ...string) (string, error) {
+			return "", errors.New("ERROR: Access is denied.")
+		},
+		StartWatcher: func(string, string) error {
+			return errors.New("the file is locked by another process")
+		},
+	}
+	st, err := m.installScheduledTask(context.Background())
+	if err != nil {
+		t.Fatalf("a refused task with a workable shortcut is still an install, got %v", err)
+	}
+	if !st.Installed || st.Running {
+		t.Fatalf("status should be installed but not running: %+v", st)
+	}
+	if !strings.Contains(st.Detail, "watcher did not start") {
+		t.Fatalf("detail does not name the failed start: %q", st.Detail)
 	}
 }
 

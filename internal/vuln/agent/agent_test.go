@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -292,6 +293,40 @@ func TestClaimTaskSurfacesErrors(t *testing.T) {
 	defer srv.Close()
 	if _, err := New(srv.URL, "stale").ClaimTask(context.Background()); err == nil {
 		t.Fatal("a revoked agent must see the error, not an empty queue")
+	}
+}
+
+// A rejected credential has to be distinguishable from a lost connection. The watcher treats
+// transport errors as transient and retries, so without this type a revoked endpoint printed the
+// same warning every 30 seconds forever instead of saying "enroll again" once and stopping.
+func TestClaimTaskReportsARejectedCredentialAsTerminal(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"revoked", http.StatusForbidden,
+			`{"error":"this endpoint was revoked by the operator; enroll again to reconnect","code":"agent_revoked"}`},
+		{"stale token", http.StatusUnauthorized,
+			`{"error":"agent credential is not valid","code":"unauthorized"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := New(srv.URL, "stale").ClaimTaskWait(context.Background(), time.Second)
+			var revoked *RevokedError
+			if !errors.As(err, &revoked) {
+				t.Fatalf("err = %v, want a RevokedError so the watcher stops instead of retrying", err)
+			}
+			if !strings.Contains(err.Error(), "revoked") && !strings.Contains(err.Error(), "not valid") {
+				t.Fatalf("message lost the server's explanation: %q", err.Error())
+			}
+		})
 	}
 }
 

@@ -85,12 +85,21 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	// A host that already has this agent's credential does not need an enrollment token: it is
 	// re-attaching an identity it already holds. Requiring one here made every agent upgrade fail
 	// with a spent token, which is a dead end for the operator.
+	//
+	// The field name is the one the agent parses: "agent_token". Returning "token" here left a
+	// re-enrolled endpoint holding a credential the server had just rotated, so the install that
+	// was supposed to fix the agent failed after the rotation and could not retry with the old key.
+	//
+	// The shortcut also only applies to a hostname that is already enrolled. A credential is proof
+	// of an identity the server already knows; presented for a new hostname it proves nothing, and
+	// accepting it there let any caller mint agents without an enrollment token. New hosts fall
+	// through to the token path below, which is the only way a new identity is created.
 	if proof != "" {
-		{
+		if enrolled, herr := s.fleet.HostEnrolled(r.Context(), body.Host); herr == nil && enrolled {
 			if ag, token, err := s.fleet.Enroll(r.Context(), body.Host, body.OS, body.Version, proof); err == nil {
 				s.log.Info("agent re-enrolled with its existing credential", "agent", ag.ID, "host", ag.Host, "remote", ip)
 				writeJSON(w, http.StatusOK, map[string]any{
-					"agent_id": ag.ID, "token": token, "host": ag.Host,
+					"agent_id": ag.ID, "agent_token": token, "host": ag.Host,
 					"note": "re-enrolled with the credential already on this endpoint; no enrollment token was used",
 				})
 				return

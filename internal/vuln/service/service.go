@@ -40,6 +40,10 @@ type Manager struct {
 	Home string
 	// StartupDir overrides the Windows Startup folder (tests).
 	startupDir string
+	// StartWatcher launches the agent's watch command detached from this process. It is
+	// injected so the Windows fallback can be tested without spawning a real watcher, and
+	// so a platform's way of starting a background process stays out of the service logic.
+	StartWatcher func(exePath, configPath string) error
 	// Run executes service-manager commands (tests).
 	Run Runner
 
@@ -49,10 +53,11 @@ type Manager struct {
 // New returns a manager for this platform.
 func New(exePath, configPath string) *Manager {
 	return &Manager{
-		ExePath:    exePath,
-		ConfigPath: configPath,
-		Run:        execRunner,
-		goos:       runtime.GOOS,
+		ExePath:      exePath,
+		ConfigPath:   configPath,
+		Run:          execRunner,
+		StartWatcher: startWatcherDetached,
+		goos:         runtime.GOOS,
 	}
 }
 
@@ -398,11 +403,21 @@ func (m *Manager) installScheduledTask(ctx context.Context) (Status, error) {
 		// still comes back after a logon instead of silently staying offline.
 		if startupErr := m.installStartupShortcut(); startupErr == nil {
 			// Starting it now matters as much as installing it: an endpoint that is reachable
-			// today should show online today, not after the next logon. `cmd /c start` detaches,
-			// so the installer is not blocked by the watcher's lifetime.
-			_, _ = m.Run(ctx, "cmd", "/c", "start", "", m.ExePath, "watch", "--config", m.ConfigPath)
-			detail := "installed as a Startup shortcut and started; the scheduled task was refused (" + shortErr(err) + ")"
-			return Status{Platform: m.goos, Installed: true, Enabled: true, Running: true,
+			// today should show online today, not after the next logon. The watcher is started
+			// detached with no console window, so the installer leaves no terminal behind —
+			// `cmd /c start` gave the watcher its own console, which stayed on screen forever
+			// and piled up with every retry.
+			detail := "installed as a Startup shortcut; the scheduled task was refused (" + shortErr(err) + ")"
+			running := false
+			if m.StartWatcher != nil {
+				if werr := m.StartWatcher(m.ExePath, m.ConfigPath); werr != nil {
+					detail += "; the watcher did not start (" + shortErr(werr) + ")"
+				} else {
+					running = true
+					detail = "installed as a Startup shortcut and started; the scheduled task was refused (" + shortErr(err) + ")"
+				}
+			}
+			return Status{Platform: m.goos, Installed: true, Enabled: true, Running: running,
 				Path: m.startupPath(), Detail: detail}, nil
 		}
 		return Status{Platform: m.goos}, err

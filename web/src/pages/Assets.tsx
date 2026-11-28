@@ -186,6 +186,7 @@ export default function Assets() {
                             <Button
                               size="sm"
                               variant="secondary"
+                              className="ml-auto"
                               onClick={() => queueScan(a)}
                               disabled={scanning === a.host}
                               title="Ask this endpoint's agent to scan now"

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/bgdnvk/clanker/internal/vuln/agent"
 	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"net/http"
 	"net/http/httptest"
@@ -1075,7 +1076,10 @@ func TestReenrollmentSucceedsWithTheExistingCredentialAndNoToken(t *testing.T) {
 	}
 	var out struct {
 		AgentID string `json:"agent_id"`
-		Token   string `json:"token"`
+		// The agent parses "agent_token"; a response with a differently named field is read as a
+		// missing credential even though the server rotated it, which is what turned a reinstall
+		// into "server did not return an agent id and token".
+		Token string `json:"agent_token"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
@@ -1102,6 +1106,28 @@ func TestReenrollmentSucceedsWithTheExistingCredentialAndNoToken(t *testing.T) {
 	}
 }
 
+// The agent and the server have to agree on the enrollment response by field name. A response
+// the agent cannot parse leaves the endpoint holding a credential the server has already
+// rotated, so the install fails and every retry fails with it — a Windows install of agent
+// 0.2.4 hit exactly that: "server did not return an agent id and token" after a successful
+// re-enrollment. The other enrollment tests decode the body by hand, which is why they passed;
+// this one reads the response through the client that runs on the endpoint.
+func TestAgentClientParsesTheReenrollmentResponse(t *testing.T) {
+	srv := fleetServer(t)
+	_, token := enrollAgent(t, srv, "win02")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	client := agent.New(ts.URL, token)
+	cfg, err := client.Enroll(t.Context(), "", "win02", "Windows 11 Pro", "0.2.5")
+	if err != nil {
+		t.Fatalf("the agent could not parse a successful re-enrollment: %v", err)
+	}
+	if cfg.AgentID == "" || cfg.Token == "" {
+		t.Fatalf("config = %+v, want an agent id and a token", cfg)
+	}
+}
+
 // A *new* host still needs a token: the credential shortcut must not become a way to claim an
 // identity you do not hold.
 func TestNewHostStillRequiresAnEnrollmentToken(t *testing.T) {
@@ -1110,6 +1136,27 @@ func TestNewHostStillRequiresAnEnrollmentToken(t *testing.T) {
 		map[string]string{"Content-Type": "application/json"})
 	if rec.Code != 401 {
 		t.Fatalf("new host without a token = %d, want 401", rec.Code)
+	}
+}
+
+// A credential is proof only for an identity the server already knows. Presenting an arbitrary
+// Bearer value for a new hostname used to take the "re-enrolling" shortcut, and the store then
+// created the agent — so the enrollment token stopped being a gate and anyone who could reach the
+// endpoint could add endpoints to the dashboard.
+func TestAForgedCredentialCannotCreateANewHost(t *testing.T) {
+	srv := fleetServer(t)
+	rec := request(t, srv.Handler(), "POST", "/api/agents/enroll",
+		`{"host":"stranger","os":"windows","version":"0.2.4"}`,
+		map[string]string{"Content-Type": "application/json", "Authorization": "Bearer not-a-real-token"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("forged credential enroll = %d, want 401: %s", rec.Code, rec.Body.String())
+	}
+	enrolled, err := srv.fleet.HostEnrolled(t.Context(), "stranger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enrolled {
+		t.Fatal("a forged credential created an agent for a hostname nobody enrolled")
 	}
 }
 

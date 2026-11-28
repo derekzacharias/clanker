@@ -382,6 +382,9 @@ func (c *Client) postRaw(ctx context.Context, path string, payload []byte, out a
 		if msg == "" {
 			msg = http.StatusText(resp.StatusCode)
 		}
+		if apiErr.Code == "agent_revoked" || resp.StatusCode == http.StatusUnauthorized {
+			return &RevokedError{Detail: msg}
+		}
 		return fmt.Errorf("%s %s: %s", http.MethodPost, path, msg)
 	}
 	if out != nil && len(raw) > 0 {
@@ -434,7 +437,25 @@ func (c *Client) ClaimTaskWait(ctx context.Context, wait time.Duration) (*Task, 
 	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("claiming work failed: %s", strings.TrimSpace(string(raw)))
+		var apiErr struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		_ = json.Unmarshal(raw, &apiErr)
+		msg := strings.TrimSpace(apiErr.Error)
+		if msg == "" {
+			msg = strings.TrimSpace(string(raw))
+		}
+		if msg == "" {
+			msg = http.StatusText(resp.StatusCode)
+		}
+		// A rejected credential is not a transient failure. The endpoint was revoked, or a
+		// re-enrollment replaced its token; retrying with the same credential loops forever and
+		// buries the one line the operator needs to see.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || apiErr.Code == "agent_revoked" {
+			return nil, &RevokedError{Detail: msg}
+		}
+		return nil, fmt.Errorf("claiming work failed: %s", msg)
 	}
 	var out struct {
 		Task *Task `json:"task"`
@@ -488,4 +509,16 @@ type ReplayError struct{ LastSequence int64 }
 
 func (e *ReplayError) Error() string {
 	return fmt.Sprintf("server has already accepted sequence %d; the local counter is behind", e.LastSequence)
+}
+
+// RevokedError means the server no longer accepts this endpoint's credential: the agent was
+// revoked, or a re-enrollment replaced its token. Waiting cannot fix it, so a long-running
+// caller should stop and tell the operator to enroll again rather than retry forever.
+type RevokedError struct{ Detail string }
+
+func (e *RevokedError) Error() string {
+	if strings.TrimSpace(e.Detail) == "" {
+		return "this endpoint's credential is no longer accepted; enroll it again to reconnect"
+	}
+	return e.Detail
 }
