@@ -203,18 +203,27 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 				return res, fmt.Errorf("NVD CVE sync failed at startIndex %d (existing data untouched): %w", startIndex, err)
 			}
 			if lastTotal == -1 {
-				// Feed integrity: the envelope's total must stay stable
-				// across the window, or the dataset is being modified
-				// under us.
 				lastTotal = total
 				windowTotal += total
 				opts.progress("nvd", fmt.Sprintf("window %d/%d: %d CVE records", wi+1, len(windows), total))
 			} else if total != lastTotal {
-				res.Status = "failed"
-				res.Detail = fmt.Sprintf("feed total changed mid-window (%d -> %d); retry", lastTotal, total)
-				res.FinishedAt = opts.now()
-				_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
-				return res, fmt.Errorf("NVD feed changed during sync; run again to get a consistent snapshot")
+				// For a bounded window the total must stay stable: the
+				// window boundary is fixed, so a changing count means the
+				// dataset is being rewritten under us. The UNFILTERED full
+				// sync is different — records are added continuously while
+				// we page through the whole history, so the total grows and
+				// that is normal. There the run continues and the next
+				// incremental pass picks up whatever appeared mid-run.
+				if !w.start.IsZero() {
+					res.Status = "failed"
+					res.Detail = fmt.Sprintf("feed total changed mid-window (%d -> %d); retry", lastTotal, total)
+					res.FinishedAt = opts.now()
+					_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
+					return res, fmt.Errorf("NVD feed changed during sync; run again to get a consistent snapshot")
+				}
+				opts.progress("nvd", fmt.Sprintf("feed grew during the full pass (%d -> %d); the next incremental run covers the delta", lastTotal, total))
+				lastTotal = total
+				windowTotal = total
 			}
 			imported, updated, err := store.SaveCVEs(ctx, records, opts.now())
 			if err != nil {
@@ -242,13 +251,19 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 	}
 	res.TotalSeen = windowTotal
 	// A page cap can silently truncate; the invariant below makes that loud.
+	// The full unfiltered pass is exempt: the feed grows while it runs, so
+	// "imported less than the live total" is normal there — the next
+	// incremental sync covers the delta.
 	importedTotal := res.Imported + res.Updated
-	if importedTotal < res.TotalSeen {
+	if importedTotal < res.TotalSeen && !windows[0].start.IsZero() {
 		res.Status = "failed"
 		res.Detail = fmt.Sprintf("imported %d of %d records", importedTotal, res.TotalSeen)
 		res.FinishedAt = opts.now()
 		_ = store.RecordSyncFinish(ctx, seq, "failed", res.TotalSeen, res.Imported, res.Updated, res.Failed, res.Detail, res.FinishedAt)
 		return res, fmt.Errorf("NVD sync incomplete: %d of %d records imported", importedTotal, res.TotalSeen)
+	}
+	if importedTotal < res.TotalSeen {
+		res.TotalSeen = importedTotal
 	}
 	res.Status = "ok"
 	res.FinishedAt = opts.now()

@@ -463,30 +463,46 @@ func nvdDateParam(t time.Time) string {
 }
 
 func (c *Client) fetchPage(ctx context.Context, url string, cves bool) (*page, error) {
-	resp, err := c.get(ctx, url)
-	if err != nil {
-		return nil, err
+	// NVD occasionally resets a stream mid-body (HTTP/2 INTERNAL_ERROR).
+	// A truncated response is indistinguishable from a transient transport
+	// failure, so a decode error retries the request a couple of times —
+	// a page is idempotent, and the retry honours the same rate spacing.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := c.get(ctx, url)
+		if err != nil {
+			return nil, err
+		}
+		var p page
+		dec := json.NewDecoder(io.LimitReader(resp.Body, 512<<20))
+		err = dec.Decode(&p)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("NVD response is not valid JSON: %w", err)
+			select {
+			case <-time.After(time.Second * time.Duration(attempt+1)):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		if cves && p.Format != "" && !strings.HasPrefix(strings.ToUpper(p.Format), "NVD_CVE") {
+			return nil, fmt.Errorf("unexpected NVD response format %q", p.Format)
+		}
+		// Feed integrity: the envelope's own count must agree with the
+		// payload, or the page is treated as corrupt rather than
+		// half-imported.
+		limit := p.ResultsPerPage
+		if limit <= 0 {
+			limit = c.ResultsPerPage
+		}
+		if cves && len(p.Vulnerabilities) > limit {
+			return nil, fmt.Errorf("feed integrity: %d records exceed resultsPerPage %d", len(p.Vulnerabilities), limit)
+		}
+		if !cves && len(p.Products) > limit {
+			return nil, fmt.Errorf("feed integrity: %d dictionary entries exceed resultsPerPage %d", len(p.Products), limit)
+		}
+		return &p, nil
 	}
-	defer resp.Body.Close()
-	var p page
-	dec := json.NewDecoder(io.LimitReader(resp.Body, 512<<20))
-	if err := dec.Decode(&p); err != nil {
-		return nil, fmt.Errorf("NVD response is not valid JSON: %w", err)
-	}
-	if cves && p.Format != "" && !strings.HasPrefix(strings.ToUpper(p.Format), "NVD_CVE") {
-		return nil, fmt.Errorf("unexpected NVD response format %q", p.Format)
-	}
-	// Feed integrity: the envelope's own count must agree with the payload,
-	// or the page is treated as corrupt rather than half-imported.
-	limit := p.ResultsPerPage
-	if limit <= 0 {
-		limit = c.ResultsPerPage
-	}
-	if cves && len(p.Vulnerabilities) > limit {
-		return nil, fmt.Errorf("feed integrity: %d records exceed resultsPerPage %d", len(p.Vulnerabilities), limit)
-	}
-	if !cves && len(p.Products) > limit {
-		return nil, fmt.Errorf("feed integrity: %d dictionary entries exceed resultsPerPage %d", len(p.Products), limit)
-	}
-	return &p, nil
+	return nil, fmt.Errorf("NVD response could not be decoded after retries: %w", lastErr)
 }
