@@ -141,11 +141,15 @@ func (s *Store) SaveCVEs(ctx context.Context, records []Record, fetchedAt time.T
 	defer insMatch.Close()
 
 	now := fetchedAt.UTC().Format(time.RFC3339)
+	insCVE, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO nvd_cves
+		(id, published, modified, vuln_status, description, cvss_score, cvss_vector,
+		 cvss_severity, cvss_version, configs, references_json, weaknesses_json, fetched_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer insCVE.Close()
 	for _, r := range records {
-		var existed int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM nvd_cves WHERE id = ?`, r.ID).Scan(&existed); err != nil {
-			return 0, 0, err
-		}
 		cvss := r.PrimaryCVSS()
 		var score sql.NullFloat64
 		var vector, sev, ver string
@@ -159,10 +163,22 @@ func (s *Store) SaveCVEs(ctx context.Context, records []Record, fetchedAt time.T
 		}
 		refsJSON, _ := json.Marshal(r.References)
 		weaksJSON, _ := json.Marshal(r.WeaknessIDs())
-		if _, err := upsert.ExecContext(ctx, r.ID, nullTime(r.Published), nullTime(r.Modified),
+		res, err := insCVE.ExecContext(ctx, r.ID, nullTime(r.Published), nullTime(r.Modified),
 			r.Status, r.Description, score, nullable(vector), nullable(sev), nullable(ver),
-			string(configsJSON), string(refsJSON), string(weaksJSON), now); err != nil {
+			string(configsJSON), string(refsJSON), string(weaksJSON), now)
+		if err != nil {
 			return 0, 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			imported++
+		} else {
+			// Already stored: refresh the record and rebuild its match index.
+			if _, err := upsert.ExecContext(ctx, r.ID, nullTime(r.Published), nullTime(r.Modified),
+				r.Status, r.Description, score, nullable(vector), nullable(sev), nullable(ver),
+				string(configsJSON), string(refsJSON), string(weaksJSON), now); err != nil {
+				return 0, 0, err
+			}
+			updated++
 		}
 		if _, err := delMatches.ExecContext(ctx, r.ID); err != nil {
 			return 0, 0, err
@@ -176,11 +192,6 @@ func (s *Store) SaveCVEs(ctx context.Context, records []Record, fetchedAt time.T
 				m.version, m.vulnerable, m.startIncl, m.startExcl, m.endIncl, m.endExcl); err != nil {
 				return 0, 0, err
 			}
-		}
-		if existed > 0 {
-			updated++
-		} else {
-			imported++
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -250,38 +261,45 @@ func (s *Store) SaveDictionary(ctx context.Context, entries []DictEntry) (import
 		return 0, 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO nvd_cpes
+	// Counting imported vs updated with a SELECT per entry costs a full
+	// query per row — 1.9M of them for the dictionary. Two statements do it
+	// in two passes: INSERT OR IGNORE reports the new rows directly, and
+	// the upsert after it only ever updates.
+	ins, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO nvd_cpes
 		(cpe23, vendor, product, version, deprecated, deprecated_by, titles_json, refs_json, last_modified)
-		VALUES (?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(cpe23) DO UPDATE SET
-		  vendor=excluded.vendor, product=excluded.product, version=excluded.version,
-		  deprecated=excluded.deprecated, deprecated_by=excluded.deprecated_by,
-		  titles_json=excluded.titles_json, refs_json=excluded.refs_json,
-		  last_modified=excluded.last_modified`)
+		VALUES (?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return 0, 0, err
 	}
-	defer stmt.Close()
+	defer ins.Close()
+	upd, err := tx.PrepareContext(ctx, `UPDATE nvd_cpes SET
+		  vendor=?, product=?, version=?, deprecated=?, deprecated_by=?,
+		  titles_json=?, refs_json=?, last_modified=? WHERE cpe23 = ?`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer upd.Close()
 	for _, e := range entries {
-		var existed int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM nvd_cpes WHERE cpe23 = ?`, e.CPE23).Scan(&existed); err != nil {
-			return 0, 0, err
-		}
 		titles, _ := json.Marshal(e.Titles)
 		refs, _ := json.Marshal(e.Refs)
 		dep := 0
 		if e.Deprecated {
 			dep = 1
 		}
-		if _, err := stmt.ExecContext(ctx, e.CPE23, e.Vendor, e.Product, e.Version, dep,
-			nullable(e.DeprecatedBy), string(titles), string(refs), nullTime(e.LastModified)); err != nil {
+		res, err := ins.ExecContext(ctx, e.CPE23, e.Vendor, e.Product, e.Version, dep,
+			nullable(e.DeprecatedBy), string(titles), string(refs), nullTime(e.LastModified))
+		if err != nil {
 			return 0, 0, err
 		}
-		if existed > 0 {
-			updated++
-		} else {
+		if n, _ := res.RowsAffected(); n > 0 {
 			imported++
+			continue
 		}
+		if _, err := upd.ExecContext(ctx, e.Vendor, e.Product, e.Version, dep,
+			nullable(e.DeprecatedBy), string(titles), string(refs), nullTime(e.LastModified), e.CPE23); err != nil {
+			return 0, 0, err
+		}
+		updated++
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err

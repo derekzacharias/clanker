@@ -39,8 +39,13 @@ type Client struct {
 	APIKey string
 	// MaxRetries bounds 429/5xx retries (default 5).
 	MaxRetries int
-	// ResultsPerPage is used for paginated endpoints (default 2000, max 2000).
+	// ResultsPerPage is used for paginated endpoints (default 2000, max 2000
+	// for cves; the dictionary endpoint accepts up to 10000).
 	ResultsPerPage int
+	// DictionaryPageSize pages the CPE dictionary (default 10000, the API
+	// maximum). The dictionary has ~1.9M entries, so the larger page cuts
+	// the request count tenfold.
+	DictionaryPageSize int
 	// MinInterval overrides the computed minimum spacing (tests).
 	MinInterval time.Duration
 	// BackoffBase is the initial retry delay (default 6s).
@@ -55,14 +60,15 @@ type Client struct {
 // NewClient returns a production client. apiKey may be empty.
 func NewClient(apiKey string) *Client {
 	return &Client{
-		BaseURL:        DefaultBaseURL,
-		HTTP:           &http.Client{Timeout: 90 * time.Second},
-		APIKey:         apiKey,
-		MaxRetries:     5,
-		ResultsPerPage: 2000,
-		BackoffBase:    6 * time.Second,
-		Now:            func() time.Time { return time.Now().UTC() },
-		mu:             make(chan struct{}, 1),
+		BaseURL:            DefaultBaseURL,
+		HTTP:               &http.Client{Timeout: 90 * time.Second},
+		APIKey:             apiKey,
+		MaxRetries:         5,
+		ResultsPerPage:     2000,
+		DictionaryPageSize: 10000,
+		BackoffBase:        6 * time.Second,
+		Now:                func() time.Time { return time.Now().UTC() },
+		mu:                 make(chan struct{}, 1),
 	}
 }
 
@@ -420,9 +426,13 @@ func (c *Client) CVEPagePublished(ctx context.Context, startIndex int, pubStart,
 // CPEDictionaryPage fetches one page of the CPE dictionary.
 func (c *Client) CPEDictionaryPage(ctx context.Context, startIndex int, lastModStart time.Time) (total int, entries []DictEntry, err error) {
 	base := strings.TrimRight(c.BaseURL, "/") + "/cpes/2.0"
+	perPage := c.DictionaryPageSize
+	if perPage <= 0 {
+		perPage = c.ResultsPerPage
+	}
 	params := []string{
 		"startIndex=" + strconv.Itoa(startIndex),
-		"resultsPerPage=" + strconv.Itoa(c.ResultsPerPage),
+		"resultsPerPage=" + strconv.Itoa(perPage),
 	}
 	if !lastModStart.IsZero() {
 		params = append(params,
