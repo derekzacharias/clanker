@@ -28,8 +28,14 @@ import (
 // WindowsResult is what Windows correlation contributed.
 type WindowsResult struct {
 	Findings []model.Finding
-	// Coverage notes explain what was and was not assessed, for the report's limitations.
-	Coverage []string
+	// Notes are what the assessment positively established, such as "this host has no missing
+	// security updates". They are not limitations: a patched host must not be described as
+	// incompletely assessed just because its clean result needs a sentence.
+	Notes []string
+	// Limitations explain what was not assessed, or could not be decided. They belong in the
+	// report's coverage limitations, never in its errors: an error makes the whole assessment
+	// look broken, which is how a current Windows endpoint ended up reported as "incomplete".
+	Limitations []string
 	// Indeterminate counts items that could not be decided (kept visible, never dropped).
 	Indeterminate int
 }
@@ -43,14 +49,14 @@ type WindowsAssessor struct {
 // Assess produces findings for the endpoint.
 func (w *WindowsAssessor) Assess(ctx context.Context, inv model.Inventory, host string) (WindowsResult, error) {
 	if inv.Windows == nil {
-		return WindowsResult{Coverage: []string{
+		return WindowsResult{Limitations: []string{
 			"the endpoint did not report Windows servicing data, so Windows update findings were not produced",
 		}}, nil
 	}
 	ws := inv.Windows
 	res := WindowsResult{}
 	if strings.TrimSpace(ws.Build) == "" {
-		res.Coverage = append(res.Coverage, "the Windows build number is unknown; update applicability could not be evaluated")
+		res.Limitations = append(res.Limitations, "the Windows build number is unknown; update applicability could not be evaluated")
 		return res, nil
 	}
 	if !strings.EqualFold(strings.TrimSpace(ws.WUAStatus), "ok") {
@@ -58,24 +64,24 @@ func (w *WindowsAssessor) Assess(ctx context.Context, inv model.Inventory, host 
 		if reason == "" {
 			reason = "not reported"
 		}
-		res.Coverage = append(res.Coverage,
+		res.Limitations = append(res.Limitations,
 			fmt.Sprintf("the Windows Update Agent did not run (%s); missing security updates were NOT assessed on this "+
 				"endpoint, so a clean result here does not mean the host is patched", reason))
 		return res, nil
 	}
 	if w.DB == nil {
-		res.Coverage = append(res.Coverage, "Microsoft advisory data is unavailable on this host; Windows update findings were skipped")
+		res.Limitations = append(res.Limitations, "Microsoft advisory data is unavailable on this host; Windows update findings were skipped")
 		return res, nil
 	}
 	count, _ := msrc.AdvisoryCount(ctx, w.DB)
 	if count == 0 {
-		res.Coverage = append(res.Coverage,
+		res.Limitations = append(res.Limitations,
 			"Microsoft advisory data has not been imported (run `clanker-guard-agent feeds update --with-msrc`); "+
 				"applicable updates are known but their CVEs are not")
 	}
 
 	match, notes := msrc.WindowsProductMatch(ws.Product, ws.DisplayVersion, inv.Asset.Arch)
-	res.Coverage = append(res.Coverage, notes...)
+	res.Limitations = append(res.Limitations, notes...)
 
 	installed := map[string]bool{}
 	for _, kb := range ws.InstalledUpdates {
@@ -119,7 +125,7 @@ func (w *WindowsAssessor) Assess(ctx context.Context, inv model.Inventory, host 
 				// The update is applicable but the advisory mapping does not name this
 				// product: keep it as an indeterminate record rather than inventing a CVE.
 				res.Indeterminate++
-				res.Coverage = append(res.Coverage, fmt.Sprintf(
+				res.Limitations = append(res.Limitations, fmt.Sprintf(
 					"%s (%s) is applicable and not installed, but no advisory in the imported data maps it to a CVE for %q; "+
 						"the update itself is still missing", kb, u.Title, ws.Product))
 			}
@@ -128,23 +134,23 @@ func (w *WindowsAssessor) Assess(ctx context.Context, inv model.Inventory, host 
 	// With advisories present and nothing missing, this is a real clean result — and saying it
 	// is the difference between "your machine is current" and "we found nothing to say".
 	if count > 0 && len(res.Findings) == 0 && res.Indeterminate == 0 && securityMissing == 0 {
-		res.Coverage = append(res.Coverage, fmt.Sprintf(
+		res.Notes = append(res.Notes, fmt.Sprintf(
 			"Windows Update Agent reports no missing security updates on this host: %s %s, build %s, "+
 				"%d installed updates checked against %d Microsoft advisories. This assessment found no "+
 				"applicable Windows vulnerability at this patch level.",
 			firstNonEmpty(ws.Product, "Windows"), firstNonEmpty(ws.DisplayVersion, ""), ws.Build,
 			len(installed), count))
 	}
-	// Windows applications are inventoried but not yet matched against advisories; say so, so a
-	// clean Windows result is not read as a clean application result.
-	res.Coverage = append(res.Coverage,
-		"Installed applications (browsers, Office, runtimes, third-party software) were inventoried but are not "+
-			"yet matched against vulnerability advisories; Windows findings cover operating-system updates only.")
+	// Windows applications are assessed by the application correlation engine
+	// (NVD/CPE), which reports its own coverage. Note how many applications
+	// were inventoried here so the two assessments can be compared.
+	res.Notes = append(res.Notes, fmt.Sprintf(
+		"%d installed application(s) inventoried for application-level vulnerability assessment", len(inv.Packages)))
 
 	// A host with a pending reboot has not finished applying what it has: say so, so a
 	// "patched" reading is not trusted until the reboot happens.
 	if ws.PendingReboot {
-		res.Coverage = append(res.Coverage,
+		res.Limitations = append(res.Limitations,
 			"this host has a pending reboot"+pendingDetail(ws.PendingReasons)+
 				"; updates already staged may not be in effect until it restarts")
 	}

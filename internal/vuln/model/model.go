@@ -143,6 +143,26 @@ type Package struct {
 	// NeedsPrivileges marks inventory entries that only appear with elevated
 	// rights (the collector records the gap explicitly instead of hiding it).
 	NeedsPrivileges bool `json:"needs_privileges,omitempty"`
+	// The following fields describe installed desktop applications. They are
+	// populated by the Windows registry / MSI / package-manager collectors
+	// and are evidence for application vulnerability findings.
+	// Publisher is the application publisher as recorded by the installer.
+	Publisher string `json:"publisher,omitempty"`
+	// InstallDate is the installer-recorded date (YYYYMMDD or RFC3339).
+	InstallDate string `json:"install_date,omitempty"`
+	// Scope is "machine" or "user" (per-user installs).
+	Scope string `json:"scope,omitempty"`
+	// ProductID is the installer product identifier (registry key name or
+	// MSI product code).
+	ProductID string `json:"product_id,omitempty"`
+	// PkgManagerID is the package-manager identifier (e.g. winget id).
+	PkgManagerID string `json:"pkg_manager_id,omitempty"`
+	// Location is the recorded install location, when the installer
+	// published one.
+	Location string `json:"location,omitempty"`
+	// EvidenceSources lists every collection source that observed this
+	// application, so deduplicated records keep their provenance.
+	EvidenceSources []string `json:"evidence_sources,omitempty"`
 }
 
 // Asset describes the scanned endpoint.
@@ -346,6 +366,35 @@ type Coverage struct {
 	Sources           []string `json:"sources_used"`
 	NotCovered        []string `json:"not_covered,omitempty"`
 	Limitations       []string `json:"limitations,omitempty"`
+	// Notes are positive findings about coverage, such as "this host has no missing security
+	// updates". They are not limitations and must not be rendered as warnings.
+	Notes []string `json:"notes,omitempty"`
+	// Apps is the application-vulnerability assessment coverage. Absent when
+	// the application correlation engine did not run (e.g. Linux-only hosts
+	// with no unrecognized software), so a zero there is never read as
+	// "all applications evaluated".
+	Apps *AppCoverage `json:"apps,omitempty"`
+}
+
+// AppCoverage records what the application vulnerability correlation actually
+// inspected. Software assessment coverage is the proportion of discovered
+// applications that were successfully evaluated against adequate intelligence:
+// (evaluated) / (discovered), with unrecognized and skipped applications
+// counted as NOT evaluated.
+type AppCoverage struct {
+	Discovered       int      `json:"discovered"`
+	Normalized       int      `json:"normalized"`
+	Mapped           int      `json:"mapped"`
+	Evaluated        int      `json:"evaluated"`
+	Skipped          int      `json:"skipped"`
+	Unrecognized     []string `json:"unrecognized,omitempty"`
+	CandidateCVEs    int      `json:"candidate_cves"`
+	ConfirmedMatches int      `json:"confirmed_matches"`
+	PotentialMatches int      `json:"potential_matches"`
+	ExcludedCVEs     int      `json:"excluded_cves"`
+	Errors           int      `json:"errors"`
+	IntelFreshness   string   `json:"intel_freshness,omitempty"`
+	DurationMillis   int64    `json:"duration_millis"`
 }
 
 // FeedState is the freshness of one intelligence source.

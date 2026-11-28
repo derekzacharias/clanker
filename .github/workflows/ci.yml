@@ -16,7 +16,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       - name: Run go fmt
         run: |
@@ -35,7 +35,7 @@ jobs:
     strategy:
       matrix:
         os: [macos-latest]
-        go-version: ['1.23', '1.24']
+        go-version: ['1.25']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       - name: Build
         env:
@@ -86,3 +86,22 @@ jobs:
           name: clanker-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ${{ matrix.binary }}
           retention-days: 7
+
+  web-test:
+    name: Web tests
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Run web tests
+        working-directory: web
+        run: npm test

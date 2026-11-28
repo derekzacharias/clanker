@@ -198,12 +198,17 @@ func normalizePackage(p *model.Package) {
 	}
 }
 
-// Dedupe removes exact duplicates (same ecosystem, name, version, source) while
-// preserving the first occurrence's provenance. It deliberately does NOT merge
-// different versions of the same package: two installed versions are two
-// distinct facts.
+// Dedupe removes exact duplicates (same ecosystem, name, version, source)
+// while preserving the first occurrence's provenance. It deliberately does
+// NOT merge different versions of the same package: two installed versions
+// are two distinct facts.
+//
+// For application records (Windows desktop software), duplicates observed by
+// different collection sources (registry hive vs MSI vs winget vs file
+// version) are merged into one record whose EvidenceSources keeps every
+// origin, so deduplication never destroys provenance.
 func Dedupe(in []model.Package) []model.Package {
-	seen := make(map[string]struct{}, len(in))
+	seen := make(map[string]int, len(in))
 	out := make([]model.Package, 0, len(in))
 	for _, p := range in {
 		key := strings.Join([]string{
@@ -213,11 +218,18 @@ func Dedupe(in []model.Package) []model.Package {
 			string(p.Source),
 			p.Arch,
 		}, "\x00")
-		if _, ok := seen[key]; ok {
+		if idx, ok := seen[key]; ok {
+			mergePackageEvidence(&out[idx], p)
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[key] = len(out)
 		out = append(out, p)
+	}
+	// A second pass merges application records that differ only in source:
+	// the same (name, version) seen through the registry, MSI metadata and
+	// winget is one application.
+	if merged := mergeAppDuplicates(out); merged != nil {
+		out = merged
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Ecosystem != out[j].Ecosystem {
@@ -229,6 +241,83 @@ func Dedupe(in []model.Package) []model.Package {
 		return out[i].Version < out[j].Version
 	})
 	return out
+}
+
+// mergeAppDuplicates collapses application records with the same
+// (ecosystem, name, version) but different sources, keeping the richest
+// record and unioning evidence. Non-application packages are untouched.
+func mergeAppDuplicates(in []model.Package) []model.Package {
+	appKey := func(p model.Package) (string, bool) {
+		if strings.ToLower(p.Ecosystem) != strings.ToLower(model.EcosystemWindows) {
+			return "", false
+		}
+		return strings.Join([]string{
+			strings.ToLower(p.Ecosystem),
+			pkgurl.NormalizeName(p.Ecosystem, p.Name),
+			p.Version,
+		}, "\x00"), true
+	}
+	changed := false
+	seen := map[string]int{}
+	var out []model.Package
+	for _, p := range in {
+		key, isApp := appKey(p)
+		if !isApp {
+			out = append(out, p)
+			continue
+		}
+		if idx, ok := seen[key]; ok {
+			changed = true
+			mergePackageEvidence(&out[idx], p)
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, p)
+	}
+	if !changed {
+		return nil
+	}
+	return out
+}
+
+// mergePackageEvidence folds b's provenance into a, keeping the first
+// record's identity.
+func mergePackageEvidence(a *model.Package, b model.Package) {
+	seen := map[string]bool{}
+	for _, s := range a.EvidenceSources {
+		seen[s] = true
+	}
+	for _, s := range b.EvidenceSources {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			a.EvidenceSources = append(a.EvidenceSources, s)
+		}
+	}
+	// Fill gaps in the surviving record from the duplicate.
+	if a.Publisher == "" {
+		a.Publisher = b.Publisher
+	}
+	if a.Vendor == "" {
+		a.Vendor = b.Vendor
+	}
+	if a.InstallDate == "" {
+		a.InstallDate = b.InstallDate
+	}
+	if a.Location == "" {
+		a.Location = b.Location
+	}
+	if a.Scope == "" {
+		a.Scope = b.Scope
+	}
+	if a.Arch == "" {
+		a.Arch = b.Arch
+	}
+	if a.ProductID == "" {
+		a.ProductID = b.ProductID
+	}
+	if a.PkgManagerID == "" {
+		a.PkgManagerID = b.PkgManagerID
+	}
 }
 
 // run executes a read-only helper command. All call sites pass fixed arguments;

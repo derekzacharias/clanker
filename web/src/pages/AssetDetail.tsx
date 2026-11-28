@@ -12,6 +12,7 @@ import { Banner, ErrorState, LoadingBlock } from "../components/ui/Feedback";
 import { Input, Select } from "../components/ui/Field";
 import { Table, TableWrap, Td, Th, Tr } from "../components/ui/Table";
 import { ApplicabilityBadge, FixBadge, KevBadge, SeverityBadge } from "../components/badges";
+import { cn } from "../lib/cn";
 
 export default function AssetDetail({ host }: { host: string }) {
   const { data, error, loading, reload } = useAsync(() => api.asset(host), [host]);
@@ -25,10 +26,31 @@ export default function AssetDetail({ host }: { host: string }) {
   const suppressed = data?.suppressed ?? [];
   const coverageNotices = data?.coverage_notices ?? [];
   const runErrors = data?.errors ?? [];
+  const apps = data?.coverage.apps;
   const ecosystems = useMemo(
     () => Array.from(new Set((data?.packages ?? []).map((p) => p.ecosystem))).sort(),
     [data?.packages],
   );
+  // Findings per installed package: matched by the inventory reference
+  // (package_ref = name@version), so the software inventory can jump from
+  // an application to its vulnerabilities even when the finding's display
+  // product is the normalized CPE name.
+  const findingsByPackage = useMemo(() => {
+    const m = new Map<string, { count: number; actionable: number; q: string }>();
+    for (const f of findings) {
+      if (f.affected === "not_affected") continue;
+      const keys = new Set<string>();
+      if (f.package_ref) keys.add(f.package_ref.toLowerCase());
+      keys.add(`${f.product.toLowerCase()}\u0000${f.installed_version}`);
+      for (const key of keys) {
+        const cur = m.get(key) ?? { count: 0, actionable: 0, q: f.product };
+        cur.count++;
+        if (f.affected !== "needs_investigation") cur.actionable++;
+        m.set(key, cur);
+      }
+    }
+    return m;
+  }, [findings]);
   const packages = (data?.packages ?? []).filter((p) => {
     if (pkgQuery && !`${p.name} ${p.version}`.toLowerCase().includes(pkgQuery.toLowerCase())) return false;
     if (pkgEcosystem !== "all" && p.ecosystem !== pkgEcosystem) return false;
@@ -203,17 +225,43 @@ export default function AssetDetail({ host }: { host: string }) {
                     <Th>Version</Th>
                     <Th>Ecosystem</Th>
                     <Th>Source</Th>
+                    <Th>Findings</Th>
                   </tr>
                 </thead>
                 <tbody>
-                  {packages.slice(0, 300).map((p) => (
-                    <Tr key={`${p.ecosystem}-${p.name}-${p.version}`}>
-                      <Td className="mono">{p.name}</Td>
-                      <Td className="mono text-xs">{p.version}</Td>
-                      <Td className="text-xs text-muted">{p.ecosystem}</Td>
-                      <Td className="text-xs text-muted">{p.source}</Td>
-                    </Tr>
-                  ))}
+                  {packages.slice(0, 300).map((p) => {
+                    const fk =
+                      findingsByPackage.get(`${p.name.toLowerCase()}\u0000${p.version}`) ??
+                      findingsByPackage.get(`${p.name.toLowerCase()}@${p.version}`);
+                    return (
+                      <Tr key={`${p.ecosystem}-${p.name}-${p.version}`}>
+                        <Td className="mono">
+                          {p.name}
+                          {p.publisher ? <div className="text-xs text-muted">{p.publisher}</div> : null}
+                        </Td>
+                        <Td className="mono text-xs">{p.version}</Td>
+                        <Td className="text-xs text-muted">
+                          {p.ecosystem}
+                          {p.evidence_sources && p.evidence_sources.length > 1 ? (
+                            <div className="text-[10px] text-subtle">via {p.evidence_sources.join(", ")}</div>
+                          ) : null}
+                        </Td>
+                        <Td className="text-xs text-muted">{p.source}</Td>
+                        <Td>
+                          {fk && fk.count > 0 ? (
+                            <Link
+                              to={`/vulnerabilities?q=${encodeURIComponent(fk.q)}`}
+                              className={`num text-xs font-semibold underline underline-offset-2 ${fk.actionable > 0 ? "text-high" : "text-muted"}`}
+                            >
+                              {fk.actionable > 0 ? `${fk.actionable} finding${fk.actionable === 1 ? "" : "s"}` : `${fk.count} record${fk.count === 1 ? "" : "s"}`}
+                            </Link>
+                          ) : (
+                            <span className="text-xs text-subtle">—</span>
+                          )}
+                        </Td>
+                      </Tr>
+                    );
+                  })}
                 </tbody>
               </Table>
             </TableWrap>
@@ -240,6 +288,63 @@ export default function AssetDetail({ host }: { host: string }) {
                     <li key={n}>{n}</li>
                   ))}
                 </ul>
+              </div>
+            ) : null}
+            {(data.coverage.notes ?? []).length > 0 ? (
+              <div className="rounded-md border border-low/30 bg-low-soft p-2">
+                <p className="text-xs font-semibold text-low">What was assessed</p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-low/90">
+                  {(data.coverage.notes ?? []).map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {apps ? (
+              <div className={cn(
+                "rounded-md border p-2",
+                apps.evaluated === 0 ? "border-high/40 bg-high-soft" : "border-accent/30 bg-accent-soft",
+              )}>
+                <p className="text-xs font-semibold">Application assessment</p>
+                <dl className="mt-1 space-y-0.5 text-xs">
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted">Installed applications discovered</dt>
+                    <dd className="num">{apps.discovered}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted">Successfully evaluated</dt>
+                    <dd className="num">{apps.evaluated}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted">Without a vulnerability mapping</dt>
+                    <dd className="num">{(apps.unrecognized ?? []).length}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted">Confirmed vulnerability matches</dt>
+                    <dd className="num">{apps.confirmed_matches}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted">Potential matches (uncertain)</dt>
+                    <dd className="num">{apps.potential_matches}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted">NVD intelligence</dt>
+                    <dd className="text-xs">
+                      {apps.intel_freshness && apps.intel_freshness !== "never synchronized"
+                        ? formatDate(apps.intel_freshness)
+                        : "never synchronized"}
+                    </dd>
+                  </div>
+                </dl>
+                {apps.evaluated === 0 && apps.discovered > 0 ? (
+                  <p className="mt-1.5 text-xs">
+                    Installed applications were inventoried but NOT evaluated for known vulnerabilities{" "}
+                    {apps.intel_freshness === "never synchronized"
+                      ? "because NVD intelligence has never been synchronized (run `feeds update --with-nvd`)."
+                      : "because none could be mapped to a vulnerability identity."}{" "}
+                    Zero application findings here means &ldquo;not assessed&rdquo;, not &ldquo;secure&rdquo;.
+                  </p>
+                ) : null}
               </div>
             ) : null}
             {(data.coverage.limitations ?? []).length > 0 ? (

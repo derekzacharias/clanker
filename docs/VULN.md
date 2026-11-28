@@ -9,7 +9,7 @@ a vulnerability that actually applies to this exact build?*
 
 ```bash
 clanker vuln scan --local                       # assess this endpoint
-clanker vuln feeds update --with-osv            # cache KEV + EPSS + OSV advisories
+clanker vuln feeds update --with-osv --with-nvd  # KEV + EPSS + OSV + NVD (apps)
 clanker vuln report --format markdown           # re-render the last assessment
 clanker vuln ask "what should I patch first?"   # grounded, deterministic answers
 ```
@@ -83,8 +83,14 @@ internal/vuln/
   version/     Debian, RPM, PEP 440, semver and Maven comparators (+ tests)
   pkgurl/      package URL + CPE parsing, ecosystem mapping, name normalisation
   inventory/   collectors: os-release, dpkg status, rpm, apk, pip metadata,
-               npm, gem, brew, Windows registry (+ fixture tests)
+               npm, gem, brew, Windows registry/MSI/Click-to-Run/AppX/winget
+               (+ fixture tests)
   intel/       OSV client, KEV/EPSS fetchers, SQLite cache, CVSS scoring
+  nvd/         NVD provider: CVE + CPE dictionary sync, match index, sync
+               history, evaluation cache (see docs/APPLICATIONS.md)
+  norm/        software normalization engine (vendor/product/version/channel)
+  cpe/         CPE 2.3 matching, version ranges, AND/OR configuration trees
+  apps/        application vulnerability correlation (inventory → findings)
   assess/      applicability engine, confidence rules, risk model
   report/      JSON / Markdown / SARIF / HTML renderers, summary, exit codes
   scope/       authorisation file parsing and the network-scan gate
@@ -193,8 +199,10 @@ CVSS is never treated as a probability.
 | OSV record detail | aliases, CVSS vectors, references | fetched per advisory, cached in SQLite |
 | CISA KEV | known-exploited flag, date added, ransomware use | catalog is small; absence is not evidence of safety |
 | FIRST EPSS | exploitation probability + percentile | model version and score date are stored with each score |
-| NVD API 2.0 | CVE metadata and CVSS | client exists; used only for enrichment, never as the sole applicability source |
+| NVD API 2.0 | CVE records, CPE dictionary and CPE match data — the application vulnerability engine | synchronised centrally into the local store; never queried per application during a scan; rejected CVEs are stored and excluded |
 | GitHub advisories | package advisories, aliases, patched versions | delivered through OSV/GHSA records |
+| Microsoft Security Update Guide | Windows KB → CVE mapping | imported per scan when stale (see §9b) |
+| Vendor advisories | authoritative affected/fixed versions for desktop applications | data file (`apps/vendor_advisories.json`), overrides NVD on conflict |
 
 Rules enforced in code:
 
@@ -295,8 +303,11 @@ the content so repeated exports diff cleanly.
 
 Installation: enrolling installs a background service (systemd user unit /
 LaunchAgent / logon task) so the endpoint stays reachable; `--no-service` opts out
-and nothing is installed beyond the binary. There is no auto-update. Artifacts are
-installed only after SHA-256 verification. Published builds live at
+and nothing is installed beyond the binary. The installed watcher never leaves a
+terminal window behind on Windows: it is started detached, and a console it owns
+(one the logon task created) is hidden once the agent is running — a console it
+shares with a person running `watch` by hand is left alone. There is no auto-update.
+Artifacts are installed only after SHA-256 verification. Published builds live at
 `github.com/derekzacharias/clanker-guard-agent/releases`; the dashboard shows the
 matching commands when `CLANKER_GUARD_RELEASE_BASE` points at a release
 directory. Removal:
@@ -319,7 +330,7 @@ clanker vuln scan --local [--offline] [--format json|markdown|sarif|html]
                         [--cache FILE] [--quiet]
 
 # intelligence
-clanker vuln feeds update [--with-osv]
+clanker vuln feeds update [--with-osv] [--with-msrc] [--with-nvd] [--nvd-since YYYY-MM-DD] [--nvd-api-key KEY]
 clanker vuln feeds status
 
 # review
@@ -334,7 +345,7 @@ clanker vuln scan --scope scope.yaml --target 192.168.20.10 --i-authorize  # ref
 
 # agent
 clanker-guard-agent scan --local --format json --output findings.json
-clanker-guard-agent feeds update --with-osv
+clanker-guard-agent feeds update --with-osv --with-nvd
 clanker-guard-agent ask "what should I patch first?"
 clanker-guard-agent uninstall --yes
 ```
@@ -544,10 +555,13 @@ Work that is planned but not implemented — including remediation ownership,
 ticketing and the automation design — is tracked in
 [docs/BACKLOG.md](BACKLOG.md).
 
+Application vulnerability detection (NVD/CPE correlation) is implemented and
+documented in [docs/APPLICATIONS.md](APPLICATIONS.md).
+
 Implemented (Phase 1 + much of Phase 2):
 
 * endpoint inventory (Linux dpkg/rpm/apk, Python, npm, Ruby, macOS brew, Windows
-  registry) with explicit skipped checks;
+  registry/MSI/Click-to-Run/AppX/winget/file-version) with explicit skipped checks;
 * OSV correlation with ecosystem-aware version semantics;
 * vendor-aware applicability: binary/view enumerations, bounded ranges,
   backport caveats, foreign-build handling;

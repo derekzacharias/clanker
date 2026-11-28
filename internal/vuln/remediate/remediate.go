@@ -203,11 +203,12 @@ func DefaultPolicy() Policy {
 // scanning is not part of this build) and "policy_exception" (an accepted risk is a
 // state, not a classification). TestDefaultTeamsAreAllReachable enforces this.
 var DefaultTeams = map[string]string{
-	"os_package":      "Infrastructure",
-	"app_dependency":  "Development",
-	"container_image": "Platform Engineering",
-	"cloud_config":    "Cloud Engineering",
-	"infrastructure":  "DevOps",
+	"os_package":          "Infrastructure",
+	"app_dependency":      "Development",
+	"desktop_application": "Workplace Technology",
+	"container_image":     "Platform Engineering",
+	"cloud_config":        "Cloud Engineering",
+	"infrastructure":      "DevOps",
 }
 
 func (p Policy) teams() map[string]string {
@@ -330,9 +331,26 @@ func Category(f model.Finding) string {
 	case strings.Contains(eco, "ubuntu"), strings.Contains(eco, "debian"), strings.Contains(eco, "rhel"),
 		strings.Contains(eco, "centos"), strings.Contains(eco, "fedora"), strings.Contains(eco, "alpine"),
 		strings.Contains(eco, "suse"), strings.Contains(eco, "amazon"), strings.Contains(eco, "rocky"),
-		strings.Contains(eco, "alma"), strings.Contains(eco, "windows"), strings.Contains(eco, "macos"),
-		strings.Contains(eco, "brew"):
+		strings.Contains(eco, "alma"):
 		return "os_package"
+	case strings.Contains(eco, "windows"):
+		// Windows findings are either OS servicing (Microsoft's update
+		// guidance) or installed desktop applications (NVD CPE
+		// correlation). Applications are a different work stream: the fix
+		// is a vendor upgrade, not a servicing operation.
+		if strings.EqualFold(f.Source, "NVD") {
+			return "desktop_application"
+		}
+		return "os_package"
+	case strings.Contains(eco, "macos"), strings.Contains(eco, "brew"):
+		// Homebrew and other macOS package managers ship applications and
+		// libraries built by third parties, not by the OS vendor.
+		return "desktop_application"
+	case eco == "" || eco == "unknown":
+		if strings.EqualFold(f.Source, "NVD") {
+			return "desktop_application"
+		}
+		return ""
 	default:
 		return ""
 	}

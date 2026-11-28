@@ -13,12 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/vuln/apps"
 	"github.com/bgdnvk/clanker/internal/vuln/assess"
 	"github.com/bgdnvk/clanker/internal/vuln/improve"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/inventory"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
 	"github.com/bgdnvk/clanker/internal/vuln/netscan"
+	"github.com/bgdnvk/clanker/internal/vuln/nvd"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
 	"log/slog"
 
@@ -227,6 +229,9 @@ func finishWith(ctx context.Context, store *intel.Store, opts Options, started t
 	// Windows correlation runs alongside the OSV-based assessment: Windows updates are decided
 	// by what the endpoint's own update service reports, then mapped to CVEs via Microsoft's
 	// advisories. It appends findings and, just as importantly, coverage notes.
+	// Windows coverage notes are not errors. An error marks the whole assessment as incomplete,
+	// which is wrong for a host whose update service answered and found nothing to install.
+	var winNotes, winLimitations []string
 	if in.Inventory.Windows != nil {
 		ensureWindowsAdvisories(ctx, store, opts, &in)
 		win := &assess.WindowsAssessor{DB: store.DB(), Now: opts.Now}
@@ -235,7 +240,8 @@ func finishWith(ctx context.Context, store *intel.Store, opts Options, started t
 			res.Stats.Errors = append(res.Stats.Errors, "windows assessment: "+winErr.Error())
 		} else {
 			res.Findings = append(res.Findings, winRes.Findings...)
-			res.Stats.Errors = append(res.Stats.Errors, winRes.Coverage...)
+			winNotes = append(winNotes, winRes.Notes...)
+			winLimitations = append(winLimitations, winRes.Limitations...)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -250,9 +256,34 @@ func finishWith(ctx context.Context, store *intel.Store, opts Options, started t
 		incomplete = true
 	}
 	if opts.Offline && in.Mode != "network" {
+		// An offline scan only means "no intelligence available" when every
+		// local dataset is empty: OSV advisories AND the NVD CVE store.
 		if n, _ := store.AdvisoryCount(ctx); n == 0 {
-			errors = append(errors, "offline mode with an empty advisory cache: run `clanker vuln feeds update` while online")
+			_ = nvd.EnsureSchema(store.DB())
+			if nvdCount, _ := nvd.NewStore(store.DB()).CVECount(ctx, true); nvdCount == 0 {
+				errors = append(errors, "offline mode with an empty advisory cache: run `clanker vuln feeds update` while online")
+				incomplete = true
+			}
+		}
+	}
+
+	// Application correlation (NVD/CPE) covers software the OSV and Windows-update
+	// engines cannot reach: desktop applications, package managers without an OSV
+	// ecosystem and unrecognized software. It runs from the local NVD store and
+	// never queries NVD per application. Its coverage is reported explicitly, so
+	// an unevaluated application is never mistaken for a clean one.
+	var appCoverage *model.AppCoverage
+	if appsAssessor := (apps.Assessor{DB: store.DB(), Now: opts.Now}); appsAssessor.Applicable(in.Inventory) {
+		appRes, appErr := appsAssessor.Assess(ctx, in.Inventory)
+		if appErr != nil {
+			errors = append(errors, "application assessment: "+appErr.Error())
 			incomplete = true
+		} else {
+			res.Findings = append(res.Findings, appRes.Findings...)
+			appCoverage = &appRes.Coverage
+			winLimitations = append(winLimitations, appRes.Limitations...)
+			winNotes = append(winNotes, appRes.Notes...)
+			errors = append(errors, appRes.Errors...)
 		}
 	}
 
@@ -286,6 +317,14 @@ func finishWith(ctx context.Context, store *intel.Store, opts Options, started t
 	}
 	coverage.Sources = appendUnique(coverage.Sources, in.ExtraSources...)
 	coverage.Limitations = appendUnique(coverage.Limitations, in.ExtraLimitations...)
+	coverage.Limitations = appendUnique(coverage.Limitations, winLimitations...)
+	coverage.Notes = appendUnique(coverage.Notes, winNotes...)
+	coverage.Apps = appCoverage
+	if appCoverage != nil {
+		coverage.Sources = appendUnique(coverage.Sources,
+			fmt.Sprintf("NVD CVE/CPE dataset (synced %s, %d applications evaluated)",
+				appCoverage.IntelFreshness, appCoverage.Evaluated))
+	}
 
 	var previous *model.RunRecord
 	if prev, err := store.PreviousRun(ctx, in.Inventory.Asset.Hostname, ""); err == nil {
@@ -623,6 +662,80 @@ func prefetchOSV(ctx context.Context, store *intel.Store, stderr io.Writer) (int
 	return total, nil
 }
 
+// SyncNVD imports the NVD CVE dataset and CPE dictionary into the cache.
+//
+// It is separate from UpdateFeeds so an NVD outage cannot block KEV/EPSS
+// updates, and so the operator can see which source failed. The initial
+// population is large: an NVD API key is strongly recommended (raise the rate
+// limit from 5 to 50 requests per 30s). Without a key, a full initial sync
+// takes hours; use --nvd-since to bound the window.
+func SyncNVD(ctx context.Context, cachePath string, opts nvd.SyncOptions, w io.Writer) error {
+	if cachePath == "" {
+		cachePath = DefaultCachePath()
+	}
+	store, err := intel.OpenStore(cachePath)
+	if err != nil {
+		return fmt.Errorf("open intelligence cache: %w", err)
+	}
+	defer store.Close()
+	if err := nvd.EnsureSchema(store.DB()); err != nil {
+		return err
+	}
+
+	opts.Progress = func(stage, detail string) {
+		fmt.Fprintf(w, "%s: %s\n", stage, detail)
+	}
+	dictRes, dictErr := nvd.SyncDictionary(ctx, store.DB(), opts)
+	if dictErr != nil {
+		fmt.Fprintf(w, "cpe dictionary: %s (the last successful dictionary sync remains the reference; a failed run is recorded)\n", dictErr)
+	} else {
+		fmt.Fprintf(w, "cpe dictionary: %d imported, %d updated, %d total (%s)\n",
+			dictRes.Imported, dictRes.Updated, dictRes.TotalSeen, dictRes.FinishedAt.UTC().Format(time.RFC3339))
+	}
+
+	cveRes, cveErr := nvd.SyncCVEs(ctx, store.DB(), opts)
+	if cveErr != nil {
+		if dictErr != nil {
+			return fmt.Errorf("NVD sync failed: dictionary: %v; cves: %w", dictErr, cveErr)
+		}
+		return fmt.Errorf("NVD CVE sync failed (the last successful CVE sync remains the reference): %w", cveErr)
+	}
+	fmt.Fprintf(w, "nvd cves: %d imported, %d updated, %d total (%s)\n",
+		cveRes.Imported, cveRes.Updated, cveRes.TotalSeen, cveRes.FinishedAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+// NVDStatus reports the NVD dataset state for `feeds status`.
+func NVDStatus(cachePath string, w io.Writer) {
+	if cachePath == "" {
+		cachePath = DefaultCachePath()
+	}
+	store, err := intel.OpenStore(cachePath)
+	if err != nil {
+		fmt.Fprintf(w, "nvd: unavailable (%v)\n", err)
+		return
+	}
+	defer store.Close()
+	if err := nvd.EnsureSchema(store.DB()); err != nil {
+		fmt.Fprintf(w, "nvd: unavailable (%v)\n", err)
+		return
+	}
+	ns := nvd.NewStore(store.DB())
+	cveCount, _ := ns.CVECount(context.Background(), false)
+	activeCount, _ := ns.CVECount(context.Background(), true)
+	dictTotal, dictDeprecated, _ := ns.DictionaryStats(context.Background())
+	if st, ok, err := ns.LastSuccessfulSync(context.Background(), "cves"); err == nil && ok {
+		fmt.Fprintf(w, "nvd: %d CVE records (%d not rejected), %d CPE dictionary entries (%d deprecated); last cve sync %s (mode %s)\n",
+			cveCount, activeCount, dictTotal, dictDeprecated,
+			st.FinishedAt.UTC().Format("2006-01-02 15:04:05"), st.Mode)
+		if time.Since(st.FinishedAt) > 30*24*time.Hour {
+			fmt.Fprintln(w, "  warning: the NVD dataset is stale; application findings may miss recently published CVEs; run feeds update --with-nvd")
+		}
+		return
+	}
+	fmt.Fprintln(w, "nvd: never synchronized (application vulnerabilities are NOT assessed until `feeds update --with-nvd` runs)")
+}
+
 // FeedStatus prints the cache state.
 func FeedStatus(ctx context.Context, cachePath string, w io.Writer) error {
 	if cachePath == "" {
@@ -636,6 +749,8 @@ func FeedStatus(ctx context.Context, cachePath string, w io.Writer) error {
 
 	// Microsoft advisories are their own source with their own freshness.
 	MSRCStatus(cachePath, w)
+	// NVD intelligence is its own source with its own freshness.
+	NVDStatus(cachePath, w)
 
 	states, err := FeedStates(ctx, store)
 	if err != nil {

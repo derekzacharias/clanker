@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bgdnvk/clanker/internal/vuln/version"
 	"sort"
 	"strings"
 	"time"
@@ -972,6 +973,33 @@ type Group struct {
 // A group is (asset, package, fixed version). When there is no fixed version the group is
 // (asset, package) — those are the findings that need a decision, not a package bump, and
 // lumping them together is still better than one row each.
+// higherVersion returns the greater of two version strings, using tokenwise
+// numeric comparison so 120.0.10 > 120.0.9. Unparsable values fall back to
+// lexicographic order; empty values never win.
+func higherVersion(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	less, err := versionCompare(a, b)
+	if err != nil || less == 0 {
+		if a < b {
+			return b
+		}
+		return a
+	}
+	if less < 0 {
+		return b
+	}
+	return a
+}
+
+func versionCompare(a, b string) (int, error) {
+	return version.Compare("", a, b)
+}
+
 func (s *Store) Groups(ctx context.Context, policy Policy) ([]Group, error) {
 	items, err := s.List(ctx, Filter{}, policy)
 	if err != nil {
@@ -983,8 +1011,13 @@ func (s *Store) Groups(ctx context.Context, policy Policy) ([]Group, error) {
 		if terminal(item.State) {
 			continue
 		}
+		// One software upgrade should be one unit of work: desktop-application
+		// findings group per (asset, product) regardless of the per-CVE fixed
+		// version, because the remedy is the same action — upgrade the
+		// application to the newest vendor-supported version. The group
+		// carries the highest fixed version across its members.
 		key := item.Asset + "\x00" + strings.ToLower(item.Product)
-		if item.FixedVersion != "" {
+		if item.FixedVersion != "" && item.Category != "desktop_application" {
 			key += "\x00" + item.FixedVersion
 		}
 		g, ok := byKey[key]
@@ -996,6 +1029,9 @@ func (s *Store) Groups(ctx context.Context, policy Policy) ([]Group, error) {
 				Advisories: []string{}, ItemIDs: []string{},
 			}
 			byKey[key] = g
+		}
+		if item.Category == "desktop_application" && item.FixedVersion != "" {
+			g.FixedVersion = higherVersion(g.FixedVersion, item.FixedVersion)
 		}
 		g.Items++
 		g.ItemIDs = append(g.ItemIDs, item.ID)

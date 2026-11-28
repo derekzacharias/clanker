@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "advisories": [
+    {
+      "cve": "CVE-2024-0519",
+      "vendor": "google",
+      "product": "chrome",
+      "fixed_version": "120.0.6099.224",
+      "affected_below": "120.0.6099.224",
+      "url": "https://chromereleases.googleblog.com/2024/01/stable-channel-update-for-desktop_16.html",
+      "statement": "Google confirms Chrome versions before 120.0.6099.224 are affected; 120.0.6099.224 contains the fix."
+    },
+    {
+      "cve": "CVE-2024-4671",
+      "vendor": "google",
+      "product": "chrome",
+      "fixed_version": "124.0.6367.201",
+      "affected_below": "124.0.6367.201",
+      "url": "https://chromereleases.googleblog.com/2024/05/stable-channel-update-for-desktop.html",
+      "statement": "Google confirms Chrome versions before 124.0.6367.201 are affected; 124.0.6367.201 contains the fix."
+    },
+    {
+      "cve": "CVE-2024-2883",
+      "vendor": "google",
+      "product": "chrome",
+      "fixed_version": "123.0.6312.86",
+      "affected_below": "123.0.6312.86",
+      "url": "https://chromereleases.googleblog.com/2024/03/stable-channel-update-for-desktop_26.html",
+      "statement": "Google confirms Chrome versions before 123.0.6312.86 are affected; 123.0.6312.86 contains the fix."
+    },
+    {
+      "cve": "CVE-2023-6345",
+      "vendor": "google",
+      "product": "chrome",
+      "fixed_version": "119.0.6045.199",
+      "affected_below": "119.0.6045.199",
+      "url": "https://chromereleases.googleblog.com/2023/11/stable-channel-update-for-desktop_28.html",
+      "statement": "Google confirms Chrome versions before 119.0.6045.199 are affected; 119.0.6045.199 contains the fix."
+    },
+    {
+      "cve": "CVE-2024-22019",
+      "vendor": "nodejs",
+      "product": "node.js",
+      "fixed_version": "20.11.1",
+      "affected_below": "20.11.1",
+      "url": "https://nodejs.org/en/blog/vulnerability/february-2024-security-releases/",
+      "statement": "The Node.js project confirms versions before 20.11.1 (and 21.x before 21.6.2) are affected by the reading-file-via-fs.readFile vulnerability."
+    },
+    {
+      "cve": "CVE-2024-3400",
+      "vendor": "paloaltonetworks",
+      "product": "pan-os",
+      "fixed_version": "10.2.9-h1",
+      "affected_below": "10.2.9-h1",
+      "url": "https://security.paloaltonetworks.com/CVE-2024-3400",
+      "statement": "Palo Alto Networks confirms GlobalProtect gateway PAN-OS versions before the listed fixed versions are affected."
+    },
+    {
+      "cve": "CVE-2024-3094",
+      "vendor": "tukaani",
+      "product": "xz",
+      "fixed_version": "5.6.1-2",
+      "affected_below": "5.6.1-2",
+      "url": "https://tukaani.org/xz-backdoor/",
+      "statement": "The xz maintainers confirm 5.6.0 and 5.6.1 tarballs contain malicious code; distributions ship fixed builds."
+    }
+  ]
+}

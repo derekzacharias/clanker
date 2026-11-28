@@ -1,2 +1,8 @@
-[{"name":"Microsoft Visual C++ 2015-2022 Redistributable","version":"14.38.33130","publisher":"Microsoft Corporation"},
- {"name":"7-Zip","version":"23.01","publisher":"Igor Pavlov"}]
+[
+ {"name":"Microsoft Visual C++ 2015-2022 Redistributable","version":"14.38.33130","publisher":"Microsoft Corporation","install_date":"20240312","location":"","scope":"machine","arch":"x64","product_id":"{C11CEBB5-FF28-4E2D-9B8F-03B2F4A7F1D0}","msi":true,"url_about":"","source":"registry"},
+ {"name":"7-Zip 23.01","version":"23.01","publisher":"Igor Pavlov","install_date":"20240201","location":"C:\\Program Files\\7-Zip\\","scope":"machine","arch":"x64","product_id":"7-Zip","msi":false,"url_about":"https://www.7-zip.org/","source":"registry"},
+ {"name":"7-Zip 23.01","version":"23.01","publisher":"","install_date":"","location":"","scope":"machine","arch":"x64","product_id":"{7ZIP-PRODUCT-CODE}","msi":true,"url_about":"","source":"msi"},
+ {"name":"Microsoft 365 Apps","version":"16.0.17628.20006","publisher":"Microsoft Corporation","install_date":"","location":"C:\\Program Files\\Microsoft Office\\root\\Office16","scope":"machine","arch":"x64","product_id":"office-click-to-run","msi":false,"url_about":"","source":"click_to_run"},
+ {"name":"Google Chrome","version":"120.0.6099.109","publisher":"Google LLC","install_date":"","location":"C:\\Program Files\\Google\\Chrome\\Application","scope":"machine","arch":"x64","product_id":"file-version:C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe","msi":false,"url_about":"","source":"file_version"},
+ {"name":"SomeApp","version":"1.0","publisher":"","install_date":"","location":"","scope":"user","arch":"x64","product_id":"SomeAppUser","msi":false,"url_about":"","source":"registry"}
+]

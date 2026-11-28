@@ -45,6 +45,14 @@ var InventoryColumns = []string{
 	"max_severity",
 	"report_id",
 	"scanned_at",
+	// Desktop-application fields (empty for OS packages). Appended so the
+	// column order of the original contract is unchanged.
+	"publisher",
+	"install_date",
+	"install_scope",
+	"product_id",
+	"pkg_manager_id",
+	"evidence_sources",
 }
 
 // SoftwareInventoryCSV renders one row per installed package for every report
@@ -102,6 +110,12 @@ func SoftwareInventoryCSV(reports []model.Report) ([]byte, error) {
 					sev,
 					rep.ReportID,
 					formatTime(scanned),
+					p.Publisher,
+					p.InstallDate,
+					p.Scope,
+					p.ProductID,
+					p.PkgManagerID,
+					strings.Join(p.EvidenceSources, ";"),
 				},
 			})
 		}

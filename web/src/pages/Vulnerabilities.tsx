@@ -28,6 +28,7 @@ export default function Vulnerabilities() {
   const [query, setQuery] = useState(params.get("q") ?? "");
   const [severities, setSeverities] = useState<Severity[]>([]);
   const [applicability, setApplicability] = useState<Applicability[]>([]);
+  const [category, setCategory] = useState("");
   const [kevOnly, setKevOnly] = useState(false);
   const [fix, setFix] = useState("all");
   const [asset, setAsset] = useState("all");
@@ -54,6 +55,7 @@ export default function Vulnerabilities() {
         q: query || undefined,
         severity: severities.length ? severities.join(",") : undefined,
         applicability: applicability.length ? applicability.join(",") : undefined,
+        category: category || undefined,
         kev: kevOnly || undefined,
         fix: fix === "all" ? undefined : fix,
         asset: asset === "all" ? undefined : asset,
@@ -61,20 +63,22 @@ export default function Vulnerabilities() {
         order: sort === "cve" || sort === "asset" ? "asc" : "desc",
         limit: 100,
       }),
-    [query, severities, applicability, kevOnly, fix, asset, sort],
+    [query, severities, applicability, category, kevOnly, fix, asset, sort],
   );
   const { data, error, loading, reload } = useAsync(fetcher, [fetcher]);
 
   const [filtersOpen, setFiltersOpen] = useState(false);
   const shown = data?.items ?? [];
-  const hasFilters = query || severities.length > 0 || applicability.length > 0 || kevOnly || fix !== "all" || asset !== "all";
+  const hasFilters =
+    query || severities.length > 0 || applicability.length > 0 || category || kevOnly || fix !== "all" || asset !== "all";
   const activeFilterCount =
-    severities.length + applicability.length + (kevOnly ? 1 : 0) + (fix !== "all" ? 1 : 0) + (asset !== "all" ? 1 : 0);
+    severities.length + applicability.length + (category ? 1 : 0) + (kevOnly ? 1 : 0) + (fix !== "all" ? 1 : 0) + (asset !== "all" ? 1 : 0);
 
   function clearFilters() {
     setQuery("");
     setSeverities([]);
     setApplicability([]);
+    setCategory("");
     setKevOnly(false);
     setFix("all");
     setAsset("all");
@@ -242,6 +246,32 @@ export default function Vulnerabilities() {
                   )}
                 >
                   {applicabilityLabel[app]}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-xs font-medium text-muted">Category</span>
+            {[
+              { key: "os", label: "Operating system" },
+              { key: "application", label: "Application" },
+              { key: "service", label: "Network service" },
+            ].map((cat) => {
+              const active = category === cat.key;
+              const count = data?.facets.category?.find((c) => c.key === cat.key)?.count ?? 0;
+              return (
+                <button
+                  key={cat.key}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setCategory(active ? "" : cat.key)}
+                  className={cn(
+                    "rounded-full border px-2.5 py-1 text-xs",
+                    active ? "border-accent bg-accent-soft font-medium text-accent" : "border-border text-muted hover:bg-surface-2",
+                  )}
+                >
+                  {cat.label} <span className="num">{count}</span>
                 </button>
               );
             })}

@@ -32,10 +32,13 @@ type overviewResponse struct {
 	Severity []countRow      `json:"severity"`
 	Priority []vulnRow       `json:"priority"`
 	Coverage coverageSummary `json:"coverage"`
-	Activity []activityRow   `json:"activity"`
-	Feeds    []feedRow       `json:"feeds"`
-	Limits   []string        `json:"limitations"`
-	Errors   []string        `json:"errors"`
+	// Apps is the aggregated application-assessment coverage. Present when at
+	// least one host carries application coverage data.
+	Apps     *appCoverageSummary `json:"apps,omitempty"`
+	Activity []activityRow       `json:"activity"`
+	Feeds    []feedRow           `json:"feeds"`
+	Limits   []string            `json:"limitations"`
+	Errors   []string            `json:"errors"`
 	// ImprovementsAvailable drives the compact "N detection improvements
 	// available for review" indicator; Reviewed counts analyst-verified findings.
 	ImprovementsAvailable int `json:"improvements_available"`
@@ -52,6 +55,26 @@ type overviewMetrics struct {
 	Actionable         int `json:"actionable"`
 	NeedsInvestigation int `json:"needs_investigation"`
 	Total              int `json:"total"`
+	// Application vulnerability metrics: separate from OS findings so a
+	// patched OS never hides vulnerable installed applications.
+	AppFindings   int `json:"app_findings"`
+	AppActionable int `json:"app_actionable"`
+	AppKEV        int `json:"app_kev"`
+	OSFindings    int `json:"os_findings"`
+	OSActionable  int `json:"os_actionable"`
+}
+
+type appCoverageSummary struct {
+	// AppsDiscovered / AppsEvaluated / AppsUnrecognized aggregate the
+	// application-assessment coverage across hosts. Zero assessed apps with
+	// apps present means the application engine did not run — never "clean".
+	AppsDiscovered   int `json:"apps_discovered"`
+	AppsEvaluated    int `json:"apps_evaluated"`
+	AppsUnmapped     int `json:"apps_unmapped"`
+	AppsWithFindings int `json:"apps_with_findings"`
+	// NVDMissing counts hosts whose applications were inventoried but not
+	// evaluated because NVD intelligence was never synchronized.
+	NVDMissing int `json:"nvd_missing"`
 }
 
 type countRow struct {
@@ -103,7 +126,19 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	counts := map[string]int{}
 	limitations := map[string]bool{}
+	appsAgg := &appCoverageSummary{}
+	appsSeen := false
 	for _, hv := range ds.Hosts {
+		if hv.Coverage.Apps != nil {
+			appsSeen = true
+			appsAgg.AppsDiscovered += hv.Coverage.Apps.Discovered
+			appsAgg.AppsEvaluated += hv.Coverage.Apps.Evaluated
+			appsAgg.AppsUnmapped += len(hv.Coverage.Apps.Unrecognized)
+			if hv.Coverage.Apps.IntelFreshness == "never synchronized" {
+				appsAgg.NVDMissing++
+			}
+		}
+		appProducts := map[string]bool{}
 		for _, f := range hv.Findings {
 			if f.Analyst != nil {
 				resp.Reviewed++
@@ -123,13 +158,35 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			if f.KEV {
 				resp.Metrics.KEV++
 			}
+			// OS vs application split: NVD-correlated desktop software and
+			// language packages are application findings; distribution
+			// advisories and Windows servicing findings are OS findings.
+			if findingCategory(f) == "application" {
+				resp.Metrics.AppFindings++
+				if f.KEV {
+					resp.Metrics.AppKEV++
+				}
+				if effective != string(model.ApplicabilityNeedsInvestigation) {
+					resp.Metrics.AppActionable++
+				}
+				appProducts[f.Product] = true
+			} else {
+				resp.Metrics.OSFindings++
+				if effective != string(model.ApplicabilityNeedsInvestigation) {
+					resp.Metrics.OSActionable++
+				}
+			}
 		}
+		appsAgg.AppsWithFindings += len(appProducts)
 		for _, l := range hv.Coverage.Limitations {
 			limitations[l] = true
 		}
 		for _, e := range hv.Errors {
 			resp.Errors = append(resp.Errors, hv.Host+": "+e)
 		}
+	}
+	if appsSeen {
+		resp.Apps = appsAgg
 	}
 	resp.Metrics.Critical = counts["critical"]
 	resp.Metrics.High = counts["high"]
@@ -378,6 +435,7 @@ type vulnFacets struct {
 	Severity      []countRow `json:"severity"`
 	Applicability []countRow `json:"applicability"`
 	Assets        []countRow `json:"assets"`
+	Category      []countRow `json:"category"`
 	KEV           int        `json:"kev"`
 	FixAvailable  int        `json:"fix_available"`
 }
@@ -386,11 +444,41 @@ type filterState struct {
 	Query         string   `json:"q,omitempty"`
 	Severity      []string `json:"severity,omitempty"`
 	Applicability []string `json:"applicability,omitempty"`
+	Category      string   `json:"category,omitempty"`
 	KEV           bool     `json:"kev"`
 	Fix           string   `json:"fix,omitempty"`
 	Asset         string   `json:"asset,omitempty"`
 	Sort          string   `json:"sort"`
 	Order         string   `json:"order"`
+}
+
+// findingCategory separates operating-system findings from application and
+// network-service findings. It is a display classification, not a verdict:
+// the evidence chain of each finding stays authoritative.
+func findingCategory(v vulnRow) string {
+	eco := strings.ToLower(v.Ecosystem)
+	src := strings.ToLower(v.Source)
+	switch {
+	case eco == "nvd", eco == "network-service", eco == "network":
+		return "service"
+	case eco == "windows":
+		// Windows findings are either OS servicing (Microsoft Security Update
+		// Guide) or installed applications (NVD CPE correlation).
+		if src == "nvd" {
+			return "application"
+		}
+		return "os"
+	case eco == "homebrew" || eco == "unknown" || eco == "":
+		return "application"
+	case strings.Contains(eco, ":"):
+		return "os"
+	}
+	// Language/package ecosystems (npm, PyPI, Maven, Go, ...) are software
+	// components, closest to applications.
+	if src == "nvd" || eco != "" {
+		return "application"
+	}
+	return "os"
 }
 
 func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
@@ -404,6 +492,7 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 		Query:         strings.TrimSpace(q.Get("q")),
 		Severity:      splitList(q.Get("severity")),
 		Applicability: splitList(q.Get("applicability")),
+		Category:      strings.TrimSpace(q.Get("category")),
 		KEV:           q.Get("kev") == "true",
 		Fix:           q.Get("fix"),
 		Asset:         q.Get("asset"),
@@ -422,10 +511,12 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	sevCounts := map[string]int{}
 	appCounts := map[string]int{}
 	assetCounts := map[string]int{}
+	catCounts := map[string]int{}
 	for _, v := range all {
 		sevCounts[v.Severity]++
 		appCounts[v.effective()]++
 		assetCounts[v.Asset]++
+		catCounts[findingCategory(v)]++
 		if v.KEV {
 			facets.KEV++
 		}
@@ -441,6 +532,12 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		facets.Applicability = append(facets.Applicability, countRow{Key: app, Count: appCounts[app]})
+	}
+	for _, cat := range []string{"os", "application", "service"} {
+		if catCounts[cat] == 0 {
+			continue
+		}
+		facets.Category = append(facets.Category, countRow{Key: cat, Count: catCounts[cat]})
 	}
 	for host, n := range assetCounts {
 		facets.Assets = append(facets.Assets, countRow{Key: host, Count: n})
@@ -473,6 +570,9 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if state.Asset != "" && !strings.EqualFold(state.Asset, v.Asset) {
+			continue
+		}
+		if state.Category != "" && findingCategory(v) != state.Category {
 			continue
 		}
 		if state.Query != "" && !v.matches(state.Query) {
@@ -1477,38 +1577,6 @@ func suppressedList(in []string) []string {
 		return []string{}
 	}
 	return in
-}
-
-// coverageNotices explains why an asset's result is thin, instead of leaving a zero to be
-// misread as "nothing to fix".
-//
-// The Windows case is the important one today: the inventory reads the classic Uninstall
-// registry, and no Windows advisory source is ingested, so a Windows host will show few packages
-// and zero findings no matter how it is patched.
-func coverageNotices(hv *hostView) []string {
-	var notices []string
-	windowsPackages, osPackages := 0, 0
-	for _, p := range hv.Packages {
-		switch p.Ecosystem {
-		case model.EcosystemWindows:
-			windowsPackages++
-		}
-		if strings.Contains(strings.ToLower(p.Ecosystem)+"", ":") {
-			osPackages++
-		}
-	}
-	if windowsPackages > 0 {
-		notices = append(notices,
-			"Windows coverage is limited: the inventory reads installed desktop applications from the registry "+
-				"("+strconv.Itoa(windowsPackages)+" found). Windows Update patch level, MSIX/Store applications and "+
-				"Windows security advisories are not collected, so zero findings here means \"not assessed\", not "+
-				"\"fully patched\".")
-	}
-	if osPackages > 0 && windowsPackages > 0 {
-		notices = append(notices, "Packages from different operating systems are counted together on this asset; "+
-			"interpret the totals accordingly.")
-	}
-	return notices
 }
 
 // isPseudoAsset reports assets the scanner synthesises rather than discovers: SBOM files, container

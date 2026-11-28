@@ -11,6 +11,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
+	"github.com/bgdnvk/clanker/internal/vuln/nvd"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
 	"github.com/bgdnvk/clanker/internal/vuln/ticketing"
 )
@@ -116,39 +117,51 @@ type packageRow struct {
 	Arch   string `json:"arch,omitempty"`
 	PURL   string `json:"purl,omitempty"`
 	Patch  string `json:"patch_status,omitempty"`
+	// The following fields describe installed desktop applications.
+	Publisher       string   `json:"publisher,omitempty"`
+	InstallDate     string   `json:"install_date,omitempty"`
+	Scope           string   `json:"scope,omitempty"`
+	ProductID       string   `json:"product_id,omitempty"`
+	PkgManagerID    string   `json:"pkg_manager_id,omitempty"`
+	Location        string   `json:"location,omitempty"`
+	EvidenceSources []string `json:"evidence_sources,omitempty"`
+	NeedsPrivileges bool     `json:"needs_privileges,omitempty"`
 }
 
 type vulnRow struct {
-	ID               string        `json:"id"`
-	Finding          string        `json:"finding_id"`
-	ReportID         string        `json:"report_id"`
-	CVE              string        `json:"cve"`
-	Aliases          []string      `json:"aliases,omitempty"`
-	Asset            string        `json:"asset"`
-	Product          string        `json:"product"`
-	InstalledVersion string        `json:"installed_version"`
-	Ecosystem        string        `json:"ecosystem"`
-	Severity         string        `json:"severity"`
-	Affected         string        `json:"affected"`
-	Confidence       string        `json:"confidence"`
-	Validation       string        `json:"validation_status"`
-	KEV              bool          `json:"kev"`
-	KEVDateAdded     string        `json:"kev_date_added,omitempty"`
-	Ransomware       string        `json:"kev_ransomware,omitempty"`
-	EPSS             *float64      `json:"epss"`
-	EPSSPercentile   *float64      `json:"epss_percentile"`
-	CVSS             *float64      `json:"cvss"`
-	CVSSVector       string        `json:"cvss_vector,omitempty"`
-	FixedVersion     string        `json:"fixed_version,omitempty"`
-	Remediation      string        `json:"remediation"`
-	Source           string        `json:"source"`
-	AdvisoryID       string        `json:"advisory_id"`
-	Vendor           string        `json:"vendor,omitempty"`
-	RiskScore        float64       `json:"risk_score"`
-	FirstSeen        string        `json:"first_seen"`
-	LastSeen         string        `json:"last_seen"`
-	Explanation      string        `json:"explanation,omitempty"`
-	Evidence         []evidenceRow `json:"evidence,omitempty"`
+	ID               string   `json:"id"`
+	Finding          string   `json:"finding_id"`
+	ReportID         string   `json:"report_id"`
+	CVE              string   `json:"cve"`
+	Aliases          []string `json:"aliases,omitempty"`
+	Asset            string   `json:"asset"`
+	Product          string   `json:"product"`
+	InstalledVersion string   `json:"installed_version"`
+	Ecosystem        string   `json:"ecosystem"`
+	Severity         string   `json:"severity"`
+	Affected         string   `json:"affected"`
+	Confidence       string   `json:"confidence"`
+	Validation       string   `json:"validation_status"`
+	KEV              bool     `json:"kev"`
+	KEVDateAdded     string   `json:"kev_date_added,omitempty"`
+	Ransomware       string   `json:"kev_ransomware,omitempty"`
+	EPSS             *float64 `json:"epss"`
+	EPSSPercentile   *float64 `json:"epss_percentile"`
+	CVSS             *float64 `json:"cvss"`
+	CVSSVector       string   `json:"cvss_vector,omitempty"`
+	FixedVersion     string   `json:"fixed_version,omitempty"`
+	Remediation      string   `json:"remediation"`
+	Source           string   `json:"source"`
+	AdvisoryID       string   `json:"advisory_id"`
+	Vendor           string   `json:"vendor,omitempty"`
+	RiskScore        float64  `json:"risk_score"`
+	// PackageRef is the inventory identity (name@version) the finding was
+	// correlated from, so the UI can join findings to the software inventory.
+	PackageRef  string        `json:"package_ref,omitempty"`
+	FirstSeen   string        `json:"first_seen"`
+	LastSeen    string        `json:"last_seen"`
+	Explanation string        `json:"explanation,omitempty"`
+	Evidence    []evidenceRow `json:"evidence,omitempty"`
 	// WorkItem is the remediation work derived from this finding, when one exists.
 	// Attached by the detail handler only: the list endpoints stay about findings, and
 	// ownership is one lookup rather than a join across every row. (The field next to it,
@@ -195,6 +208,27 @@ type coverageView struct {
 	Sources           []string `json:"sources_used"`
 	NotCovered        []string `json:"not_covered,omitempty"`
 	Limitations       []string `json:"limitations,omitempty"`
+	Notes             []string `json:"notes,omitempty"`
+	// Apps is the application-assessment coverage; absent when the
+	// application engine did not run on this asset.
+	Apps *appCoverageView `json:"apps,omitempty"`
+}
+
+// appCoverageView mirrors model.AppCoverage for the wire.
+type appCoverageView struct {
+	Discovered       int      `json:"discovered"`
+	Normalized       int      `json:"normalized"`
+	Mapped           int      `json:"mapped"`
+	Evaluated        int      `json:"evaluated"`
+	Skipped          int      `json:"skipped"`
+	Unrecognized     []string `json:"unrecognized,omitempty"`
+	CandidateCVEs    int      `json:"candidate_cves"`
+	ConfirmedMatches int      `json:"confirmed_matches"`
+	PotentialMatches int      `json:"potential_matches"`
+	ExcludedCVEs     int      `json:"excluded_cves"`
+	Errors           int      `json:"errors"`
+	IntelFreshness   string   `json:"intel_freshness,omitempty"`
+	DurationMillis   int64    `json:"duration_millis"`
 }
 
 type skippedRow struct {
@@ -280,6 +314,8 @@ func (s *Server) buildDataset(ctx context.Context) (*dataset, error) {
 				Sources:           rep.Metadata.Coverage.Sources,
 				NotCovered:        rep.Metadata.Coverage.NotCovered,
 				Limitations:       rep.Metadata.Coverage.Limitations,
+				Notes:             rep.Metadata.Coverage.Notes,
+				Apps:              rep.Metadata.Coverage.Apps,
 			},
 		}
 		if hv.Host == "" {
@@ -333,7 +369,7 @@ func (s *Server) feedRows(ctx context.Context) ([]feedRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]feedRow, 0, len(states))
+	out := make([]feedRow, 0, len(states)+2)
 	for _, st := range states {
 		stale := time.Since(st.LastSync) > 7*24*time.Hour
 		if st.Source == "EPSS" {
@@ -344,6 +380,27 @@ func (s *Server) feedRows(ctx context.Context) ([]feedRow, error) {
 			last = st.LastSync.UTC().Format(time.RFC3339)
 		}
 		out = append(out, feedRow{Source: st.Source, LastSync: last, Records: st.Records, Stale: stale})
+	}
+	// NVD keeps its own sync history (full/incremental runs with failure
+	// records), so its freshness is reported from there.
+	if err := nvd.EnsureSchema(s.store.DB()); err == nil {
+		ns := nvd.NewStore(s.store.DB())
+		if cveCount, err := ns.CVECount(ctx, true); err == nil && cveCount > 0 {
+			row := feedRow{Source: "NVD CVEs", Records: cveCount, Stale: true}
+			if st, ok, err := ns.LastSuccessfulSync(ctx, "cves"); err == nil && ok && !st.FinishedAt.IsZero() {
+				row.LastSync = st.FinishedAt.UTC().Format(time.RFC3339)
+				row.Stale = time.Since(st.FinishedAt) > 30*24*time.Hour
+			}
+			out = append(out, row)
+		}
+		if dictTotal, _, err := ns.DictionaryStats(ctx); err == nil && dictTotal > 0 {
+			row := feedRow{Source: "NVD CPE dictionary", Records: dictTotal, Stale: true}
+			if st, ok, err := ns.LastSuccessfulSync(ctx, "cpes"); err == nil && ok && !st.FinishedAt.IsZero() {
+				row.LastSync = st.FinishedAt.UTC().Format(time.RFC3339)
+				row.Stale = time.Since(st.FinishedAt) > 30*24*time.Hour
+			}
+			out = append(out, row)
+		}
 	}
 	return out, nil
 }
@@ -368,12 +425,14 @@ type reportDoc struct {
 			Reason string `json:"reason"`
 		} `json:"skipped_checks"`
 		Coverage struct {
-			PackagesInspected int      `json:"packages_inspected"`
-			PackagesMatched   int      `json:"packages_matched"`
-			AdvisoriesChecked int      `json:"advisories_checked"`
-			Sources           []string `json:"sources_used"`
-			NotCovered        []string `json:"not_covered"`
-			Limitations       []string `json:"limitations"`
+			PackagesInspected int              `json:"packages_inspected"`
+			PackagesMatched   int              `json:"packages_matched"`
+			AdvisoriesChecked int              `json:"advisories_checked"`
+			Sources           []string         `json:"sources_used"`
+			NotCovered        []string         `json:"not_covered"`
+			Limitations       []string         `json:"limitations"`
+			Notes             []string         `json:"notes"`
+			Apps              *appCoverageView `json:"apps"`
 		} `json:"coverage"`
 		Policy struct {
 			FailOnSeverity string `json:"fail_on_severity"`
@@ -425,6 +484,7 @@ type findingDoc struct {
 	Lower          []string      `json:"confidence_reduction_evidence"`
 	RiskScore      float64       `json:"risk_score"`
 	AdvisoryID     string        `json:"advisory_id"`
+	PackageRef     string        `json:"package_ref"`
 	Evidence       []evidenceRow `json:"evidence"`
 	VendorAdvisory *struct {
 		Vendor       string `json:"vendor"`
@@ -458,6 +518,7 @@ func toVulnRow(host, reportID string, f findingDoc) vulnRow {
 		KEV:              f.CISAKEV,
 		FixedVersion:     f.FixedVersion,
 		Remediation:      f.Remediation,
+		PackageRef:       f.PackageRef,
 		Source:           f.Source,
 		AdvisoryID:       f.AdvisoryID,
 		RiskScore:        f.RiskScore,

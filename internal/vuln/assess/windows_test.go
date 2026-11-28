@@ -81,8 +81,8 @@ func TestUnavailableUpdateServiceReportsCoverageGap(t *testing.T) {
 	if len(res.Findings) != 0 {
 		t.Fatalf("findings were invented without an applicability check: %+v", res.Findings)
 	}
-	if len(res.Coverage) == 0 || !strings.Contains(strings.Join(res.Coverage, " "), "NOT assessed") {
-		t.Fatalf("coverage does not warn: %v", res.Coverage)
+	if len(res.Limitations) == 0 || !strings.Contains(strings.Join(res.Limitations, " "), "NOT assessed") {
+		t.Fatalf("limitations do not warn: %v", res.Limitations)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestMissingWindowsStateIsReported(t *testing.T) {
 	if err != nil || len(res.Findings) != 0 {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
-	if !strings.Contains(strings.Join(res.Coverage, " "), "did not report Windows servicing data") {
-		t.Fatalf("coverage = %v", res.Coverage)
+	if !strings.Contains(strings.Join(res.Limitations, " "), "did not report Windows servicing data") {
+		t.Fatalf("limitations = %v", res.Limitations)
 	}
 }
 
@@ -192,16 +192,18 @@ func TestPatchedHostSaysSoExplicitly(t *testing.T) {
 	if len(res.Findings) != 0 {
 		t.Fatalf("findings = %+v", res.Findings)
 	}
-	joined := strings.Join(res.Coverage, " ")
-	if !strings.Contains(joined, "no missing security updates") {
-		t.Fatalf("coverage does not state the host is current: %v", res.Coverage)
+	// The clean result is a note, not a limitation: the host was assessed and came back current.
+	notes := strings.Join(res.Notes, " ")
+	if !strings.Contains(notes, "no missing security updates") {
+		t.Fatalf("notes do not state the host is current: %v", res.Notes)
 	}
-	if !strings.Contains(joined, "Windows 11 Pro 24H2") || !strings.Contains(joined, "10.0.26100.1742") {
-		t.Fatalf("coverage does not name what was assessed: %v", res.Coverage)
+	if !strings.Contains(notes, "Windows 11 Pro 24H2") || !strings.Contains(notes, "10.0.26100.1742") {
+		t.Fatalf("notes do not name what was assessed: %v", res.Notes)
 	}
-	// It must also say what it did not assess.
-	if !strings.Contains(joined, "not yet matched") {
-		t.Fatalf("coverage does not disclose the application gap: %v", res.Coverage)
+	// The application assessment now covers what used to be the undisclosed gap;
+	// the Windows assessment names the hand-off explicitly.
+	if !strings.Contains(strings.Join(res.Notes, " "), "application-level vulnerability assessment") {
+		t.Fatalf("notes do not name the application-assessment hand-off: %v", res.Notes)
 	}
 }
 
@@ -217,7 +219,7 @@ func TestDefinitionUpdatesDoNotProduceFindings(t *testing.T) {
 	if len(res.Findings) != 0 {
 		t.Fatalf("a signature update became a vulnerability: %+v", res.Findings)
 	}
-	if !strings.Contains(strings.Join(res.Coverage, " "), "no missing security updates") {
-		t.Fatalf("coverage should say the host is current: %v", res.Coverage)
+	if !strings.Contains(strings.Join(res.Notes, " "), "no missing security updates") {
+		t.Fatalf("notes should say the host is current: %v", res.Notes)
 	}
 }

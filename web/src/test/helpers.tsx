@@ -128,6 +128,7 @@ export const vulnFixture = {
     ],
     applicability: [{ key: "confirmed_applicability", count: 1 }],
     assets: [{ key: "host1", count: 1 }],
+    category: [{ key: "os", count: 1 }],
     kev: 1,
     fix_available: 1,
   },

@@ -23,6 +23,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/inventory"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
+	"github.com/bgdnvk/clanker/internal/vuln/nvd"
 	"github.com/bgdnvk/clanker/internal/vuln/sbom"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
 	"github.com/bgdnvk/clanker/internal/vuln/scope"
@@ -63,6 +64,7 @@ what was and was not covered.`,
 		newVulnServeCmd(),
 		newVulnAuthCmd(),
 		newVulnDBCmd(),
+		newVulnAutofixCmd(),
 		newVulnSBOMCmd(),
 		newVulnFeedbackCmd(),
 		newVulnImproveCmd(),
@@ -311,8 +313,14 @@ func printScanSummary(res scan.Result) {
 
 func newVulnFeedsCmd() *cobra.Command {
 	var (
-		common  vulnCommonFlags
-		withOSV bool
+		common      vulnCommonFlags
+		withOSV     bool
+		withMSRC    bool
+		withNVD     bool
+		nvdSince    string
+		nvdFull     bool
+		nvdAPIKey   string
+		nvdMaxPages int
 	)
 	feeds := &cobra.Command{
 		Use:   "feeds",
@@ -320,16 +328,46 @@ func newVulnFeedsCmd() *cobra.Command {
 	}
 	update := &cobra.Command{
 		Use:   "update",
-		Short: "Download CISA KEV and EPSS (and optionally OSV advisories for this host)",
+		Short: "Download CISA KEV, EPSS, and optionally OSV, Microsoft and NVD intelligence",
 		RunE: func(c *cobra.Command, _ []string) error {
 			ctx := context.Background()
 			if _, err := scan.UpdateFeeds(ctx, common.path(), withOSV, os.Stderr); err != nil {
 				return err
 			}
+			if withMSRC {
+				if err := scan.SyncMSRC(ctx, common.path(), 6, os.Stdout); err != nil {
+					return fmt.Errorf("msrc: %w", err)
+				}
+			}
+			if withNVD {
+				key := nvd.APIKeyFromEnv(os.Getenv)
+				if nvdAPIKey != "" {
+					key = nvdAPIKey
+				}
+				var since time.Time
+				if nvdSince != "" {
+					t, err := time.Parse("2006-01-02", nvdSince)
+					if err != nil {
+						return fmt.Errorf("--nvd-since must be YYYY-MM-DD: %w", err)
+					}
+					since = t
+				}
+				if err := scan.SyncNVD(ctx, common.path(), nvd.SyncOptions{
+					APIKey: key, Since: since, Full: nvdFull, MaxPages: nvdMaxPages,
+				}, os.Stdout); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
 	update.Flags().BoolVar(&withOSV, "with-osv", false, "also cache OSV advisories for packages installed on this host (enables offline scans)")
+	update.Flags().BoolVar(&withMSRC, "with-msrc", false, "also import Microsoft security advisories (Windows update findings)")
+	update.Flags().BoolVar(&withNVD, "with-nvd", false, "synchronize the NVD CVE dataset and CPE dictionary (application vulnerability detection)")
+	update.Flags().StringVar(&nvdSince, "nvd-since", "", "bound the initial NVD CVE window by lastModified (YYYY-MM-DD); empty = full history")
+	update.Flags().BoolVar(&nvdFull, "nvd-full", false, "force a full NVD re-population instead of an incremental update")
+	update.Flags().StringVar(&nvdAPIKey, "nvd-api-key", "", "NVD API key (also read from CLANKER_GUARD_NVD_API_KEY / NVD_API_KEY; never logged)")
+	update.Flags().IntVar(&nvdMaxPages, "nvd-max-pages", 0, "safety valve: stop after N pages (0 = unlimited; a partial sync is recorded as failed)")
 	common.register(update)
 
 	status := &cobra.Command{

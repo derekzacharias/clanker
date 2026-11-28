@@ -41,6 +41,12 @@ export interface Overview {
     actionable: number;
     needs_investigation: number;
     total: number;
+    /** Application-vulnerability split, separate from OS findings. */
+    app_findings: number;
+    app_actionable: number;
+    app_kev: number;
+    os_findings: number;
+    os_actionable: number;
   };
   severity: CountRow[];
   priority: Vulnerability[];
@@ -50,6 +56,14 @@ export interface Overview {
     failed_recent: number;
     stale_after_days: number;
     last_scan_at?: string;
+  };
+  /** Aggregated application-assessment coverage (absent when no host carries it). */
+  apps?: {
+    apps_discovered: number;
+    apps_evaluated: number;
+    apps_unmapped: number;
+    apps_with_findings: number;
+    nvd_missing: number;
   };
   activity: ActivityRow[];
   feeds: FeedStatus[];
@@ -153,6 +167,8 @@ export interface Vulnerability {
   confidence_reduction?: string[];
   risk_factors?: RiskFactor[];
   references?: Link[];
+  /** Inventory identity (name@version) the finding was correlated from. */
+  package_ref?: string;
   analyst?: AnalystState;
   effective_affected?: Applicability;
 }
@@ -347,6 +363,8 @@ export interface VulnList {
     severity: CountRow[];
     applicability: CountRow[];
     assets: CountRow[];
+    /** os | application | service */
+    category: CountRow[];
     kev: number;
     fix_available: number;
   };
@@ -389,6 +407,15 @@ export interface PackageRow {
   arch?: string;
   purl?: string;
   patch_status?: string;
+  /** Desktop-application inventory fields (Windows registry / MSI / winget). */
+  publisher?: string;
+  install_date?: string;
+  scope?: string;
+  product_id?: string;
+  pkg_manager_id?: string;
+  location?: string;
+  evidence_sources?: string[];
+  needs_privileges?: boolean;
 }
 
 export interface AssetDetail {
@@ -430,6 +457,24 @@ export interface Coverage {
   sources_used: string[];
   not_covered?: string[];
   limitations?: string[];
+  // Positive coverage statements ("no missing security updates"), never warnings.
+  notes?: string[];
+  /** Application-assessment coverage; absent when the app engine did not run. */
+  apps?: {
+    discovered: number;
+    normalized: number;
+    mapped: number;
+    evaluated: number;
+    skipped: number;
+    unrecognized?: string[];
+    candidate_cves: number;
+    confirmed_matches: number;
+    potential_matches: number;
+    excluded_cves: number;
+    errors: number;
+    intel_freshness?: string;
+    duration_millis: number;
+  };
 }
 
 export interface RunSummary {
@@ -771,6 +816,8 @@ export const api = {
     q?: string;
     severity?: string;
     applicability?: string;
+    /** os | application | service */
+    category?: string;
     kev?: boolean;
     fix?: string;
     asset?: string;

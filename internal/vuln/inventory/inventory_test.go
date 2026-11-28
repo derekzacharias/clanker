@@ -123,8 +123,35 @@ func TestParseBrewAndWindows(t *testing.T) {
 	}
 	wraw, _ := os.ReadFile(filepath.Join("testdata", "windows_inventory.json"))
 	win := parseWindowsInventory(wraw)
-	if len(win) != 2 || win[1].Name != "7-Zip" || win[1].Version != "23.01" {
+	if len(win) != 6 {
 		t.Fatalf("unexpected windows parse: %+v", win)
+	}
+	sevenZip := win[1]
+	if sevenZip.Name != "7-Zip 23.01" || sevenZip.Version != "23.01" ||
+		sevenZip.Scope != "machine" || sevenZip.Arch != "x64" ||
+		sevenZip.Publisher != "Igor Pavlov" || sevenZip.InstallDate != "20240201" {
+		t.Fatalf("unexpected windows record: %+v", sevenZip)
+	}
+	if len(sevenZip.EvidenceSources) != 1 || sevenZip.EvidenceSources[0] != "registry/machine/x64" {
+		t.Fatalf("evidence source: %+v", sevenZip.EvidenceSources)
+	}
+	if win[4].Manager != "file-version" || win[3].Manager != "office-click-to-run" {
+		t.Fatalf("manager mapping: %+v", win)
+	}
+	// The registry + MSI + winget duplicates of the same application must
+	// collapse to one record while keeping every origin as evidence.
+	deduped := Dedupe(win)
+	sevenZipCount := 0
+	for _, p := range deduped {
+		if p.Name == "7-Zip 23.01" {
+			sevenZipCount++
+			if len(p.EvidenceSources) != 2 {
+				t.Fatalf("dedupe must preserve every source: %+v", p.EvidenceSources)
+			}
+		}
+	}
+	if sevenZipCount != 1 {
+		t.Fatalf("same (name, version) from registry and MSI must dedupe to one record, got %d", sevenZipCount)
 	}
 	// single-object output (one installed app) must parse too
 	single := parseWindowsInventory([]byte(`{"name":"Solo","version":"1.0","publisher":"x"}`))

@@ -291,6 +291,17 @@ export default function Overview() {
         </Banner>
       ) : null}
 
+      {data.apps && data.apps.nvd_missing > 0 ? (
+        <Banner tone="warn" title="Installed applications are not being assessed">
+          {data.apps.nvd_missing === 1
+            ? "One asset has installed applications that were inventoried but not evaluated"
+            : `${data.apps.nvd_missing} assets have installed applications that were inventoried but not evaluated`}{" "}
+          because the NVD dataset has never been synchronized. Zero application findings means &ldquo;not
+          assessed&rdquo;, not &ldquo;patched&rdquo;. Run <span className="mono">clanker-guard-agent feeds update --with-nvd</span>{" "}
+          on the server to close this gap.
+        </Banner>
+      ) : null}
+
       {data.metrics.needs_investigation > 0 ? (
         <Banner
           tone="info"
@@ -432,8 +443,7 @@ export default function Overview() {
           <Collapsible
             title="Coverage and limitations"
             summary={`${data.coverage.assessed} assessed · ${data.coverage.stale} stale · ${limitations.length} limits`}
-          >
-            <dl className="space-y-1.5 text-sm">
+          >            <dl className="space-y-1.5 text-sm">
               <Row label="Assets assessed" value={String(data.coverage.assessed)} />
               <Row label={`Not scanned in ${data.coverage.stale_after_days} days`} value={String(data.coverage.stale)} />
               <Row label="Failed assessments (24 h)" value={String(data.coverage.failed_recent)} />
@@ -461,6 +471,35 @@ export default function Overview() {
           </Collapsible>
         </Card>
       </div>
+
+      {data.apps ? (
+        <Card className="p-4">
+          <p className="mb-3 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+            Application assessment
+            <InfoTooltip label="About application assessment">
+              Installed desktop applications (browsers, Office, runtimes, third-party software) are
+              correlated against the local NVD CVE dataset. Coverage is the proportion of discovered
+              applications that were successfully evaluated: an application without a vulnerability
+              mapping stays visible as a gap — it is never counted as secure.
+            </InfoTooltip>
+          </p>
+          <dl className="space-y-1.5 text-sm">
+            <Row label="Applications discovered" value={String(data.apps.apps_discovered)} />
+            <Row label="Applications evaluated" value={String(data.apps.apps_evaluated)} />
+            <Row label="Applications without a mapping" value={String(data.apps.apps_unmapped)} />
+            <Row label="Applications with vulnerabilities" value={String(data.apps.apps_with_findings)} />
+            <Row label="Application findings" value={`${data.metrics.app_findings} (${data.metrics.os_findings} OS)`} />
+            <Row label="Application findings in KEV" value={String(data.metrics.app_kev)} />
+          </dl>
+          <p className="mt-3 text-xs text-subtle">
+            Operating-system findings (distribution advisories and Windows servicing) are counted
+            separately so a patched OS never hides vulnerable applications.{" "}
+            <Link to="/vulnerabilities?category=application" className="text-accent underline underline-offset-2">
+              Open application findings
+            </Link>
+          </p>
+        </Card>
+      ) : null}
     </div>
   );
 }

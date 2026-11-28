@@ -415,20 +415,21 @@ func TestOwnershipValidation(t *testing.T) {
 // never fires, which is worse than not having it: an operator reading DefaultTeams
 // would believe accepted risks route to Security and source findings to Development.
 func TestDefaultTeamsAreAllReachable(t *testing.T) {
-	producible := map[string]string{
-		"os_package":      "Ubuntu 22.04",
-		"app_dependency":  "PyPI",
-		"container_image": "container-image",
-		"cloud_config":    "terraform",
-		"infrastructure":  "firmware",
+	producible := map[string]model.Finding{
+		"os_package":          {Ecosystem: "Ubuntu 22.04", VulnerabilityID: "CVE-2026-1"},
+		"app_dependency":      {Ecosystem: "PyPI", VulnerabilityID: "CVE-2026-1"},
+		"desktop_application": {Ecosystem: "Windows", Source: "NVD", VulnerabilityID: "CVE-2026-1"},
+		"container_image":     {Ecosystem: "container-image", VulnerabilityID: "CVE-2026-1"},
+		"cloud_config":        {Ecosystem: "terraform", VulnerabilityID: "CVE-2026-1"},
+		"infrastructure":      {Ecosystem: "firmware", VulnerabilityID: "CVE-2026-1"},
 	}
-	for _, category := range []string{"os_package", "app_dependency", "container_image", "cloud_config", "infrastructure"} {
-		eco, ok := producible[category]
+	for _, category := range []string{"os_package", "app_dependency", "desktop_application", "container_image", "cloud_config", "infrastructure"} {
+		f, ok := producible[category]
 		if !ok {
 			t.Fatalf("category %q is in the routing model with no sample ecosystem to prove it", category)
 		}
-		if got := Category(model.Finding{Ecosystem: eco, VulnerabilityID: "CVE-2026-1"}); got != category {
-			t.Fatalf("Category(%q) = %q, want %q", eco, got, category)
+		if got := Category(f); got != category {
+			t.Fatalf("Category(%+v) = %q, want %q", f, got, category)
 		}
 		if _, ok := DefaultTeams[category]; !ok {
 			t.Fatalf("Classifiable category %q has no team in DefaultTeams", category)
@@ -598,6 +599,112 @@ func TestGroupsFoldFindingsIntoOneRemediationUnit(t *testing.T) {
 		t.Fatalf("group severity = %q, want critical", openssl.Severity)
 	}
 	_ = clock
+}
+
+// Desktop applications group into ONE remediation unit even when each CVE
+// names a different fixed version: the remedy is the same action (upgrade the
+// application to the newest vendor-supported version), so it must be one
+// ticket, not one per CVE.
+func TestDesktopApplicationFindingsFoldIntoOneUpgrade(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	rep := model.Report{
+		ReportID: "SCAN-APP-1",
+		Metadata: model.ScanMetadata{Host: "win01", Mode: "local"},
+		Findings: []model.Finding{
+			{Ecosystem: "Windows", Source: "NVD", Product: "google/chrome", InstalledVersion: "120.0.6099.109",
+				VulnerabilityID: "CVE-2024-0519", Severity: "high", FixedVersion: "120.0.6099.224"},
+			{Ecosystem: "Windows", Source: "NVD", Product: "google/chrome", InstalledVersion: "120.0.6099.109",
+				VulnerabilityID: "CVE-2024-4671", Severity: "critical", FixedVersion: "124.0.6367.201"},
+			{Ecosystem: "Windows", Source: "NVD", Product: "mozilla/firefox", InstalledVersion: "123.0",
+				VulnerabilityID: "CVE-2024-1546", Severity: "medium", FixedVersion: "124.0"},
+		},
+	}
+	if _, _, _, err := st.Reconcile(rep, DefaultPolicy()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	groups, err := st.Groups(ctx, DefaultPolicy())
+	if err != nil {
+		t.Fatalf("Groups: %v", err)
+	}
+	// Two applications: two remediation units, not three CVE-sized tickets.
+	if len(groups) != 2 {
+		t.Fatalf("groups = %d, want 2: %+v", len(groups), groups)
+	}
+	for _, g := range groups {
+		switch g.Product {
+		case "google/chrome":
+			if g.Items != 2 || len(g.Advisories) != 2 {
+				t.Fatalf("chrome group = %+v", g)
+			}
+			// The highest fixed version wins: upgrading once satisfies both.
+			if g.FixedVersion != "124.0.6367.201" {
+				t.Fatalf("chrome group fixed version = %q, want the highest (124.0.6367.201)", g.FixedVersion)
+			}
+			if g.Severity != "critical" {
+				t.Fatalf("chrome group severity = %q, want critical", g.Severity)
+			}
+		case "mozilla/firefox":
+			if g.Items != 1 {
+				t.Fatalf("firefox group = %+v", g)
+			}
+		default:
+			t.Fatalf("unexpected group %+v", g)
+		}
+	}
+}
+
+// The full application lifecycle: detected → fixed → rescan → resolved, and a
+// reappearing vulnerability reopens the item instead of staying resolved.
+func TestDesktopApplicationLifecycle(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := context.Background()
+	finding := model.Finding{
+		Ecosystem: "Windows", Source: "NVD", Product: "google/chrome", InstalledVersion: "120.0.6099.109",
+		VulnerabilityID: "CVE-2024-0519", Severity: "high", FixedVersion: "120.0.6099.224",
+	}
+	rep1 := model.Report{ReportID: "S1", Metadata: model.ScanMetadata{Host: "win01"}, Findings: []model.Finding{finding}}
+	if _, _, _, err := st.Reconcile(rep1, DefaultPolicy()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	items, err := st.List(ctx, Filter{}, DefaultPolicy())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items: %d %v", len(items), err)
+	}
+	// The application is upgraded: the next report no longer contains the
+	// finding, so reconciliation marks it resolved — verified by the rescan.
+	resolved, err := st.ReconcileAbsences(ctx, "S2", []string{"win01"}, DefaultPolicy())
+	if err != nil {
+		t.Fatalf("ReconcileAbsences: %v", err)
+	}
+	if len(resolved) != 1 || resolved[0].State != StatePendingVerification {
+		t.Fatalf("upgrade + rescan must move the item to pending verification: %+v", resolved)
+	}
+	// The operator independently verifies the fix against the rescan report.
+	verified, err := st.MarkVerified(ctx, resolved[0].ID, "S2")
+	if err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	if verified.State != StateResolved || verified.VerifiedReport != "S2" {
+		t.Fatalf("resolution must carry the verifying report: %+v", verified)
+	}
+	// Reappearance: a later scan reports it again (rollback, another install).
+	var reopens int
+	if _, _, n, err := st.Reconcile(rep1, DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	} else {
+		reopens = n
+	}
+	if reopens != 1 {
+		t.Fatalf("reappearing vulnerability must reopen the item, reopened=%d", reopens)
+	}
+	items, _ = st.List(ctx, Filter{}, DefaultPolicy())
+	if items[0].State != StateDetected {
+		t.Fatalf("state after reappearance = %s, want detected", items[0].State)
+	}
+	if !strings.Contains(items[0].Notes, "reopened") {
+		t.Fatalf("reopen must preserve history in notes: %+v", items[0])
+	}
 }
 
 // Business criticality changes how soon work is picked up, never what the severity says.
