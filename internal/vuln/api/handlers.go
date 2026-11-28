@@ -17,6 +17,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
+	"github.com/bgdnvk/clanker/internal/vuln/nvd"
 	"github.com/bgdnvk/clanker/internal/vuln/remediate"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
 	"github.com/bgdnvk/clanker/internal/vuln/sbom"
@@ -1182,10 +1183,27 @@ func (s *Server) handleFeedUpdate(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer cancel()
 		defer s.jobs.forget(id)
-		_ = s.store.UpdateJobProgress(context.Background(), id, "feeds", "downloading CISA KEV", 20)
 		bg := context.Background()
-		if _, err := scan.UpdateFeeds(bg, s.opts.CachePath, false, os.Stderr); err != nil {
+		// Serialise against the scheduled sync so the NVD rate limit is
+		// never double-spent.
+		s.syncMu.Lock()
+		defer s.syncMu.Unlock()
+		_ = s.store.UpdateJobProgress(bg, id, "feeds", "downloading CISA KEV", 20)
+		if _, err := feedSyncFunc(bg, s.opts.CachePath, false, os.Stderr); err != nil {
 			_ = s.store.FinishJob(bg, id, intel.JobFailed, "", err.Error())
+			return
+		}
+		_ = s.store.UpdateJobProgress(bg, id, "feeds", "synchronizing the NVD CVE dataset", 60)
+		if err := nvdSyncFunc(bg, s.opts.CachePath, nvd.SyncOptions{
+			APIKey: s.nvdAPIKey(),
+			Progress: func(stage, detail string) {
+				_ = s.store.UpdateJobProgress(bg, id, stage, detail, 80)
+			},
+			Log: s.log,
+		}, os.Stderr); err != nil {
+			// KEV/EPSS landed; the job must say which source failed rather
+			// than pretending everything succeeded.
+			_ = s.store.FinishJob(bg, id, intel.JobFailed, "", "NVD: "+err.Error())
 			return
 		}
 		_ = s.store.UpdateJobProgress(bg, id, "feeds", "cache updated", 90)

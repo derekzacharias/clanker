@@ -89,6 +89,9 @@ type Server struct {
 	improve *improve.Engine
 	jobs    *jobManager
 	mux     *http.ServeMux
+	// syncMu serialises scheduled and manual intelligence syncs so two runs
+	// never double-spend the NVD rate limit.
+	syncMu  sync.Mutex
 	log     *slog.Logger
 	started time.Time
 	auth    *auth.Store
@@ -214,6 +217,9 @@ func New(opts Options) (*Server, error) {
 	// Expired exceptions, retention and the notification digest: the jobs that must not
 	// depend on somebody remembering to click something.
 	s.startMaintenance()
+	// Vulnerability intelligence refreshes itself on a schedule; the same jobs nobody
+	// remembers to run by hand.
+	s.startIntelligenceSync()
 	return s, nil
 }
 

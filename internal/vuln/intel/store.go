@@ -487,10 +487,16 @@ type SyncInfo struct {
 
 // RecordSync stores sync metadata for a source.
 func (s *Store) RecordSync(ctx context.Context, source string, records int, detail string) error {
+	return s.RecordSyncAt(ctx, source, records, detail, time.Now().UTC())
+}
+
+// RecordSyncAt stores sync metadata with an explicit timestamp (tests and
+// migration backfills).
+func (s *Store) RecordSyncAt(ctx context.Context, source string, records int, detail string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sync_state (source, last_sync, records, detail)
 		VALUES (?,?,?,?) ON CONFLICT(source) DO UPDATE SET
 		last_sync=excluded.last_sync, records=excluded.records, detail=excluded.detail`,
-		source, time.Now().UTC().Format(time.RFC3339), records, detail)
+		source, at.UTC().Format(time.RFC3339), records, detail)
 	return err
 }
 
