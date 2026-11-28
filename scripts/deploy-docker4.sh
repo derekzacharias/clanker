@@ -11,6 +11,7 @@
 # Options:
 #   --version V            version reported by /api/health (default: current git describe-ish)
 #   --host H               target host (default: docker4.test.intra)
+#   --nvd-api-key KEY      NVD API key passed to the container (raises the sync rate limit)
 #   --release-base URL     agent installer base URL advertised in the dashboard. When omitted,
 #                          the value the running container already uses is reused; if there is
 #                          none, the deploy refuses instead of silently hiding the install
@@ -33,6 +34,7 @@ RELEASE_BASE="${CLANKER_GUARD_RELEASE_BASE:-}"
 ALLOW_NO_RELEASE_BASE=0
 TRUSTED_PROXIES="${CLANKER_GUARD_TRUSTED_PROXIES:-}"
 PUBLIC_URL="${CLANKER_GUARD_PUBLIC_URL:-}"
+NVD_API_KEY="${CLANKER_GUARD_NVD_API_KEY:-}"
 LISTEN="0.0.0.0:8787"
 PORT="8787"
 RUN_TESTS=1
@@ -46,6 +48,7 @@ while [ $# -gt 0 ]; do
     --host) HOST="${2:?}"; shift 2 ;;
     --release-base) RELEASE_BASE="${2:?}"; shift 2 ;;
     --no-release-base) ALLOW_NO_RELEASE_BASE=1; shift ;;
+    --nvd-api-key) NVD_API_KEY="${2:?}"; shift 2 ;;
     --trusted-proxies) TRUSTED_PROXIES="${2:?}"; shift 2 ;;
     --public-url) PUBLIC_URL="${2:?}"; shift 2 ;;
     --listen) LISTEN="${2:?}"; shift 2 ;;
@@ -161,6 +164,7 @@ log "build image and restart container on $HOST"
 RUN_ARGS="-d --name $CONTAINER --restart unless-stopped --user 1000:1000 -p $PORT:8787 -v $DATA_DIR:/data -v $CONFIG_DIR:/config"
 [ -n "$RELEASE_BASE" ] && RUN_ARGS="$RUN_ARGS -e CLANKER_GUARD_RELEASE_BASE=$RELEASE_BASE"
 [ -n "$TRUSTED_PROXIES" ] && RUN_ARGS="$RUN_ARGS -e CLANKER_GUARD_TRUSTED_PROXIES=$TRUSTED_PROXIES"
+[ -n "$NVD_API_KEY" ] && RUN_ARGS="$RUN_ARGS -e CLANKER_GUARD_NVD_API_KEY=$NVD_API_KEY"
 # The container has no writable home; feature state (AI settings, automation, audit) lives beside
 # the auth and integration files on the mounted config volume, so it survives a restart.
 RUN_ARGS="$RUN_ARGS -e CLANKER_GUARD_CONFIG_DIR=/config -e HOME=/tmp"
