@@ -17,7 +17,6 @@ import (
 	"github.com/bgdnvk/clanker/internal/vuln/fleet"
 	"github.com/bgdnvk/clanker/internal/vuln/intel"
 	"github.com/bgdnvk/clanker/internal/vuln/model"
-	"github.com/bgdnvk/clanker/internal/vuln/nvd"
 	"github.com/bgdnvk/clanker/internal/vuln/remediate"
 	"github.com/bgdnvk/clanker/internal/vuln/report"
 	"github.com/bgdnvk/clanker/internal/vuln/sbom"
@@ -1186,27 +1185,27 @@ func (s *Server) handleFeedUpdate(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		defer s.jobs.forget(id)
 		bg := context.Background()
-		// Serialise against the scheduled sync so the NVD rate limit is
-		// never double-spent.
-		s.syncMu.Lock()
-		defer s.syncMu.Unlock()
-		_ = s.store.UpdateJobProgress(bg, id, "feeds", "downloading CISA KEV", 20)
-		if _, err := feedSyncFunc(bg, s.opts.CachePath, false, os.Stderr); err != nil {
-			_ = s.store.FinishJob(bg, id, intel.JobFailed, "", err.Error())
-			return
-		}
-		_ = s.store.UpdateJobProgress(bg, id, "feeds", "synchronizing the NVD CVE dataset", 60)
-		if err := nvdSyncFunc(bg, s.opts.CachePath, nvd.SyncOptions{
-			APIKey: s.nvdAPIKey(),
-			Progress: func(stage, detail string) {
-				_ = s.store.UpdateJobProgress(bg, id, stage, detail, 80)
-			},
-			Log: s.log,
-		}, os.Stderr); err != nil {
-			// KEV/EPSS landed; the job must say which source failed rather
-			// than pretending everything succeeded.
-			_ = s.store.FinishJob(bg, id, intel.JobFailed, "", "NVD: "+err.Error())
-			return
+		// Each source runs through the registry (duplicate prevention,
+		// progress reporting, history). Sequential: the NVD rate limit is
+		// shared and a KEV failure must not block the rest.
+		for i, src := range []string{"kev", "epss", "nvd", "msrc"} {
+			_ = s.store.UpdateJobProgress(bg, id, "feeds", "synchronizing "+src, 15+i*20)
+			if _, busy := s.registry.get(src); busy {
+				continue // already running (scheduled); its own history row tells the story
+			}
+			if _, _, err := s.syncOneSource(bg, src, "manual", s.actorName(r)); err != nil {
+				_ = s.store.FinishJob(bg, id, intel.JobFailed, "", src+": "+err.Error())
+				return
+			}
+			// Wait for this source to finish before starting the next, so a
+			// single job row reflects the whole sequence.
+			deadline := s.opts.Now().Add(6 * time.Hour)
+			for s.opts.Now().Before(deadline) {
+				if _, busy := s.registry.get(src); !busy {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
 		_ = s.store.UpdateJobProgress(bg, id, "feeds", "cache updated", 90)
 		_ = s.store.FinishJob(bg, id, intel.JobDone, "", "")

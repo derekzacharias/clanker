@@ -27,6 +27,10 @@ func requiredPermission(r *http.Request) auth.Permission {
 		return auth.PermAdmin
 	case strings.HasPrefix(path, "/api/maintenance/"):
 		return auth.PermAdmin
+	case strings.HasPrefix(path, "/api/intel/sync"):
+		// Starting or cancelling intelligence synchronization changes the
+		// assessment substrate; read-only users see the status only.
+		return auth.PermAdmin
 	case path == "/api/agents/enroll-token" || strings.HasPrefix(path, "/api/agents/enroll-token/"):
 		// Minting an enrollment token creates a credential for a new machine.
 		return auth.PermAdmin

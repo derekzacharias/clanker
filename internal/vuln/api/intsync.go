@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/vuln/msrc"
 	"github.com/bgdnvk/clanker/internal/vuln/nvd"
 	"github.com/bgdnvk/clanker/internal/vuln/scan"
 )
@@ -28,10 +29,11 @@ import (
 // A mutex serialises it against the dashboard's "sync now" job so two syncs
 // can never double-spend the NVD rate limit.
 
-// feedSyncFunc and nvdSyncFunc are injectable for tests.
+// feedSyncFunc, nvdSyncFunc and msrcSyncFunc are injectable for tests.
 var (
 	feedSyncFunc = scan.UpdateFeeds
 	nvdSyncFunc  = scan.SyncNVD
+	msrcSyncFunc = msrc.Sync
 )
 
 // startIntelligenceSync launches the scheduled sync loop.
@@ -83,27 +85,45 @@ func (s *Server) runIntelligenceSync(ctx context.Context) {
 		return true // never synced
 	}
 
-	// KEV + EPSS share one fetcher and one failure record.
-	if due("KEV", 24*time.Hour) || due("EPSS", 24*time.Hour) {
-		if _, err := feedSyncFunc(ctx, s.opts.CachePath, false, os.Stderr); err != nil {
-			s.log.Warn("scheduled KEV/EPSS sync failed", "err", err)
-		}
+	// Every source routes through the registry so the dashboard sees the
+	// same state the scheduler does, and duplicate jobs cannot exist.
+	if due("KEV", 24*time.Hour) {
+		s.runScheduledSync(ctx, "kev")
 	}
+	if due("EPSS", 24*time.Hour) {
+		s.runScheduledSync(ctx, "epss")
+	}
+	if s.nvdDue(ctx, now) {
+		s.runScheduledSync(ctx, "nvd")
+	}
+	if s.msrcDue(ctx, now) {
+		s.runScheduledSync(ctx, "msrc")
+	}
+}
 
-	if !s.nvdDue(ctx, now) {
+// runScheduledSync starts one source's sync unless one is already running.
+func (s *Server) runScheduledSync(ctx context.Context, source string) {
+	if _, busy := s.registry.get(source); busy {
 		return
 	}
-	s.log.Info("scheduled NVD sync starting")
-	opts := nvd.SyncOptions{
-		APIKey: s.nvdAPIKey(),
-		Progress: func(stage, detail string) {
-			s.log.Debug("nvd sync", "stage", stage, "detail", detail)
-		},
-		Log: s.log,
+	s.log.Info("scheduled intelligence sync starting", "source", source)
+	_, _, err := s.syncOneSource(ctx, source, "scheduled", "system")
+	if err != nil {
+		s.log.Warn("scheduled sync did not start", "source", source, "err", err)
 	}
-	if err := nvdSyncFunc(ctx, s.opts.CachePath, opts, os.Stderr); err != nil {
-		s.log.Warn("scheduled NVD sync failed", "err", err)
+}
+
+// msrcDue reports whether Microsoft advisories need their scheduled refresh.
+// Scans also import them on demand when stale, so the threshold mirrors that.
+func (s *Server) msrcDue(ctx context.Context, now time.Time) bool {
+	if err := msrc.EnsureSchema(s.store.DB()); err != nil {
+		return false
 	}
+	last, ok := msrc.LastSync(s.store.DB())
+	if !ok {
+		return true // never imported
+	}
+	return now.Sub(last.SyncedAt) > 24*time.Hour
 }
 
 // nvdDue reports whether the NVD dataset needs its scheduled refresh. The

@@ -536,6 +536,75 @@ export interface ReportDoc {
   };
 }
 
+export type IntelSyncStatus =
+  | "not_initialized"
+  | "queued"
+  | "connecting"
+  | "downloading"
+  | "validating"
+  | "processing"
+  | "importing"
+  | "indexing"
+  | "finalizing"
+  | "up_to_date"
+  | "stale"
+  | "failed"
+  | "cancelled"
+  | "disabled";
+
+export interface IntelSyncSource {
+  source: string;
+  name: string;
+  description: string;
+  depends_on: string;
+  status: IntelSyncStatus;
+  stage?: string;
+  percent: number; // -1 = unknown
+  bytes: number;
+  expected_bytes: number;
+  records: number;
+  expected_records: number;
+  job_id?: string;
+  trigger?: string;
+  actor?: string;
+  started_at?: string;
+  updated_at?: string;
+  last_attempt?: string;
+  last_success?: string;
+  last_error?: string;
+  freshness: string; // current | approaching | stale | never | n_a
+  dataset_records: number;
+  dataset_available: boolean;
+  next_scheduled?: string;
+}
+
+export interface IntelSyncView {
+  sources: IntelSyncSource[];
+  running: number;
+  up_to_date: number;
+  stale: number;
+  failed: number;
+  never_synced: number;
+  readiness: { ready: boolean; notes: string[] };
+  updated_at: string;
+}
+
+export interface IntelSyncHistoryRow {
+  seq: number;
+  source: string;
+  status: string;
+  mode: string;
+  started_at: string;
+  finished_at: string;
+  total_seen: number;
+  imported: number;
+  updated: number;
+  failed: number;
+  detail: string;
+  trigger: string;
+  actor: string;
+}
+
 export interface FeedResponse {
   feeds: FeedStatus[];
   counts: { advisories: number; kev: number; epss: number };
@@ -852,6 +921,15 @@ export const api = {
   exportUrl: (id: string, format: "json" | "markdown" | "sarif" | "html") =>
     `/api/reports/${encodeURIComponent(id)}/export?format=${format}`,
   feeds: () => request<FeedResponse>("/api/feeds"),
+  intelSync: () => request<IntelSyncView>("/api/intel/sync"),
+  intelSyncHistory: (params: { source?: string; outcome?: string; limit?: number }) =>
+    request<{ items: IntelSyncHistoryRow[]; total: number }>(`/api/intel/sync/history${qs(params)}`),
+  intelSyncStart: (source: string) =>
+    request<{ job_id: string; source: string; accepted: boolean }>(`/api/intel/sync/${encodeURIComponent(source)}`, {
+      method: "POST",
+    }),
+  intelSyncCancel: (source: string) =>
+    request<{ cancelled: boolean }>(`/api/intel/sync/${encodeURIComponent(source)}/cancel`, { method: "POST" }),
   nvdKey: (apiKey: string) =>
     request<{ configured: boolean }>("/api/settings/nvd-key", {
       method: "PUT",

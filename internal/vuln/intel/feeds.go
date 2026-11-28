@@ -25,6 +25,8 @@ type Fetcher struct {
 	HTTP    *http.Client
 	KEVURL  string
 	EPSSURL string
+	// OnProgress receives transfer progress with real byte counts (nil-safe).
+	OnProgress func(stage string, bytes int64)
 }
 
 // NewFetcher returns a fetcher with production endpoints.
@@ -42,7 +44,7 @@ func (f *Fetcher) FetchKEV(ctx context.Context) ([]KEVEntry, error) {
 	if url == "" {
 		url = DefaultKEVURL
 	}
-	body, err := f.get(ctx, url)
+	body, err := f.get(ctx, url, "KEV")
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +115,10 @@ func (f *Fetcher) FetchEPSS(ctx context.Context) ([]EPSSEntry, error) {
 	}
 	defer gz.Close()
 
-	r := csv.NewReader(io.LimitReader(gz, 512<<20))
+	// Bytes here are the decompressed stream the parser actually consumed —
+	// real transfer progress, not an estimate.
+	counter := &countingReader{r: gz}
+	r := csv.NewReader(io.LimitReader(counter, 512<<20))
 	r.FieldsPerRecord = -1
 	var model, scoreDate string
 	out := make([]EPSSEntry, 0, 300000)
@@ -158,6 +163,12 @@ func (f *Fetcher) FetchEPSS(ctx context.Context) ([]EPSSEntry, error) {
 			continue
 		}
 		out = append(out, EPSSEntry{CVE: cve, Score: score, Percentile: pct, Model: model, ScoreDate: scoreDate})
+		if f.OnProgress != nil && len(out)%100000 == 0 {
+			f.OnProgress("EPSS", counter.n)
+		}
+	}
+	if f.OnProgress != nil {
+		f.OnProgress("EPSS", counter.n)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("EPSS feed contained no parsable rows")
@@ -165,7 +176,7 @@ func (f *Fetcher) FetchEPSS(ctx context.Context) ([]EPSSEntry, error) {
 	return out, nil
 }
 
-func (f *Fetcher) get(ctx context.Context, url string) ([]byte, error) {
+func (f *Fetcher) get(ctx context.Context, url, stage string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -183,5 +194,21 @@ func (f *Fetcher) get(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s returned %d", url, resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	counter := &countingReader{r: resp.Body}
+	body, err := io.ReadAll(io.LimitReader(counter, 64<<20))
+	if f.OnProgress != nil {
+		f.OnProgress(stage, counter.n)
+	}
+	return body, err
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }

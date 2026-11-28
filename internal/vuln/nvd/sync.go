@@ -37,6 +37,9 @@ type SyncOptions struct {
 	SkipDictionary bool
 	// Progress receives (stage, detail) updates; may be nil.
 	Progress func(stage, detail string)
+	// Reporter receives structured progress: real byte and record counts
+	// gathered from the transfers themselves. May be nil.
+	Reporter func(stage string, p ProgressReport)
 	// Log receives structured logs; may be nil.
 	Log *slog.Logger
 	// Now injects time (tests).
@@ -48,6 +51,15 @@ type SyncOptions struct {
 	BackoffBase time.Duration
 	// MaxRetries bounds retries per request (tests); 0 = 5 default.
 	MaxRetries int
+}
+
+// ProgressReport is one structured progress snapshot. Zero fields mean
+// "unknown": the UI renders those as indeterminate, never as a fake number.
+type ProgressReport struct {
+	Bytes           int64
+	ExpectedBytes   int64
+	Records         int
+	ExpectedRecords int
 }
 
 // SyncResult summarises one run, for admin visibility and CLI output.
@@ -169,6 +181,7 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 
 	pages := 0
 	windowTotal := 0
+	windowBytes := int64(0)
 	for wi, w := range windows {
 		if err := ctx.Err(); err != nil {
 			res.Status = "failed"
@@ -195,6 +208,7 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 			} else {
 				total, records, err = client.CVEPage(ctx, startIndex, w.start, w.end)
 			}
+			pageBody := client.LastBodyBytes
 			if err != nil {
 				res.Status = "failed"
 				res.Detail = fmt.Sprintf("window %d/%d page %d failed: %v", wi+1, len(windows), startIndex, err)
@@ -224,6 +238,13 @@ func SyncCVEs(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResult, er
 				opts.progress("nvd", fmt.Sprintf("feed grew during the full pass (%d -> %d); the next incremental run covers the delta", lastTotal, total))
 				lastTotal = total
 				windowTotal = total
+			}
+			if opts.Reporter != nil {
+				windowBytes += pageBody
+				opts.Reporter("downloading", ProgressReport{
+					Bytes: windowBytes, Records: startIndex + len(records),
+					ExpectedRecords: total,
+				})
 			}
 			imported, updated, err := store.SaveCVEs(ctx, records, opts.now())
 			if err != nil {
@@ -314,6 +335,7 @@ func SyncDictionary(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResu
 	startIndex := 0
 	pages := 0
 	lastTotal := -1
+	dictBytes := int64(0)
 	for {
 		if err := ctx.Err(); err != nil {
 			res.Status = "failed"
@@ -341,6 +363,13 @@ func SyncDictionary(ctx context.Context, db *sql.DB, opts SyncOptions) (SyncResu
 			return res, fmt.Errorf("NVD dictionary changed during sync; run again for a consistent snapshot")
 		}
 		res.TotalSeen = total
+		if opts.Reporter != nil {
+			dictBytes += client.LastBodyBytes
+			opts.Reporter("downloading", ProgressReport{
+				Bytes: dictBytes, Records: startIndex + len(entries),
+				ExpectedRecords: total,
+			})
+		}
 		imported, updated, err := store.SaveDictionary(ctx, entries)
 		if err != nil {
 			res.Status = "failed"

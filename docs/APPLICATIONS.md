@@ -311,3 +311,55 @@ the "no missing security updates" note.
   with a stale dataset flags it in the report.
 * Everything above is covered by unit, integration and negative tests
   (`go test ./internal/vuln/...`); the suite makes no network calls.
+
+---
+
+## 13. Intelligence synchronization monitoring (API contract)
+
+The dashboard's Intelligence tab shows the real state of every intelligence
+source, live. This is the contract behind it.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/intel/sync` | Unified per-source status, counts and assessment readiness (read-only users allowed) |
+| `GET /api/intel/sync/history?source=&outcome=&limit=` | Consolidated synchronization history |
+| `POST /api/intel/sync/{source}` | Start one source (kev, epss, nvd, msrc); 202 accepted, 409 if already running (admin) |
+| `POST /api/intel/sync/{source}/cancel` | Cancel a running synchronization (admin) |
+| `POST /api/feeds/update` | "Update intelligence" — runs kev, epss, nvd and msrc sequentially through the same registry |
+
+### Status contract
+
+Each source reports: source id, name, plain-English description, which
+assessment types depend on it, state, stage, progress percent (-1 = unknown),
+bytes downloaded / expected (0 = unknown), records processed / expected,
+job id, trigger (manual | scheduled) and actor, start/update/last-attempt/
+last-success timestamps (UTC), sanitized last error, freshness
+(current | approaching | stale | never | n_a), dataset record count and
+availability, and the next scheduled check.
+
+### States
+
+`not_initialized, queued, connecting, downloading, validating, processing,
+importing, indexing, finalizing, up_to_date, stale, failed, cancelled`.
+A source can be downloading while its existing dataset stays valid — activity
+and freshness are reported separately, and a failed sync never hides the last
+known dataset (it stays available, marked with its actual age).
+
+### Freshness policies
+
+KEV: current < 5 days, approaching < 7, stale ≥ 7. EPSS: current < 2 days,
+approaching < 3, stale ≥ 3. NVD: current < 14 days, approaching < 30, stale ≥
+30. MSRC: current < 12 h, approaching < 24 h, stale ≥ 24 h (scans re-import
+MSRC on demand at the same threshold). OSV: fetched per assessment; the
+server reports what is cached and never claims to mirror the dataset.
+
+### Progress
+
+All progress values come from the transfers themselves: bytes are counted
+while response bodies are read, records while pages are parsed, and
+percentages only when an expected total is known. Unknown totals render as
+indeterminate. Stalled jobs (a running history row older than 12 h) are
+reaped as failed, so a killed worker never leaves a source stuck on
+"running" — and duplicate starts are refused while a job is active.

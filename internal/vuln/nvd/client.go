@@ -52,6 +52,10 @@ type Client struct {
 	BackoffBase time.Duration
 	// Now injects time (tests).
 	Now func() time.Time
+	// LastBodyBytes is the transfer size of the most recent page response,
+	// for real download-progress reporting. The request mutex serialises
+	// fetches, so a single field is race-free.
+	LastBodyBytes int64
 
 	mu   chan struct{} // request serialisation token
 	last time.Time
@@ -171,8 +175,22 @@ func (c *Client) get(ctx context.Context, url string) (*http.Response, error) {
 	return nil, fmt.Errorf("NVD request failed after %d attempts: %w", retries+1, lastErr)
 }
 
+// countingReader reports how many body bytes were actually consumed, so
+// progress can be real instead of invented.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // page is the common envelope of every NVD API 2.0 response.
 type page struct {
+	BodyBytes       int64
 	ResultsPerPage  int               `json:"resultsPerPage"`
 	StartIndex      int               `json:"startIndex"`
 	TotalResults    int               `json:"totalResults"`
@@ -474,8 +492,10 @@ func (c *Client) fetchPage(ctx context.Context, url string, cves bool) (*page, e
 			return nil, err
 		}
 		var p page
-		dec := json.NewDecoder(io.LimitReader(resp.Body, 512<<20))
+		counter := &countingReader{r: resp.Body}
+		dec := json.NewDecoder(io.LimitReader(counter, 512<<20))
 		err = dec.Decode(&p)
+		p.BodyBytes = counter.n
 		resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("NVD response is not valid JSON: %w", err)

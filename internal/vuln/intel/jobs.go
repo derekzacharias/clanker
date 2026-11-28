@@ -66,6 +66,21 @@ func (s *Store) FinishJob(ctx context.Context, id, status, reportID, errMsg stri
 	return err
 }
 
+// FailOrphanedJobs marks every job still 'running' as failed and returns how
+// many rows it changed. Scan jobs live only in the serving process's memory,
+// so when a new process starts, any row still marked running was orphaned by
+// a crash or restart and can never progress again.
+func (s *Store) FailOrphanedJobs(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE scan_jobs SET status = ?, finished_at = ?, error = ?
+		WHERE status = ?`, JobFailed, ts(time.Now().UTC()),
+		"interrupted: server restarted before the job finished", JobRunning)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // GetJob loads one job.
 func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, kind, status, COALESCE(host,''), started_at,

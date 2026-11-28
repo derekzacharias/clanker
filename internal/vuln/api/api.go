@@ -91,12 +91,14 @@ type Server struct {
 	mux     *http.ServeMux
 	// syncMu serialises scheduled and manual intelligence syncs so two runs
 	// never double-spend the NVD rate limit.
-	syncMu  sync.Mutex
-	log     *slog.Logger
-	started time.Time
-	auth    *auth.Store
-	logins  *loginLimiter
-	fleet   *fleet.Store
+	syncMu sync.Mutex
+	// registry tracks running intelligence sync jobs for the dashboard.
+	registry *syncRegistry
+	log      *slog.Logger
+	started  time.Time
+	auth     *auth.Store
+	logins   *loginLimiter
+	fleet    *fleet.Store
 	// enrollLimiter throttles enrollment-token guessing per source address.
 	enrollLimiter *loginLimiter
 	// presence tracks agents holding an open claim request (reachability).
@@ -156,6 +158,14 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
+	// Scan jobs exist only inside this process: a row still marked 'running'
+	// when a new process starts was orphaned by a crash or restart. Mark it
+	// failed so the scans list never shows a job running forever.
+	if n, err := store.FailOrphanedJobs(context.Background()); err != nil {
+		opts.Logger.Warn("could not mark orphaned scan jobs as failed", "err", err)
+	} else if n > 0 {
+		opts.Logger.Warn("marked orphaned scan jobs as failed", "count", n)
+	}
 	improveEngine, err := improve.New(store)
 	if err != nil {
 		store.Close()
@@ -207,6 +217,8 @@ func New(opts Options) (*Server, error) {
 				"path", s.auth.Path(), "mode", mode.String())
 		}
 	}
+	s.registry = newSyncRegistry()
+	_ = intel.EnsureSyncRunSchema(store.DB())
 	s.routes()
 	// Existing deployments already hold assessments: route them into remediation work
 	// once, so the queue is not empty until the next scan. Idempotent by item id.
@@ -317,6 +329,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/settings/ai/test", s.handleAITest)
 	s.mux.HandleFunc("GET /api/settings/nvd-key", s.handleNVDKeyGet)
 	s.mux.HandleFunc("PUT /api/settings/nvd-key", s.handleNVDKeyPut)
+	s.mux.HandleFunc("GET /api/intel/sync", s.handleIntelSyncStatus)
+	s.mux.HandleFunc("GET /api/intel/sync/history", s.handleIntelSyncHistory)
+	s.mux.HandleFunc("POST /api/intel/sync/{source}", s.handleIntelSyncStart)
+	s.mux.HandleFunc("POST /api/intel/sync/{source}/cancel", s.handleIntelSyncCancel)
 	s.mux.HandleFunc("GET /api/settings/ai/models", s.handleAIModels)
 	s.mux.HandleFunc("GET /api/settings/automation", s.handleAutomationGet)
 	s.mux.HandleFunc("PUT /api/settings/automation", s.handleAutomationPut)

@@ -5,7 +5,67 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// FailOrphanedJobs must flip only jobs still marked running; a new server process
+// means every such job was orphaned by a crash or restart.
+func TestFailOrphanedJobs(t *testing.T) {
+	st, err := OpenStore(filepath.Join(t.TempDir(), "intel.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	jobs := []Job{
+		{ID: "SCAN-a", Kind: "feeds", Status: JobRunning, StartedAt: time.Now()},
+		{ID: "SCAN-b", Kind: "local", Status: JobRunning, StartedAt: time.Now()},
+		{ID: "SCAN-c", Kind: "local", Status: JobDone, StartedAt: time.Now()},
+	}
+	for _, j := range jobs {
+		if err := st.CreateJob(ctx, j); err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+	}
+
+	n, err := st.FailOrphanedJobs(ctx)
+	if err != nil {
+		t.Fatalf("FailOrphanedJobs: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("changed %d rows, want 2", n)
+	}
+	for _, id := range []string{"SCAN-a", "SCAN-b"} {
+		got, err := st.GetJob(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == nil || got.Status != JobFailed {
+			t.Fatalf("%s: status %q, want failed", id, func() string {
+				if got == nil {
+					return "<nil>"
+				}
+				return got.Status
+			}())
+		}
+		if got.FinishedAt == nil {
+			t.Fatalf("%s: no finished_at", id)
+		}
+		if got.Error == "" {
+			t.Fatalf("%s: no error message", id)
+		}
+	}
+	// Terminal rows must be untouched.
+	got, _ := st.GetJob(ctx, "SCAN-c")
+	if got == nil || got.Status != JobDone || got.FinishedAt != nil {
+		t.Fatalf("completed job was changed: %+v", got)
+	}
+	// Idempotent: nothing left to mark.
+	if n, _ := st.FailOrphanedJobs(ctx); n != 0 {
+		t.Fatalf("second sweep changed %d rows, want 0", n)
+	}
+}
 
 // The cache is a map of every host in the estate, its packages and its problems. It must
 // not be readable by another account on the same machine.

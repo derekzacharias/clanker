@@ -65,6 +65,46 @@ func TestCancelledScanStaysCancelled(t *testing.T) {
 	}
 }
 
+// TestStartupMarksOrphanedJobsFailed is the regression test for scan jobs left
+// 'running' when the server dies mid-job: the next process must mark them
+// failed so the scans list never shows a job running forever.
+func TestStartupMarksOrphanedJobsFailed(t *testing.T) {
+	srv, cachePath := newTestServer(t)
+	ctx := context.Background()
+
+	running := intel.Job{ID: "SCAN-orphan", Kind: "local", Status: intel.JobRunning, StartedAt: time.Now()}
+	if err := srv.store.CreateJob(ctx, running); err != nil {
+		t.Fatal(err)
+	}
+	finished := intel.Job{ID: "SCAN-fine", Kind: "local", Status: intel.JobDone, StartedAt: time.Now()}
+	if err := srv.store.CreateJob(ctx, finished); err != nil {
+		t.Fatal(err)
+	}
+	srv.Close()
+
+	// A new process opens the same cache and must reconcile the orphan.
+	srv2, err := New(Options{DisableBackgroundJobs: true, CachePath: cachePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv2.Close()
+
+	got, err := srv2.store.GetJob(ctx, "SCAN-orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != intel.JobFailed {
+		t.Fatalf("orphaned job was not marked failed: %+v", got)
+	}
+	if got.FinishedAt == nil {
+		t.Fatal("orphaned job has no finished_at")
+	}
+	kept, _ := srv2.store.GetJob(ctx, "SCAN-fine")
+	if kept == nil || kept.Status != intel.JobDone {
+		t.Fatalf("terminal job was changed: %+v", kept)
+	}
+}
+
 // TestFinishJobCannotReviveTerminalStates covers the store-level guard.
 func TestFinishJobCannotReviveTerminalStates(t *testing.T) {
 	_, cachePath := newTestServer(t)

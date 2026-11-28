@@ -10,6 +10,7 @@ import { AISettings } from "../components/AISettings";
 import { IssueAutomation } from "../components/IssueAutomation";
 import { AuditLog } from "../components/AuditLog";
 import { AccessPanel } from "../components/AccessPanel";
+import IntelligenceSync from "../components/IntelligenceSync";
 import { Collapsible } from "../components/ui/Collapsible";
 import { formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
@@ -213,6 +214,17 @@ function GeneralTab() {
 }
 
 function IntelligenceTab() {
+  return (
+    <div className="space-y-3">
+      <IntelligenceSync />
+      <FeedsLegacy />
+    </div>
+  );
+}
+
+// FeedsLegacy keeps the KEV/EPSS/NVD overview, cache counts and the NVD key
+// card; the live synchronization view above owns progress and controls.
+function FeedsLegacy() {
   const { data, error, loading, reload } = useAsync(() => api.feeds());
   const { push } = useToast();
   const [updating, setUpdating] = useState(false);
