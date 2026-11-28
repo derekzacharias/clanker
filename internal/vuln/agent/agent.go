@@ -48,6 +48,15 @@ type Config struct {
 	// should) reject.
 	NextSequence int64     `json:"next_sequence,omitempty"`
 	EnrolledAt   time.Time `json:"enrolled_at"`
+	// ReleaseBase is the pinned release origin self-updates download from.
+	// Empty means the built-in default. The server is never part of this
+	// path, and the agent never accepts an update it cannot verify.
+	ReleaseBase string `json:"release_base,omitempty"`
+	// AutoUpdate makes the watcher check for a signed newer release about
+	// once a day and replace itself. Opt-in, per endpoint.
+	AutoUpdate bool `json:"auto_update,omitempty"`
+	// LastUpdateCheck is when the watcher last checked the release origin.
+	LastUpdateCheck time.Time `json:"last_update_check,omitempty"`
 }
 
 // loopback reports whether the URL host is this machine.

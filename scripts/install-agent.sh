@@ -58,6 +58,7 @@ while [ $# -gt 0 ]; do
     --enroll-token) ENROLL_TOKEN="${2:?--enroll-token needs a value}"; shift 2 ;;
     --no-scan) NO_SCAN=1; shift ;;
     --watch) WATCH=1; shift ;;
+    --auto-update) AUTO_UPDATE=1; shift ;;
     --no-service) SERVICE=0; shift ;;
     --yes) shift ;;
     -h|--help)
@@ -216,7 +217,7 @@ if [ -n "$SERVER" ]; then
   echo
   echo "enrolling with ${SERVER}"
   echo "  findings and status will be sent to that server only; nothing to a third party"
-  "$BIN_DIR/clanker-guard-agent" enroll --server "$SERVER" --enroll-token "$ENROLL_TOKEN" || {
+  "$BIN_DIR/clanker-guard-agent" enroll --server "$SERVER" --enroll-token "$ENROLL_TOKEN" ${AUTO_UPDATE:+--auto-update} || {
     echo "error: enrollment failed; the agent is installed but not reporting" >&2
     exit 4
   }

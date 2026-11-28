@@ -28,6 +28,8 @@ func cmdEnroll(args []string) int {
 	allowInsecure := fs.Bool("allow-insecure-http", false,
 		"permit a plain-HTTP server URL on a non-loopback address (lab networks only; not recommended)")
 	configPath := fs.String("config", "", "config file (default: user config dir/clanker-guard/agent.json)")
+	autoUpdate := fs.Bool("auto-update", false, "check the signed release origin about once a day and replace this agent when a newer version exists")
+	releaseBase := fs.String("release-base", "", "release origin for self-updates (default: the built-in GitHub releases)")
 	if err := fs.Parse(args); err != nil {
 		return 3
 	}
@@ -74,6 +76,8 @@ func cmdEnroll(args []string) int {
 	cfg, err := client.Enroll(ctx, strings.TrimSpace(*token), hostname, osName(), version)
 	if err == nil {
 		cfg.AllowInsecureHTTP = *allowInsecure
+		cfg.AutoUpdate = *autoUpdate
+		cfg.ReleaseBase = strings.TrimSpace(*releaseBase)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())

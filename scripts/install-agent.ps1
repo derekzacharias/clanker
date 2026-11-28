@@ -8,6 +8,8 @@
 #   * The artifact is verified against its published SHA-256 before it is used.
 #   * With -Server the agent enrolls, reports only to that server, and installs a
 #     background task so the dashboard can ask it for scans (-NoService opts out).
+#   * With -AutoUpdate the agent checks the signed release origin about once a
+#     day and replaces itself when a newer verified version exists.
 #   * Uninstall with: clanker-guard-agent uninstall --yes
 
 [CmdletBinding()]
@@ -17,6 +19,7 @@ param(
     [string]$BinDir = $(if ($env:CLANKER_GUARD_BIN_DIR) { $env:CLANKER_GUARD_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "clanker-guard\bin" }),
     [string]$Server = $env:CLANKER_GUARD_SERVER,
     [string]$EnrollToken = $env:CLANKER_GUARD_ENROLL_TOKEN,
+    [switch]$AutoUpdate,
     [switch]$Scan,
     [switch]$NoScan,
     [switch]$Watch,
@@ -101,7 +104,9 @@ try {
         Write-Host ""
         Write-Host "enrolling with $Server"
         Write-Host "  findings and status will be sent to that server only; nothing to a third party"
-        & $dest enroll --server $Server --enroll-token $EnrollToken
+        $enrollArgs = @("--server", $Server, "--enroll-token", $EnrollToken)
+        if ($AutoUpdate) { $enrollArgs += "--auto-update" }
+        & $dest enroll @enrollArgs
         if ($LASTEXITCODE -ne 0) {
             throw "enrollment failed; the agent is installed but not reporting"
         }

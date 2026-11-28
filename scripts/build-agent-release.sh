@@ -33,7 +33,7 @@ for platform in "${PLATFORMS[@]}"; do
   (
     cd "$ROOT"
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-      go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+      go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X github.com/bgdnvk/clanker/internal/vuln/agent.currentVersion=${VERSION}" \
       -o "$OUT/$name" ./cmd/clanker-guard-agent
   )
   (

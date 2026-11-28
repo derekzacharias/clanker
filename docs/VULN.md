@@ -236,7 +236,7 @@ Network destinations contacted: `api.osv.dev` (scan, unless `--offline`),
 `www.cisa.gov` and `epss.cyentia.com` (`feeds update`), and — only when the agent
 was enrolled with `enroll --server` — the Clanker Guard server you named, which
 receives the finished report and the agent's status. There is no third-party
-telemetry, no remote command channel and no auto-update: the server can accept a
+telemetry and no remote command channel: the server can accept a
 report, it cannot ask the endpoint to do anything.
 
 ### Agent transport, identity and recovery
@@ -273,9 +273,14 @@ report, it cannot ask the endpoint to do anything.
   (binary, enrollment, transport, server, credential, service, cache, queue).
 - **Signed releases**: `SHA256SUMS.sig` (Ed25519) is verified by the installer
   against a pinned public key; a tampered artifact or manifest is refused.
+- **Self-update**: the agent can replace itself, but only from the pinned
+  signed release origin (Ed25519 + SHA-256 verified, atomic swap, watcher
+  restart). Opt-in per endpoint (`enroll --auto-update`); `clanker-guard-agent
+  update` works on demand. The server is never part of the update path — it
+  cannot serve or request an update, and dev builds never self-update.
 - **Still not implemented**: mTLS with per-agent certificates, OS keychain
-  credential storage (DPAPI/Keychain), centralised intelligence snapshots per
-  assessment, and self-update (`update`).
+  credential storage (DPAPI/Keychain) and centralised intelligence snapshots
+  per assessment.
 
 ### Software asset exports
 
@@ -306,7 +311,7 @@ LaunchAgent / logon task) so the endpoint stays reachable; `--no-service` opts o
 and nothing is installed beyond the binary. The installed watcher never leaves a
 terminal window behind on Windows: it is started detached, and a console it owns
 (one the logon task created) is hidden once the agent is running — a console it
-shares with a person running `watch` by hand is left alone. There is no auto-update.
+shares with a person running `watch` by hand is left alone.
 Artifacts are installed only after SHA-256 verification. Published builds live at
 `github.com/derekzacharias/clanker-guard-agent/releases`; the dashboard shows the
 matching commands when `CLANKER_GUARD_RELEASE_BASE` points at a release

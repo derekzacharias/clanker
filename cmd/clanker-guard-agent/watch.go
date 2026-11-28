@@ -61,6 +61,15 @@ func cmdWatch(args []string) int {
 	// with an operator's shell is never touched. No-op elsewhere.
 	hideOwnedConsoleWindow()
 
+	// Opt-in self-update: check the pinned release origin about once a day
+	// before doing any work. A successful update replaced this binary, so the
+	// process exits and the newly started watcher takes over.
+	if cfg.AutoUpdate {
+		if exe, err := os.Executable(); err == nil && maybeAutoUpdate(cfg, exe) {
+			return 0
+		}
+	}
+
 	ctx := context.Background()
 	backoff := time.Second
 	for {

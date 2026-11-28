@@ -57,6 +57,13 @@ func run(args []string) int {
 		return cmdService(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
+	case "update":
+		return cmdUpdate(args[1:])
+	// update-swap is the Windows updater's deferred rename step. It runs from
+	// the staged binary and is not an operator command, so it is hidden from
+	// usage.
+	case "update-swap":
+		return cmdUpdateSwap(args[1:])
 	case "uninstall":
 		return cmdUninstall(args[1:])
 	case "version", "--version", "-v":
