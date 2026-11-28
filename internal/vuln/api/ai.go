@@ -257,8 +257,11 @@ func (s *Server) handleAITest(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("could not persist the AI connection test result", "err", err)
 	}
 	if perr != nil {
+		// Both shapes so the frontend can show the reason: `error` is what the
+		// shared API client reads for its toast, `detail` is the field the
+		// settings block renders.
 		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"connected": false, "detail": perr.Error(), "settings": settings,
+			"connected": false, "detail": perr.Error(), "error": perr.Error(), "settings": settings,
 		})
 		return
 	}

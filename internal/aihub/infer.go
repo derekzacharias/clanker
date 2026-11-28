@@ -343,6 +343,7 @@ func parseAnswer(p Provider, raw []byte) (string, Usage, error) {
 
 	// OpenAI-compatible
 	var text strings.Builder
+	var finishReasons, reasoning []string
 	if choices, ok := root["choices"].([]any); ok {
 		for _, c := range choices {
 			obj, ok := c.(map[string]any)
@@ -351,14 +352,30 @@ func parseAnswer(p Provider, raw []byte) (string, Usage, error) {
 			}
 			if msg, ok := obj["message"].(map[string]any); ok {
 				text.WriteString(extractContent(msg["content"]))
+				// Reasoning families (DeepSeek, o-series) report the thinking
+				// budget separately; its presence explains an empty answer.
+				if rc := extractContent(msg["reasoning_content"]); rc != "" {
+					reasoning = append(reasoning, rc)
+				}
 			}
 			if t := firstString(obj, "text"); t != "" {
 				text.WriteString(t)
+			}
+			if fr := firstString(obj, "finish_reason"); fr != "" {
+				finishReasons = append(finishReasons, fr)
 			}
 		}
 	}
 	usage := usageFrom(root, "usage", "prompt_tokens", "completion_tokens")
 	if text.Len() == 0 {
+		switch {
+		case len(reasoning) > 0:
+			return "", usage, fmt.Errorf(
+				"%s spent its token budget on reasoning and produced no final answer; raise max_tokens", p.Label)
+		case len(finishReasons) > 0 && finishReasons[0] == "length":
+			return "", usage, fmt.Errorf(
+				"%s stopped with finish_reason=length before an answer was produced; raise max_tokens", p.Label)
+		}
 		return "", usage, fmt.Errorf("%s returned no text", p.Label)
 	}
 	return text.String(), usage, nil

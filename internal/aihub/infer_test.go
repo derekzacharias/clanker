@@ -3,6 +3,7 @@ package aihub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -154,5 +155,36 @@ func TestInferenceRequiresCredentialAndModel(t *testing.T) {
 	}
 	if _, err := inf.Complete(context.Background(), Settings{Provider: "bedrock", Model: "x"}, "key", Request{User: "x"}); err == nil {
 		t.Fatal("an unimplemented provider must fail with a clear error")
+	}
+}
+
+// A reasoning model that spends its budget on thinking and returns no final
+// content must produce a diagnosable error, not a bare "returned no text".
+func TestInferenceReasoningModelWithoutFinalAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","reasoning_content":"thinking...","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`)
+	}))
+	defer srv.Close()
+	client := &Inference{HTTP: srv.Client()}
+	cfg := Settings{Provider: "deepseek", Model: "deepseek-v4-pro", Endpoint: srv.URL}
+	_, err := client.Complete(context.Background(), cfg, "secret", Request{User: "hi", MaxTokens: 512})
+	if err == nil {
+		t.Fatal("expected an error for a reasoning-only response")
+	}
+	if !strings.Contains(err.Error(), "reasoning") {
+		t.Fatalf("error must point at the reasoning budget: %v", err)
+	}
+
+	// A provider that hit the length cap must say so too.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"length"}],"usage":{}}`)
+	}))
+	defer srv2.Close()
+	cfg.Endpoint = srv2.URL
+	_, err = client.Complete(context.Background(), cfg, "secret", Request{User: "hi", MaxTokens: 512})
+	if err == nil || !strings.Contains(err.Error(), "finish_reason=length") {
+		t.Fatalf("length-capped response must be diagnosed: %v", err)
 	}
 }

@@ -419,10 +419,14 @@ func (m *Manager) Probe(ctx context.Context, cfg Settings, secret string) (strin
 		return "", errors.New("choose a model first")
 	}
 	client := &Inference{HTTP: m.http}
+	// Reasoning models spend part of the budget on thinking before emitting
+	// the final answer; a tiny cap (8) leaves no room for the answer itself
+	// and the provider returns empty content. 512 tokens is still a trivial
+	// probe, and it lets every supported model family finish.
 	res, err := client.Complete(ctx, cfg, secret, Request{
 		System:    "You are a connectivity probe.",
 		User:      "Reply with the single word: ok",
-		MaxTokens: 8,
+		MaxTokens: 512,
 	})
 	if err != nil {
 		return "", err
